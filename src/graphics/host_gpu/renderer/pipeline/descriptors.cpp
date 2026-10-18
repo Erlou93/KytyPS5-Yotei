@@ -4606,7 +4606,14 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			for (size_t i = first; i <= last; ++i) {
 				const auto& word = words[m_gpu_word_addresses[i].second];
 				const auto  host = device + (m_gpu_word_addresses[i].first - start);
-				if (word.verify != UINT32_MAX) BufferCache::NoteGpuWordBind(host, m_gpu_word_addresses[i].first);
+				if (word.verify != UINT32_MAX) {
+					// Bits 56..: what was over the word when it was bound (1 deferred label, 2 pending CP write, 4 GPU-modified
+					// page, 8 GPU-dirty bytes).
+					const uint64_t guest = m_gpu_word_addresses[i].first;
+					uint64_t       flags = GuestGpu::PendingWriteKind(guest);
+					if (cache.IsRegionGpuModified(guest, 4u)) flags |= 4u | (cache.HasGpuDirtyBytes(guest, 4u) ? 8u : 0u);
+					BufferCache::NoteGpuWordBind(host, guest | (flags << 56u));
+				}
 				m_gpu_word_patches.emplace_back(word.slot, static_cast<uint32_t>(host));
 				m_gpu_word_patches.emplace_back(word.hi, static_cast<uint32_t>(host >> 32u));
 			}

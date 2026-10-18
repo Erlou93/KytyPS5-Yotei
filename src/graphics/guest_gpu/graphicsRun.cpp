@@ -3566,5 +3566,9 @@ bool GuestGpu::IsGpuThread() noexcept {
 	return g_gpu_thread;
 }
 
+uint32_t GuestGpu::PendingWriteKind(uint64_t /*address*/) {
+	// The deferred-label map this read is gone (the write journal replaced it); the report says 0 (unknown).
+	return 0u;
+}
 
 } // namespace Libs::Graphics

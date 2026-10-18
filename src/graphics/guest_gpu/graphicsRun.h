@@ -99,6 +99,10 @@ public:
 	                        bool* covered = nullptr);
 	// The writes of the operations not executed yet into the range are in guest memory when this returns.
 	void WaitForPendingWrites(uint64_t address, uint64_t size, bool unknown_only);
+	// KYTY_PERF_SRT_GPU_WORDS_VERIFY (diagnostic, GPU thread): a value not yet in guest memory covers the dword at
+	// `address`: 1 a deferred end-of-pipe label (KYTY_FIX_LABEL_AT_COMPLETION), 2 a command-processor write the host GPU
+	// has not run (KYTY_PERF_DIRECT_RANGES); 0 none.
+	[[nodiscard]] static uint32_t PendingWriteKind(uint64_t address);
 
 private:
 	static constexpr uint32_t ComputePipeCount     = 7;

@@ -211,9 +211,10 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 			const auto* r = tail + BufferCache::FAULT_DIAG_SRT_GPU_FIRST + n * BufferCache::FAULT_DIAG_SRT_GPU_STRIDE;
 			const uint64_t device = (uint64_t {r[6]} << 32u) | r[5];
 			std::fprintf(stderr,
-			             "PERF srt_gpu_words mismatch frame=%u hash=%08x%08x slot=%u cpu=0x%08x gpu=0x%08x guest=0x%llx\n",
+			             "PERF srt_gpu_words mismatch frame=%u hash=%08x%08x slot=%u cpu=0x%08x gpu=0x%08x guest=0x%llx flags=%llu\n",
 			             DebugPresentCount().load(), r[1], r[0], r[2], r[3], r[4],
-			             static_cast<unsigned long long>(BufferCache::GpuWordGuest(device)));
+			             static_cast<unsigned long long>(BufferCache::GpuWordGuest(device) & ((uint64_t {1} << 56u) - 1u)),
+			             static_cast<unsigned long long>(BufferCache::GpuWordGuest(device) >> 56u));
 		}
 	}
 	const uint32_t trips = tail[0], misses = tail[2];
