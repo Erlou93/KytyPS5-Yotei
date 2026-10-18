@@ -205,6 +205,16 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 			std::fprintf(stderr, "PERF srt_gpu_words verify frame=%u checks=%llu mismatches=%llu\n", DebugPresentCount().load(),
 			             static_cast<unsigned long long>(checks), static_cast<unsigned long long>(mismatches));
 		}
+		static uint32_t records_printed = 0;
+		const uint32_t  taken = std::min(tail[BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 2], BufferCache::FAULT_DIAG_SRT_GPU_RECORDS);
+		for (uint32_t n = 0; n < taken && records_printed < 64u; ++n, ++records_printed) {
+			const auto* r = tail + BufferCache::FAULT_DIAG_SRT_GPU_FIRST + n * BufferCache::FAULT_DIAG_SRT_GPU_STRIDE;
+			const uint64_t device = (uint64_t {r[6]} << 32u) | r[5];
+			std::fprintf(stderr,
+			             "PERF srt_gpu_words mismatch frame=%u hash=%08x%08x slot=%u cpu=0x%08x gpu=0x%08x guest=0x%llx\n",
+			             DebugPresentCount().load(), r[1], r[0], r[2], r[3], r[4],
+			             static_cast<unsigned long long>(BufferCache::GpuWordGuest(device)));
+		}
 	}
 	const uint32_t trips = tail[0], misses = tail[2];
 	if (FaultDiagTripsEnabled()) { // KYTY_TRACE_PERF: PERF workaround_hits watchdog_trips=<trips>/<passes>

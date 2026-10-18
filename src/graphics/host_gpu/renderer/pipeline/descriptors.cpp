@@ -4606,6 +4606,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			for (size_t i = first; i <= last; ++i) {
 				const auto& word = words[m_gpu_word_addresses[i].second];
 				const auto  host = device + (m_gpu_word_addresses[i].first - start);
+				if (word.verify != UINT32_MAX) BufferCache::NoteGpuWordBind(host, m_gpu_word_addresses[i].first);
 				m_gpu_word_patches.emplace_back(word.slot, static_cast<uint32_t>(host));
 				m_gpu_word_patches.emplace_back(word.hi, static_cast<uint32_t>(host >> 32u));
 			}

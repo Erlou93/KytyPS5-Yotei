@@ -3634,8 +3634,25 @@ static uint32_t EmitReadGpuWord(ValueEmitContext& ctx, const IR::Inst& inst, con
 	const auto cpu     = FlatSrtWord(ctx, inst, word.verify);
 	const auto differs = Binary(state, spv::OpINotEqual, TypeBool(state), value, cpu);
 	(void)FaultDiagAdd(state, BufferCache::FAULT_DIAG_SRT_GPU_WORDS, ConstantU32(state, 1));
-	(void)FaultDiagAdd(state, BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 1,
-	                   Select(state, TypeU32(state), differs, ConstantU32(state, 1), ConstantU32(state, 0)));
+	const auto one_if_differs = Select(state, TypeU32(state), differs, ConstantU32(state, 1), ConstantU32(state, 0));
+	(void)FaultDiagAdd(state, BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 1, one_if_differs);
+	// The first mismatches of a fault pass, as {shader hash low, high, slot, CPU value, GPU value, device address low,
+	// high} records; other lanes store into the spare record.
+	const auto record = FaultDiagAdd(state, BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 2, one_if_differs);
+	const auto stored = Binary(state, spv::OpLogicalAnd, TypeBool(state), differs,
+	                           Binary(state, spv::OpULessThan, TypeBool(state), record,
+	                                  ConstantU32(state, BufferCache::FAULT_DIAG_SRT_GPU_RECORDS)));
+	const auto slot = Select(state, TypeU32(state), stored, record, ConstantU32(state, BufferCache::FAULT_DIAG_SRT_GPU_RECORDS));
+	const uint32_t fields[] = {ConstantU32(state, static_cast<uint32_t>(state.program.shader_hash)),
+	                           ConstantU32(state, static_cast<uint32_t>(state.program.shader_hash >> 32u)),
+	                           ConstantU32(state, word.slot), cpu, value,
+	                           Unary(state, spv::OpUConvert, TypeU32(state), address),
+	                           Unary(state, spv::OpUConvert, TypeU32(state),
+	                                 Binary(state, spv::OpShiftRightLogical, TypeU64(state), address, ConstantU64(state, 32)))};
+	for (uint32_t field = 0; field < std::size(fields); ++field) {
+		FaultDiagStore(state, BufferCache::FAULT_DIAG_SRT_GPU_FIRST, slot, BufferCache::FAULT_DIAG_SRT_GPU_STRIDE, field,
+		               fields[field]);
+	}
 	return cpu;
 }
 
