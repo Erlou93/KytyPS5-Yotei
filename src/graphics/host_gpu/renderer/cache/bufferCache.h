@@ -309,8 +309,8 @@ public:
 	static constexpr uint32_t FAULT_DIAG_SRT_GPU_RECORDS = 5;
 	static_assert(FAULT_DIAG_SRT_GPU_FIRST + (FAULT_DIAG_SRT_GPU_RECORDS + 1) * FAULT_DIAG_SRT_GPU_STRIDE <= FAULT_DIAG_TRIP_FIRST);
 	// The guest addresses of the last GPU-word device addresses RebindBuffers bound (verify mode; any thread reads).
-	static inline std::array<std::atomic<uint64_t>, 8192> s_gpu_word_device {};
-	static inline std::array<std::atomic<uint64_t>, 8192> s_gpu_word_guest {};
+	static inline std::array<std::atomic<uint64_t>, (1u << 20u)> s_gpu_word_device {};
+	static inline std::array<std::atomic<uint64_t>, (1u << 20u)> s_gpu_word_guest {};
 	static inline std::atomic<uint32_t>                   s_gpu_word_next {0};
 	static void NoteGpuWordBind(uint64_t device, uint64_t guest) {
 		const uint32_t i = s_gpu_word_next.fetch_add(1, std::memory_order_relaxed) % s_gpu_word_device.size();
