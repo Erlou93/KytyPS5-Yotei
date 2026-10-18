@@ -252,10 +252,8 @@ void DefineDescriptors(EmitterState& state) {
 	counts[static_cast<size_t>(Kind::SharedMemory)] =
 	    info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer;
 	counts[static_cast<size_t>(Kind::BdaPagetable)] = info.uses_dma;
-	// KYTY_PERF_SRT_GPU_WORDS_VERIFY: the comparison counts go to the fault buffer's diagnostic words.
-	counts[static_cast<size_t>(Kind::FaultBuffer)] =
-	    info.uses_dma || ClampNanCheckBinding(state.program) || RtTripsCheckBinding(state.program) || // KYTY_DIAG_RT_TRIPS
-	    std::ranges::any_of(info.srt_gpu_words, [](const auto& word) { return word.verify != UINT32_MAX; });
+	counts[static_cast<size_t>(Kind::FaultBuffer)] = IR::UsesFaultBuffer(info) || ClampNanCheckBinding(state.program) ||
+	                                                 RtTripsCheckBinding(state.program); // KYTY_DIAG_RT_TRIPS, + KYTY_PERF_SRT_GPU_WORDS_VERIFY
 	// Uniform const buffers (ShaderIR.h): ReadConst reads FlattenedSrtUniform; the storage binding keeps the SRT mapping
 	// reads of GPU-selected descriptors (ValidateNativeProgram expects the same split).
 	const bool srt_uniform = info.uses_read_const && IR::ReadConstUniform(state.program.srt_reads.size());

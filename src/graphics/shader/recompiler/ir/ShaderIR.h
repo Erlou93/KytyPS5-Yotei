@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -1161,6 +1162,13 @@ struct ResourcePlan {
 	};
 	std::shared_ptr<NullFormattedLive> null_formatted_live = std::make_shared<NullFormattedLive>();
 };
+
+// The shader binds the fault buffer: BDA accesses report their faults there, and KYTY_PERF_SRT_GPU_WORDS_VERIFY counts
+// its comparisons in its diagnostic words.
+[[nodiscard]] inline bool UsesFaultBuffer(const ShaderInfo& info) {
+	return info.uses_dma ||
+	       std::ranges::any_of(info.srt_gpu_words, [](const ShaderInfo::SrtGpuWord& word) { return word.verify != UINT32_MAX; });
+}
 
 // The flat SRT words before the indirect mapping words: the slots, plus the KYTY_PERF_SRT_GPU_WORDS address and verify
 // words.
