@@ -116,6 +116,14 @@ static_assert(ShaderRecompiler::IR::BindlessCensusWord >= IndirectLoadFast::Diag
               ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords <= BufferCache::FAULT_DIAG_WORDS);
 static_assert(ShaderRecompiler::IR::WaterfallRecord0CensusWord >= ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords &&
               ShaderRecompiler::IR::WaterfallRecord0CensusWord + ShaderRecompiler::IR::WaterfallRecord0CensusWords <= BufferCache::FAULT_DIAG_WORDS);
+// KYTY_PERF_SRT_GPU_WORDS_VERIFY=1: the shaders count their GPU-read SRT words against the CPU's value in the tail.
+static bool SrtGpuWordsVerifyEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_PERF_SRT_GPU_WORDS_VERIFY");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
 
 // KYTY_DIAG_RT_TRIPS: one fault pass's copy of the diagnostic tail (layout: BufferCache::FAULT_DIAG_*).
 void FaultManager::ReportDiagTail(const uint32_t* tail) {
@@ -189,11 +197,7 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 		}
 	}
 	// KYTY_PERF_SRT_GPU_WORDS_VERIFY=1: shader-only SRT words read on the GPU against the CPU's value (mismatches must stay 0).
-	static const bool gpu_words_verify = [] {
-		const char* value = std::getenv("KYTY_PERF_SRT_GPU_WORDS_VERIFY");
-		return value != nullptr && value[0] == '1';
-	}();
-	if (gpu_words_verify) {
+	if (SrtGpuWordsVerifyEnabled()) {
 		static uint64_t checks = 0, mismatches = 0, passes = 0;
 		checks += tail[BufferCache::FAULT_DIAG_SRT_GPU_WORDS];
 		mismatches += tail[BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 1];
@@ -360,7 +364,7 @@ void FaultManager::ProcessFaultBuffer() {
 	const auto diag_offset = MaxPendingFaults * PageFaultAreaSize * 2 + m_current_area * DiagAreaSize;
 	if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
-	    ShaderRecompiler::IR::WaterfallRecord0Census()) { // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+	    ShaderRecompiler::IR::WaterfallRecord0Census() || SrtGpuWordsVerifyEnabled()) { // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 		const auto tail_offset = uint64_t {BufferCache::FAULT_DIAG_BASE} * sizeof(uint32_t);
 		vk::BufferMemoryBarrier2 to_copy {};
 		to_copy.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -413,7 +417,7 @@ void FaultManager::ProcessFaultBuffer() {
 		if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    ShaderRecompiler::IR::ClampNanMode() == 2 ||
 	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
-		    ShaderRecompiler::IR::WaterfallRecord0Census()) { // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+		    ShaderRecompiler::IR::WaterfallRecord0Census() || SrtGpuWordsVerifyEnabled()) { // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 			m_download_buffer.Invalidate(diag_offset, DiagAreaSize);
 			ReportDiagTail(std::bit_cast<const uint32_t*>(m_download_buffer.Mapped().data() + diag_offset));
 		}
