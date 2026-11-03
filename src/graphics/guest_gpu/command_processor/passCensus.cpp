@@ -140,7 +140,7 @@ static bool Active() {
 }
 
 void Marker(const void* cp, const char* push_name) {
-	if (!Active() || !GuestGpu::IsGpuThread()) return;
+	if (!Active()) return; // any thread that runs PM4 (the command processor thread since the GPU pipeline project)
 	auto& state = t_processors[cp];
 	if (push_name != nullptr) {
 		state.stack.emplace_back(push_name);
@@ -157,7 +157,7 @@ void Marker(const void* cp, const char* push_name) {
 }
 
 bool Packet(const void* cp, bool dispatch) {
-	if (!Active() || !GuestGpu::IsGpuThread()) return false;
+	if (!Active()) return false;
 	auto& state = t_processors[cp];
 	if (t_active != cp) Switch(cp, state.key);
 	const bool skip = state.free && CeilingOn();
