@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -991,7 +992,22 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 			if (m == '1' || m == '8') std::fprintf(stderr, "DIAG_MERGED_HS_USER_BASE0 mode=%c\n", m);
 			return m;
 		}();
-		if (mode == '1') {
+		if (mode == 'p') { // =p: print the merged program's user data once per program (no change)
+			static std::mutex                  print_mutex;
+			static std::unordered_set<uint64_t> printed;
+			std::scoped_lock                   lock(print_mutex);
+			if (printed.insert(local_hash).second) {
+				std::string text;
+				for (const auto v: local_users) {
+					char word[12];
+					std::snprintf(word, sizeof(word), " %08x", v);
+					text += word;
+				}
+				std::fprintf(stderr, "MERGED_HS_USER hash=0x%016llx ls_user_sgpr=%u hs_user_data_addr=0x%llx users:%s\n",
+				             static_cast<unsigned long long>(local_hash), static_cast<unsigned>(local_users.size()),
+				             static_cast<unsigned long long>(regs.hs_regs.user_data_addr), text.c_str());
+			}
+		} else if (mode == '1') {
 			const auto hash = params[1].hash;
 			params[1]       = GetShaderParams(regs.ls_regs.data_addr, control_hash, local_users, local);
 			params[1].code  = merged->back;
