@@ -586,6 +586,15 @@ void LowerTessellationMemory(IR::Program& program, const CompileOptions& options
 	     : options.stage == ShaderType::TessellationControl ? "HS"
 	                                                       : "TES",
 	     reads, writes, factors);
+	// KYTY_TRACE_TESS_LOWERING (diagnostic): the same summary on stderr, with the program and its layout.
+	if (std::getenv("KYTY_TRACE_TESS_LOWERING") != nullptr) {
+		std::fprintf(stderr, "TESS_LOWERING %s hash=0x%016llx reads=%u writes=%u factors=%u ls_stride=%u hs_stride=%u cp=%u/%u\n",
+		             options.stage == ShaderType::Local                 ? "LS"
+		             : options.stage == ShaderType::TessellationControl ? "HS"
+		                                                               : "TES",
+		             static_cast<unsigned long long>(options.shader_hash), reads, writes, factors, tess.ls_stride,
+		             tess.hs_stride, tess.input_control_points, tess.output_control_points);
+	}
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler
