@@ -89,7 +89,7 @@ void Report(Census& c) {
 	std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
 	std::fprintf(stderr, "PASS_CENSUS frames=%u gpu_thread_ms/frame=%.1f passes=%zu\n", frames,
 	             static_cast<double>(total) / 1e6 / frames, rows.size());
-	for (size_t i = 0; i < rows.size() && i < 16; i++) {
+	for (size_t i = 0; i < rows.size(); i++) { // every pass (3.11: comparing the passes of two game versions)
 		const auto& [k, t] = rows[i];
 		std::fprintf(stderr, "PASS_CENSUS pass=\"%s\" ms/frame=%.2f share=%.1f%% wait_ms/frame=%.2f draws/frame=%.0f "
 		             "dispatches/frame=%.0f skipped/frame=%.0f\n",
