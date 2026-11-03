@@ -2793,11 +2793,12 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 				static std::atomic_uint logged {0};
 				if (logged.fetch_add(1) < 400u) {
 					std::fprintf(stderr,
-					             "MARKER_DRAW marker=[%s] vs=0x%016llx ps=0x%016llx %s count=%u inst=%u colors=%u c0=0x%llx "
-					             "depth=0x%llx dtest=%d dwrite=%d\n",
+					             "MARKER_DRAW marker=[%s] vs=0x%016llx ps=0x%016llx %s count=%u inst=%u indirect=%d rt_mask=0x%08x "
+					             "colors=%u slot0=%u c0=0x%llx depth=0x%llx dtest=%d dwrite=%d\n",
 					             path.c_str(), static_cast<unsigned long long>(vs_hash),
 					             static_cast<unsigned long long>(ps_hash), draw.Name(), draw.index_count,
-					             draw.instance_count, state.color_count,
+					             draw.instance_count, indirect != nullptr ? 1 : 0, plan.regs.rt_mask, state.color_count,
+					             state.color_count != 0u ? state.color_info[0].target_slot : 0u,
 					             static_cast<unsigned long long>(state.color_count != 0u
 					                                                 ? state.color_info[0].desc.info.data.address
 					                                                 : 0ull),
