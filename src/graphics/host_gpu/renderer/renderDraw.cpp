@@ -2282,6 +2282,7 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 		m_context.GetCommandScheduler().EndRendering();
 		FullMemoryBarrier(m_context.GetCommandScheduler().Current().Handle());
 	}
+	TraceDrawStatePs(buffer, state, draw); // KYTY_TRACE_DRAW_STATE_PS
 	// KYTY_TRACE_CS_IMAGE_DUMP also lists pixel shaders: inside the trace window, color target 0 right before their first
 	// two draws (psbefore_, what the draw starts from; psafter_ below is what it wrote).
 	if (state.ps_active && state.color_count > 0 && state.color_info[0].image_id && DebugStencilWindow()) {

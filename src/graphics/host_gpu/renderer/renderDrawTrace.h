@@ -26,6 +26,10 @@ void LogDrawTargetState(const char* draw_name, const RenderColorInfo& color, con
 void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input_info,
                        uint32_t index_type_and_size, uint32_t index_count, const void* index_addr);
 
+// KYTY_TRACE_DRAW_STATE_PS=<ps hash>[,...][:<frame>] (diagnostic): the full output state of the listed pixel shaders' draws
+// (first 12 from the presented frame on): targets and masks, blend, depth/stencil, cull, viewport, scissor, counts.
+void TraceDrawStatePs(const CommandBuffer& buffer, const DrawRenderState& state, const DrawCallInfo& draw);
+
 // KYTY_TRACE_DRAW_CENSUS=1 (diagnostic, default off): the execution thread's time per draw (DrawIndex, DrawAuto,
 // GPU indirect draws called by FlushRunQueue) and its parts: the front (entry checks, programs, targets, pipeline, plan
 // setup), the wait for the worker's previous job, the post of this one, and the previous draw's commit with its parts

@@ -120,6 +120,61 @@ static void LogMrtState(const char* draw_name, const CommandBuffer& buffer,
 	}
 }
 
+void TraceDrawStatePs(const CommandBuffer& buffer, const DrawRenderState& state, const DrawCallInfo& draw) {
+	struct Spec {
+		std::string list;
+		uint32_t    from = 0;
+	};
+	static const Spec spec = [] {
+		Spec        result;
+		const char* value = std::getenv("KYTY_TRACE_DRAW_STATE_PS");
+		if (value == nullptr) return result;
+		result.list = value;
+		if (const auto colon = result.list.find(':'); colon != std::string::npos) {
+			result.from = static_cast<uint32_t>(std::strtoul(result.list.c_str() + colon + 1, nullptr, 10));
+			result.list.resize(colon);
+		}
+		return result;
+	}();
+	if (spec.list.empty() || !state.ps_active || DebugPresentCount().load() < spec.from) return;
+	const auto ps_hash = state.ps_input_info.stage.program->shader_hash;
+	if (spec.list.find(fmt::format("{:016x}", ps_hash)) == std::string::npos) return;
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1) >= 12u) return;
+	const auto& ctx     = buffer.GetRegisters();
+	const auto& sh_regs = ctx.GetShaderRegisters();
+	const auto& dc      = ctx.GetDepthControl();
+	const auto& mc      = ctx.GetModeControl();
+	const auto& cc      = ctx.GetColorControl();
+	const auto& vp0     = ctx.GetScreenViewport().viewports[0];
+	std::fprintf(stderr,
+	             "DRAW_STATE frame=%u ps=%016llx %s count=%u inst=%u rt_mask=0x%08x cb_shader_mask=0x%08x cc_mode=%u cc_op=0x%02x "
+	             "ps_kill=%d out_mode=%u,%u colors=%u depth=0x%llx z=%d zw=%d zfunc=%u stencil=%d sfunc=%u bounds=%d "
+	             "cull_front=%d cull_back=%d face=%d viewport=(%.1f,%.1f %.1fx%.1f z %.3f..%.3f) prim=%u\n",
+	             DebugPresentCount().load(), static_cast<unsigned long long>(ps_hash), draw.Name(), draw.index_count,
+	             draw.instance_count, ctx.GetRenderTargetMask(), sh_regs.m_cbShaderMask, cc.mode, cc.op,
+	             state.ps_input_info.ps_pixel_kill_enable ? 1 : 0, state.ps_input_info.target_output_mode[0],
+	             state.ps_input_info.target_output_mode[1], state.color_count,
+	             static_cast<unsigned long long>(state.depth_info.image_id ? state.depth_info.desc.info.data.address : 0ull),
+	             dc.z_enable ? 1 : 0, dc.z_write_enable ? 1 : 0, dc.zfunc, dc.stencil_enable ? 1 : 0, dc.stencilfunc,
+	             dc.depth_bounds_enable ? 1 : 0, mc.cull_front ? 1 : 0, mc.cull_back ? 1 : 0, mc.face ? 1 : 0,
+	             vp0.xoffset - vp0.xscale, vp0.yoffset - vp0.yscale, vp0.xscale * 2.0f, vp0.yscale * 2.0f, vp0.zoffset,
+	             vp0.zoffset + vp0.zscale, static_cast<uint32_t>(buffer.GetUserConfig().GetPrimType()));
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		const auto& color = state.color_info[i];
+		const auto& bc    = ctx.GetBlendControl(color.target_slot);
+		std::fprintf(stderr,
+		             "DRAW_STATE   color%u slot=%u addr=0x%llx %ux%u fmt=%s blend=%d src=%u dst=%u comb=%u asrc=%u adst=%u "
+		             "acomb=%u sep=%d target_mask=0x%x shader_mask=0x%x\n",
+		             i, color.target_slot, static_cast<unsigned long long>(color.desc.info.data.address),
+		             color.desc.info.extent.width, color.desc.info.extent.height,
+		             vk::to_string(color.desc.view_info.format).c_str(), bc.enable ? 1 : 0, bc.color_srcblend,
+		             bc.color_destblend, bc.color_comb_fcn, bc.alpha_srcblend, bc.alpha_destblend, bc.alpha_comb_fcn,
+		             bc.separate_alpha_blend ? 1 : 0, (ctx.GetRenderTargetMask() >> (color.target_slot * 4u)) & 0xfu,
+		             (sh_regs.m_cbShaderMask >> (color.target_slot * 4u)) & 0xfu);
+	}
+}
+
 void LogDrawTargetState(const char* draw_name, const RenderColorInfo& color,
                                const RenderDepthInfo& depth, const CommandBuffer& buffer,
                                const ShaderPixelInputInfo& ps_input_info, uint32_t index_count,
