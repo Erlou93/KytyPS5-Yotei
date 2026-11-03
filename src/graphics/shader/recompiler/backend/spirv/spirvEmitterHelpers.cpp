@@ -140,24 +140,6 @@ bool WavePairRequested(uint64_t shader_hash) {
 	                                                              "2b018f33", "40395313", "6cc64dee"};
 	char text[17];
 	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(shader_hash));
-	// KYTY_DIAG_WAVE_PAIR_HASHES=+prefix,-prefix,... (diagnostic, 3.11: the 2.002 volumetric fog; removed with its fix):
-	// +prefix pairs that shader as if listed, -prefix leaves a listed one unpaired.
-	static const std::string diag = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_DIAG_WAVE_PAIR_HASHES");
-		if (value != nullptr && value[0] != '\0') std::fprintf(stderr, "DIAG_WAVE_PAIR_HASHES %s\n", value);
-		return value != nullptr ? std::string(",") + value : std::string();
-	}();
-	if (!diag.empty()) {
-		for (const char sign: {'-', '+'}) {
-			for (size_t at = diag.find(std::string(",") + sign); at != std::string::npos;
-			     at = diag.find(std::string(",") + sign, at + 1)) {
-				const auto end    = std::min(diag.find(',', at + 2), diag.size());
-				const auto prefix = std::string_view(diag).substr(at + 2, end - at - 2);
-				if (!prefix.empty() && prefix.size() <= 16u && std::string_view(text, prefix.size()) == prefix)
-					return sign == '+';
-			}
-		}
-	}
 	for (const auto prefix: Prefixes) {
 		if (std::string_view(text, prefix.size()) == prefix) return true;
 	}

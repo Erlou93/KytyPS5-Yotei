@@ -46,8 +46,6 @@ inline constexpr const char* Names[] = {
     // pipelineCache.cpp: the listed shader's SPIR-V is replaced from a file.
     "KYTY_DIAG_SPIRV_REPLACE",
     "KYTY_DIAG_WATERFALL_RECORD0_CENSUS",
-    // spirvEmitterHelpers.cpp WavePairRequested: +prefix pairs a shader, -prefix unpairs a listed one.
-    "KYTY_DIAG_WAVE_PAIR_HASHES",
     "KYTY_FIX_CLAMP_NAN",
     "KYTY_FIX_CLAMP_NAN_HASHES",
     // guest_gpu/gpu_format.cpp: format 30 as UFLOAT or as packed UNorm bits converted in the shader.
