@@ -354,7 +354,8 @@ void Poll() {
 	std::fprintf(stderr, "OBJ_CENSUS frame=%u%s\n", frame, line.c_str());
 	// KYTY_TRACE_OBJ_CENSUS_DETAIL=<type hex>[,...]: for the listed types also why their objects are off - per group of
 	// objects with the same values, the disable-reason byte (+0xd6), the handle count (+0xde) and the parent chain
-	// (+0x40, up to 6 levels) with each parent's vtable and reason byte: OBJ_DETAIL lines.
+	// (+0x40, up to 6 levels) with each parent's vtable, reason byte, data type and id (+0x30) and container (+0x38):
+	// OBJ_DETAIL lines.
 	static const std::vector<uint64_t> detail = [] {
 		std::vector<uint64_t> list;
 		const char*           value = std::getenv("KYTY_TRACE_OBJ_CENSUS_DETAIL");
@@ -373,18 +374,26 @@ void Poll() {
 			uint8_t reasons = 0, handles = 0;
 			read(object + 0xd6, &reasons, 1);
 			read(object + 0xde, &handles, 1);
-			char text[160];
+			char text[192];
 			std::snprintf(text, sizeof(text), "reasons=0x%02x handles=%u parents:", reasons, handles);
 			std::string key    = text;
 			uint64_t    parent = 0;
 			if (!read(object + 0x40, &parent, sizeof(parent))) parent = 0;
 			for (int level = 0; parent != 0 && level < 6; level++) {
-				uint64_t vtable = 0;
+				uint64_t vtable = 0, data = 0, data_id = 0, container = 0;
+				uint32_t data_type      = 0;
 				uint8_t  parent_reasons = 0;
 				read(parent, &vtable, sizeof(vtable));
 				read(parent + 0xd6, &parent_reasons, 1);
-				std::snprintf(text, sizeof(text), " [0x%llx vt=0x%llx r=0x%02x]", static_cast<unsigned long long>(parent),
-				              static_cast<unsigned long long>(vtable), parent_reasons);
+				read(parent + 0x38, &container, sizeof(container));
+				// The object's world-file data (+0x30): its data type (+0x10) and 64-bit object id (+0x18).
+				if (read(parent + 0x30, &data, sizeof(data)) && data != 0) {
+					read(data + 0x10, &data_type, sizeof(data_type));
+					read(data + 0x18, &data_id, sizeof(data_id));
+				}
+				std::snprintf(text, sizeof(text), " [0x%llx vt=0x%llx r=0x%02x data=0x%x:%016llx in=0x%llx]",
+				              static_cast<unsigned long long>(parent), static_cast<unsigned long long>(vtable), parent_reasons,
+				              data_type, static_cast<unsigned long long>(data_id), static_cast<unsigned long long>(container));
 				key += text;
 				if (!read(parent + 0x40, &parent, sizeof(parent))) parent = 0;
 			}
