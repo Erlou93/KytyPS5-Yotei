@@ -137,10 +137,13 @@ void DumpModule(const char* stage_name, uint64_t shader_hash, const std::vector<
 }
 
 void ReplaceSpirv(uint64_t shader_hash, std::vector<uint32_t>& spirv) {
-	// KYTY_DIAG_SPIRV_REPLACE=<hex hash>=<file.spvasm>: the listed shader's SPIR-V is replaced by an
-	// edited disassembly (measurement probes). Logged; the edited module is still validated.
-	if (const char* replace = Common::ShaderEnv::Read("KYTY_DIAG_SPIRV_REPLACE"); replace != nullptr) {
-		const std::string text(replace);
+	// KYTY_DIAG_SPIRV_REPLACE=<hex hash>=<file.spvasm>[;<hex hash>=<file.spvasm>...]: the listed shaders' SPIR-V is
+	// replaced by an edited disassembly (measurement probes). Logged; the edited module is still validated.
+	const char* replace_list = Common::ShaderEnv::Read("KYTY_DIAG_SPIRV_REPLACE");
+	for (std::string all = replace_list != nullptr ? replace_list : ""; !all.empty();) {
+		const auto        end  = all.find(';');
+		const std::string text = all.substr(0, end);
+		all                    = end == std::string::npos ? std::string() : all.substr(end + 1);
 		const auto        separator = text.find('=');
 		if (separator != std::string::npos &&
 		    std::strtoull(text.substr(0, separator).c_str(), nullptr, 16) == shader_hash) {
