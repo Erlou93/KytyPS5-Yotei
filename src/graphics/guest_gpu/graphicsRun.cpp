@@ -35,6 +35,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
+#include "graphics/guest_gpu/command_processor/passCensus.h"
 #include "kernel/memory.h"
 #include "libs/agc.h"
 #include "libs/errno.h"
@@ -2904,10 +2905,19 @@ void CommandProcessor::SetCsWaveSize(uint32_t mode) {
 	if (m_sh_ctx.GetCs().cs_regs.wave_size != wave_size) GetShCtx().SetCsWaveSize(wave_size);
 }
 
+// KYTY_TRACE_PASS_CENSUS: the dispatch's compute shader for its pass's shader list.
+static void NoteCensusShader(const GpuOperation& operation) {
+	if (!PassCensus::Enabled()) return;
+	ShaderMappedData data {};
+	uint64_t         hash = 0;
+	if (ShaderLookupMapped(operation.state.shaders->GetCs().cs_regs.data_addr, &data, &hash)) PassCensus::NoteShader(hash);
+}
+
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
 	SetCsWaveSize(mode);
 	auto operation     = MakeOperation(GpuOperationKind::DispatchDirect);
+	NoteCensusShader(operation);
 	operation.dispatch = {.thread_group_x = thread_group_x,
 	                      .thread_group_y = thread_group_y,
 	                      .thread_group_z = thread_group_z,
@@ -2946,6 +2956,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	SetCsWaveSize(mode);
 	auto operation     = MakeOperation(GpuOperationKind::DispatchIndirect);
+	NoteCensusShader(operation);
 	operation.dispatch = {.mode = mode, .args_addr = args_addr};
 	Emit(std::move(operation));
 }

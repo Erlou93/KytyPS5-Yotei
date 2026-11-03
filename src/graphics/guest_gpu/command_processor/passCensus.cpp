@@ -4,8 +4,11 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -23,6 +26,7 @@ struct Totals {
 	uint64_t draws      = 0;
 	uint64_t dispatches = 0;
 	uint64_t skipped    = 0; // packets the ceiling left out
+	std::map<uint64_t, uint64_t> shaders; // compute shader hash -> dispatches (NoteShader)
 };
 
 struct ProcessorState {
@@ -96,6 +100,11 @@ void Report(Census& c) {
 		             k.c_str(), static_cast<double>(t.ns) / 1e6 / frames, total != 0 ? 100.0 * t.ns / total : 0.0,
 		             static_cast<double>(t.wait_ns) / 1e6 / frames, static_cast<double>(t.draws) / frames,
 		             static_cast<double>(t.dispatches) / frames, static_cast<double>(t.skipped) / frames);
+		if (!t.shaders.empty()) {
+			std::string list;
+			for (const auto& [hash, n]: t.shaders) list += fmt::format("{}{:016x}:{}", list.empty() ? "" : ",", hash, n);
+			std::fprintf(stderr, "PASS_CENSUS shaders pass=\"%s\" cs=%s\n", k.c_str(), list.c_str());
+		}
 	}
 	c.passes.clear();
 	c.window_start = now;
@@ -137,6 +146,13 @@ bool Enabled() {
 static bool Active() {
 	static const bool active = Enabled() || !FreeList().empty();
 	return active;
+}
+
+void NoteShader(uint64_t hash) {
+	if (!Enabled()) return;
+	auto&            c = Global();
+	std::scoped_lock lock(c.mutex);
+	c.passes[t_active_key].shaders[hash]++;
 }
 
 void Marker(const void* cp, const char* push_name) {

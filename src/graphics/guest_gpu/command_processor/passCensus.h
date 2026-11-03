@@ -22,6 +22,8 @@ inline thread_local uint64_t t_wait_ns = 0;
 void Marker(const void* cp, const char* push_name);
 // A draw (or dispatch) packet of `cp`; true when the ceiling leaves it out.
 [[nodiscard]] bool Packet(const void* cp, bool dispatch);
+// A dispatch's compute shader (the code hash; the census lists each pass's shaders: PASS_CENSUS shaders lines).
+void NoteShader(uint64_t hash);
 
 } // namespace Libs::Graphics::PassCensus
 
