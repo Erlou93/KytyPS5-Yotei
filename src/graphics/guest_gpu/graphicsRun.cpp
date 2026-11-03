@@ -2792,6 +2792,12 @@ void CommandProcessor::ExecuteDrawIndirect(const GpuOperation& operation) {
 			const bool args_gpu = cache.IsRegionGpuModified(args, uint64_t {stride_in_bytes} *
 			                                                          std::max(draw_count, 1u));
 			const auto* first = reinterpret_cast<const uint32_t*>(args);
+			ShaderMappedData shader_data {};
+			uint64_t         gs_hash = 0, ps_hash = 0;
+			(void)ShaderLookupMapped(operation.state.shaders->GetVs().gs_regs.data_addr, &shader_data, &gs_hash);
+			(void)ShaderLookupMapped(operation.state.shaders->GetPs().ps_regs.data_addr, &shader_data, &ps_hash);
+			std::fprintf(stderr, "INDIRECT_DRAW_SHADERS gs=0x%016llx ps=0x%016llx\n", static_cast<unsigned long long>(gs_hash),
+			             static_cast<unsigned long long>(ps_hash));
 			std::fprintf(stderr,
 			             "INDIRECT_DRAW frame=%u indexed=%d count_addr=0x%llx count_gpu=%d max=%u count=%u "
 			             "args=0x%llx args_gpu=%d stride=%u first=%u,%u,%u,%u,%u marker=[%s]\n",
