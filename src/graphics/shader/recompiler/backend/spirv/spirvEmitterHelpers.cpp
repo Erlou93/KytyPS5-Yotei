@@ -155,15 +155,6 @@ bool WavePairRequested(uint64_t shader_hash) {
 constexpr size_t PairRuleMinWords = 2048;
 
 bool WavePairRule(uint32_t threads, size_t code_words) {
-	// KYTY_DIAG_PAIR_RULE_OFF=1 (diagnostic, 3.11: 2.002's particle shaders lost DS_APPEND, which kept them unpaired,
-	// and append through V_MBCNT / V_READFIRSTLANE instead; removed with the finding): the rule pairs nothing.
-	static const bool off = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_DIAG_PAIR_RULE_OFF");
-		const bool  o     = value != nullptr && value[0] == '1';
-		if (o) std::fprintf(stderr, "DIAG_PAIR_RULE_OFF enabled\n");
-		return o;
-	}();
-	if (off) return false;
 	return threads == 64u && code_words >= PairRuleMinWords;
 }
 

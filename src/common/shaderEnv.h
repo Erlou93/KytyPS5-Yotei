@@ -40,8 +40,6 @@ inline constexpr const char* Names[] = {
     "KYTY_DIAG_BINDLESS_PLACEHOLDER_CENSUS",
     "KYTY_DIAG_MOV_NO_FLOAT_MODS",
     "KYTY_DIAG_NULL_FORMATTED_STICKY",
-    // spirvEmitterHelpers.cpp WavePairRule: the rule pairs nothing.
-    "KYTY_DIAG_PAIR_RULE_OFF",
     "KYTY_DIAG_PROBE",
     "KYTY_DIAG_PROBE_NTH",
     "KYTY_DIAG_RT_TRIPS",
