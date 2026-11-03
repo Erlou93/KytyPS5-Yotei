@@ -2282,6 +2282,25 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 		m_context.GetCommandScheduler().EndRendering();
 		FullMemoryBarrier(m_context.GetCommandScheduler().Current().Handle());
 	}
+	// KYTY_TRACE_CS_IMAGE_DUMP also lists pixel shaders: inside the trace window, color target 0 right before their first
+	// two draws (psbefore_, what the draw starts from; psafter_ below is what it wrote).
+	if (state.ps_active && state.color_count > 0 && state.color_info[0].image_id && DebugStencilWindow()) {
+		static const std::string list = Common::EnvRead::CsImageDump();
+		char text[17];
+		std::snprintf(text, sizeof(text), "%016llx",
+		              static_cast<unsigned long long>(state.ps_input_info.stage.program->shader_hash));
+		static uint32_t dumped = 0;
+		const char*     dir    = Common::EnvRead::FrameDir();
+		if (dir != nullptr && !list.empty() && list.find(text) != std::string::npos && dumped < 6u) {
+			buffer.EndRendering();
+			auto& image = buffer.GetContext().GetTextureCache().GetImage(state.color_info[0].image_id);
+			DebugQueueFullDump(m_context.GetGraphics(), vk_buffer, image,
+			                   std::string(dir) + "/psbefore_" + text + "_" + std::to_string(dumped) + "_" +
+			                       fmt::format("{:x}", image.info.data.address),
+			                   false);
+			dumped++;
+		}
+	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	BindGraphicsPipeline(buffer, vk_buffer, pipeline.pipeline);
 	if (!draw.IsIndexed()) {
