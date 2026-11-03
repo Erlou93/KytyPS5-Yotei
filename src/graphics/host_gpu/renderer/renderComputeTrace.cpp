@@ -352,6 +352,49 @@ void Poll() {
 		}
 	}
 	std::fprintf(stderr, "OBJ_CENSUS frame=%u%s\n", frame, line.c_str());
+	// KYTY_TRACE_OBJ_CENSUS_DETAIL=<type hex>[,...]: for the listed types also why their objects are off - per group of
+	// objects with the same values, the disable-reason byte (+0xd6), the handle count (+0xde) and the parent chain
+	// (+0x40, up to 6 levels) with each parent's vtable and reason byte: OBJ_DETAIL lines.
+	static const std::vector<uint64_t> detail = [] {
+		std::vector<uint64_t> list;
+		const char*           value = std::getenv("KYTY_TRACE_OBJ_CENSUS_DETAIL");
+		while (value != nullptr && *value != 0) {
+			char* end = nullptr;
+			list.push_back(std::strtoull(value, &end, 16));
+			value = end != nullptr && *end == ',' ? end + 1 : nullptr;
+		}
+		return list;
+	}();
+	for (const uint64_t t: detail) {
+		uint64_t object = 0;
+		if (!read(spec.registry + t * spec.stride + spec.head, &object, sizeof(object))) continue;
+		std::map<std::string, uint32_t> groups;
+		for (uint32_t n = 0; object != 0 && n < 100000u; n++) {
+			uint8_t reasons = 0, handles = 0;
+			read(object + 0xd6, &reasons, 1);
+			read(object + 0xde, &handles, 1);
+			char text[160];
+			std::snprintf(text, sizeof(text), "reasons=0x%02x handles=%u parents:", reasons, handles);
+			std::string key    = text;
+			uint64_t    parent = 0;
+			if (!read(object + 0x40, &parent, sizeof(parent))) parent = 0;
+			for (int level = 0; parent != 0 && level < 6; level++) {
+				uint64_t vtable = 0;
+				uint8_t  parent_reasons = 0;
+				read(parent, &vtable, sizeof(vtable));
+				read(parent + 0xd6, &parent_reasons, 1);
+				std::snprintf(text, sizeof(text), " [0x%llx vt=0x%llx r=0x%02x]", static_cast<unsigned long long>(parent),
+				              static_cast<unsigned long long>(vtable), parent_reasons);
+				key += text;
+				if (!read(parent + 0x40, &parent, sizeof(parent))) parent = 0;
+			}
+			groups[key]++;
+			if (!read(object + spec.next, &object, sizeof(object))) object = 0;
+		}
+		for (const auto& [key, count]: groups) {
+			std::fprintf(stderr, "OBJ_DETAIL frame=%u t%llx n=%u %s\n", frame, static_cast<unsigned long long>(t), count, key.c_str());
+		}
+	}
 }
 } // namespace ObjCensus
 
