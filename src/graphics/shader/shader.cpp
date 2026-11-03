@@ -982,6 +982,21 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 		params[0].code = merged->front;
 		params[0].hash = merged->front_hash;
 		params[1].code = merged->back;
+		// KYTY_DIAG_MERGED_HS_USER_BASE0=1 (diagnostic, 3.11 night: the 2.002 particles): the merged program's HS part
+		// runs in the same wave as its LS part, so it sees the user SGPRs where the LS part does (from s0, as params[0]),
+		// not 8 higher as a fused back half with its own user-data block.
+		static const bool base0 = [] {
+			const char* value = Common::ShaderEnv::Read("KYTY_DIAG_MERGED_HS_USER_BASE0");
+			const bool  on    = value != nullptr && value[0] == '1';
+			if (on) std::fprintf(stderr, "DIAG_MERGED_HS_USER_BASE0 enabled\n");
+			return on;
+		}();
+		if (base0) {
+			const auto hash = params[1].hash;
+			params[1]       = GetShaderParams(regs.ls_regs.data_addr, control_hash, local_users, local);
+			params[1].code  = merged->back;
+			params[1].hash  = hash;
+		}
 	} else {
 		params[1] = GetShaderParams(regs.hs_regs.data_addr, control_hash, local_users, control, 8u);
 		// The fused HS back half receives its separate user-data address in s0:s1.

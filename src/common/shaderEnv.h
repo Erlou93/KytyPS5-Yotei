@@ -40,6 +40,8 @@ inline constexpr const char* Names[] = {
     // ResourceTracking.cpp AppendRange: no append pool recognised.
     "KYTY_DIAG_APPEND_RANGE_OFF",
     "KYTY_DIAG_BINDLESS_PLACEHOLDER_CENSUS",
+    // shader.cpp: the merged LS+HS program's HS-part user SGPRs (the program's inputs).
+    "KYTY_DIAG_MERGED_HS_USER_BASE0",
     "KYTY_DIAG_MOV_NO_FLOAT_MODS",
     "KYTY_DIAG_NULL_FORMATTED_STICKY",
     "KYTY_DIAG_PROBE",
