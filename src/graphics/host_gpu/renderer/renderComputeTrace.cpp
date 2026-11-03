@@ -298,6 +298,33 @@ void Poll(RenderContext& context, uint64_t next_hash) {
 }
 } // namespace GuestWatch
 
+// KYTY_DIAG_GUEST_POKE=<hex addr>:<hex value> (logged APPROXIMATION, measurement only): before every compute dispatch
+// the GPU thread writes the 4-byte value to the guest address (e.g. a game setting the CPU recomputes each frame, to
+// see what the image does with another value). Changes what the game does; never a fix.
+namespace GuestPoke {
+void Poll() {
+	struct Spec {
+		uint64_t addr  = 0;
+		uint32_t value = 0;
+	};
+	static const Spec spec = [] {
+		Spec        result;
+		const char* value = std::getenv("KYTY_DIAG_GUEST_POKE");
+		if (value == nullptr) return result;
+		char* end   = nullptr;
+		result.addr = std::strtoull(value, &end, 16);
+		if (end != nullptr && *end == ':') result.value = static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 16));
+		std::fprintf(stderr, "DIAG_GUEST_POKE APPROXIMATION addr=0x%llx value=0x%x\n", static_cast<unsigned long long>(result.addr),
+		             result.value);
+		return result;
+	}();
+	if (spec.addr == 0) return;
+	if (!Libs::LibKernel::Memory::TryWriteBacking(spec.addr, &spec.value, sizeof(spec.value))) {
+		(void)Libs::LibKernel::Memory::GuardedGuestCopy(reinterpret_cast<void*>(spec.addr), &spec.value, sizeof(spec.value));
+	}
+}
+} // namespace GuestPoke
+
 // KYTY_TRACE_OBJ_CENSUS=<registry>:<types>:<stride>:<head>:<next>:<flag>:<every> (hex, <every> decimal; diagnostic): every
 // <every> presented frames the GPU thread walks the guest's per-type object lists - list head = 8 bytes at registry +
 // type * stride + head, next object = 8 bytes at object + next - and logs per type the objects and those with bit 0 of

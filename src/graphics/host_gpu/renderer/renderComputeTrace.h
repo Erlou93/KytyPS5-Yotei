@@ -68,6 +68,7 @@ ENV_GATE(GuestWatchOn, "KYTY_TRACE_GUEST_WATCH")
 ENV_GATE(ProxyPhaseOn, "KYTY_TRACE_PROXY_PHASE")
 ENV_GATE(CsImageDumpOn, "KYTY_TRACE_CS_IMAGE_DUMP")
 ENV_GATE(ObjCensusOn, "KYTY_TRACE_OBJ_CENSUS")
+ENV_GATE(GuestPokeOn, "KYTY_DIAG_GUEST_POKE")
 #undef ENV_GATE
 [[nodiscard]] inline bool ProxyCountsOn() {
 	static constinit Common::OnceValue<bool> on_once;
@@ -90,6 +91,9 @@ void Poll(RenderContext& context, uint64_t next_hash);
 namespace ObjCensus {
 void Poll();
 } // namespace ObjCensus
+namespace GuestPoke {
+void Poll();
+} // namespace GuestPoke
 void CsImageDumpTrace(RenderContext& context, vk::CommandBuffer vk_buffer, const Program& program, PreparedBindings& bindings,
                       const Resources* resources = nullptr);
 void CsImageDumpAfter(RenderContext& context, vk::CommandBuffer vk_buffer, const Program& program, PreparedBindings& bindings);
