@@ -800,15 +800,6 @@ void DetectAppendWrites(const Program& program, std::vector<BufferResource>& buf
 		pool.min_off = std::min(pool.min_off, static_cast<uint32_t>(begin));
 		pool.max_end = std::max(pool.max_end, static_cast<uint32_t>(end));
 	}
-	// KYTY_DIAG_APPEND_RANGE_OFF=1 (diagnostic, 3.11: the 2.002 particle pools; removed with the finding): no append pool
-	// is recognised, so every pool is marked GPU-dirty whole as any written binding.
-	static const bool off = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_DIAG_APPEND_RANGE_OFF");
-		const bool  o     = value != nullptr && value[0] == '1';
-		if (o) std::fprintf(stderr, "DIAG_APPEND_RANGE_OFF enabled\n");
-		return o;
-	}();
-	if (off) return;
 	for (uint32_t p = 0; p < buffers.size(); p++) {
 		const auto& pool = pools[p];
 		if (!pool.ok || pool.atomic == nullptr || writes[p] == 0u) continue;

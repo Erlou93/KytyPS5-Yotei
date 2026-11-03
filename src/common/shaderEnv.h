@@ -37,8 +37,6 @@ inline constexpr const char* Names[] = {
     "KYTY_BINDLESS_R128",
     "KYTY_BINDLESS_RECORD_TABLES",
     "KYTY_BINDLESS_STAGES",
-    // ResourceTracking.cpp AppendRange: no append pool recognised.
-    "KYTY_DIAG_APPEND_RANGE_OFF",
     "KYTY_DIAG_BINDLESS_PLACEHOLDER_CENSUS",
     "KYTY_DIAG_MOV_NO_FLOAT_MODS",
     "KYTY_DIAG_NULL_FORMATTED_STICKY",
