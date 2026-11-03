@@ -728,6 +728,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	GpuCheckpoints::Mark(vk_buffer, ~program.shader_hash);
 	if (twin_open) TwinDispatch::End(m_context, vk_buffer, program.shader_hash); // KYTY_DIAG_TWIN_DISPATCH: A's copy
 	if (ComputeTrace::GuestWatchOn()) ComputeTrace::GuestWatch::Poll(m_context, program.shader_hash);
+	if (ComputeTrace::ObjCensusOn()) ComputeTrace::ObjCensus::Poll();
 	if (ref_capture) {
 		RefCapture::After(m_context, vk_buffer, program, bindings, resources);
 	}
@@ -877,6 +878,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	GpuCheckpoints::Mark(vk_buffer, ~input_info.stage.program->shader_hash);
 	if (twin_open) TwinDispatch::End(m_context, vk_buffer, program.shader_hash); // KYTY_DIAG_TWIN_DISPATCH: A's copy
 	if (ComputeTrace::GuestWatchOn()) ComputeTrace::GuestWatch::Poll(m_context, program.shader_hash);
+	if (ComputeTrace::ObjCensusOn()) ComputeTrace::ObjCensus::Poll();
 	if (ref_capture) {
 		RefCapture::After(m_context, vk_buffer, program, bindings, *input_info.stage.resources);
 	}

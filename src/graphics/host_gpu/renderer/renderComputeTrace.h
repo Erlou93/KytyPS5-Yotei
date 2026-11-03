@@ -67,6 +67,7 @@ namespace Libs::Graphics::ComputeTrace {
 ENV_GATE(GuestWatchOn, "KYTY_TRACE_GUEST_WATCH")
 ENV_GATE(ProxyPhaseOn, "KYTY_TRACE_PROXY_PHASE")
 ENV_GATE(CsImageDumpOn, "KYTY_TRACE_CS_IMAGE_DUMP")
+ENV_GATE(ObjCensusOn, "KYTY_TRACE_OBJ_CENSUS")
 #undef ENV_GATE
 [[nodiscard]] inline bool ProxyCountsOn() {
 	static constinit Common::OnceValue<bool> on_once;
@@ -86,6 +87,9 @@ using Resources = ShaderRecompiler::IR::ResourceSnapshot;
 namespace GuestWatch {
 void Poll(RenderContext& context, uint64_t next_hash);
 } // namespace GuestWatch
+namespace ObjCensus {
+void Poll();
+} // namespace ObjCensus
 void CsImageDumpTrace(RenderContext& context, vk::CommandBuffer vk_buffer, const Program& program, PreparedBindings& bindings,
                       const Resources* resources = nullptr);
 void CsImageDumpAfter(RenderContext& context, vk::CommandBuffer vk_buffer, const Program& program, PreparedBindings& bindings);

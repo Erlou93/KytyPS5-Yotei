@@ -298,6 +298,63 @@ void Poll(RenderContext& context, uint64_t next_hash) {
 }
 } // namespace GuestWatch
 
+// KYTY_TRACE_OBJ_CENSUS=<registry>:<types>:<stride>:<head>:<next>:<flag>:<every> (hex, <every> decimal; diagnostic): every
+// <every> presented frames the GPU thread walks the guest's per-type object lists - list head = 8 bytes at registry +
+// type * stride + head, next object = 8 bytes at object + next - and logs per type the objects and those with bit 0 of
+// the byte at object + flag set ("active"), from the CPU view without a GPU sync. One OBJ_CENSUS line per walk, types
+// with objects only, as t<type>=<objects>/<active>.
+namespace ObjCensus {
+void Poll() {
+	struct Spec {
+		uint64_t registry = 0, types = 0, stride = 0x10, head = 0, next = 0, flag = 0;
+		uint32_t every = 300;
+	};
+	static const Spec spec = [] {
+		Spec        result;
+		const char* value = std::getenv("KYTY_TRACE_OBJ_CENSUS");
+		uint64_t    fields[7] {};
+		for (int i = 0; i < 7 && value != nullptr && *value != 0; i++) {
+			char* end = nullptr;
+			fields[i] = std::strtoull(value, &end, i == 6 ? 10 : 16);
+			value     = end != nullptr && *end == ':' ? end + 1 : nullptr;
+		}
+		result = {fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], static_cast<uint32_t>(fields[6])};
+		if (result.every == 0) result.every = 300;
+		std::fprintf(stderr, "OBJ_CENSUS spec registry=0x%llx types=0x%llx stride=0x%llx head=0x%llx next=0x%llx flag=0x%llx every=%u\n",
+		             static_cast<unsigned long long>(result.registry), static_cast<unsigned long long>(result.types),
+		             static_cast<unsigned long long>(result.stride), static_cast<unsigned long long>(result.head),
+		             static_cast<unsigned long long>(result.next), static_cast<unsigned long long>(result.flag), result.every);
+		return result;
+	}();
+	static uint32_t last_frame = 0;
+	const uint32_t  frame      = DebugPresentCount().load();
+	if (spec.registry == 0 || frame == last_frame || frame % spec.every != 0) return;
+	last_frame      = frame;
+	const auto read = [](uint64_t addr, void* data, uint64_t size) {
+		return Libs::LibKernel::Memory::TryReadBacking(addr, data, size) ||
+		       Libs::LibKernel::Memory::GuardedGuestCopy(data, reinterpret_cast<const void*>(addr), size);
+	};
+	std::string line;
+	for (uint64_t t = 0; t < spec.types; t++) {
+		uint64_t object = 0;
+		if (!read(spec.registry + t * spec.stride + spec.head, &object, sizeof(object))) continue;
+		uint32_t objects = 0, active = 0;
+		// A list that loops or runs away ends at 100000 objects.
+		for (; object != 0 && objects < 100000u; objects++) {
+			uint8_t flags = 0;
+			if (read(object + spec.flag, &flags, 1) && (flags & 1u) != 0) active++;
+			if (!read(object + spec.next, &object, sizeof(object))) object = 0;
+		}
+		if (objects != 0) {
+			char text[48];
+			std::snprintf(text, sizeof(text), " t%llx=%u/%u", static_cast<unsigned long long>(t), objects, active);
+			line += text;
+		}
+	}
+	std::fprintf(stderr, "OBJ_CENSUS frame=%u%s\n", frame, line.c_str());
+}
+} // namespace ObjCensus
+
 // KYTY_TRACE_CS_IMAGE_DUMP=<hex,...>: at the listed direct dispatches (3 per shader once 1000
 // frames were presented), every bound image as the GPU sees it before the dispatch, to
 // <KYTY_TRACE_FRAME_DIR>/csimg_<hash>_<n>_b<binding>_<addr>_<WxH>_<fmt>.raw, plus an IMAGE_DUMP
