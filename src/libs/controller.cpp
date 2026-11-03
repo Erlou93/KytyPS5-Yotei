@@ -973,11 +973,13 @@ void GameController::GetConnectionInfo(bool* flag, int* count) {
 // KYTY_TEST_PAD_SCRIPT=<first>-<last>:<axis>=<value>[,<axis>=<value>...][|...] (test tool): during the listed presented
 // frames the pad state the game reads has those axes overridden (LX, LY, RX, RY, L2, R2; 0-255, sticks centred at
 // 128, LY=0 = left stick fully forward) and a pad is reported connected, so unattended runs can move the character
-// the same way every time.
+// the same way every time. BTN=<hex mask> holds buttons (controller.h PAD_BUTTON_*, e.g. 4000 = Cross) during the
+// segment: separate short segments are separate presses (2.002 starts in the main menu, Cross enters the game).
 struct PadScriptSegment {
 	uint32_t                                       first = 0;
 	uint32_t                                       last  = 0;
 	std::array<int, static_cast<int>(Axis::AxisMax)> axes {-1, -1, -1, -1, -1, -1};
+	uint32_t                                       buttons = 0; // BTN=<hex mask> (e.g. 4000 = Cross): held during the segment
 };
 
 static const std::vector<PadScriptSegment>& PadScript() {
@@ -1006,6 +1008,7 @@ static const std::vector<PadScriptSegment>& PadScript() {
 				pos              = next + 1;
 				const auto eq    = entry.find('=');
 				if (eq == std::string::npos) continue;
+				if (entry.substr(0, eq) == "BTN") segment.buttons |= static_cast<uint32_t>(std::strtoul(entry.c_str() + eq + 1, nullptr, 16));
 				for (size_t a = 0; a < names.size(); a++) {
 					if (entry.substr(0, eq) == names[a]) {
 						segment.axes[a] = std::clamp(std::atoi(entry.c_str() + eq + 1), 0, 255);
@@ -1030,6 +1033,7 @@ static bool ApplyPadScript(ControllerState& state) {
 		for (size_t a = 0; a < segment.axes.size(); a++) {
 			if (segment.axes[a] >= 0) state.axes[a] = segment.axes[a];
 		}
+		state.buttons |= segment.buttons;
 		state.time = LibKernel::KernelGetProcessTime();
 		return true;
 	}
