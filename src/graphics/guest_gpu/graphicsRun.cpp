@@ -2761,9 +2761,14 @@ void CommandProcessor::ExecuteDrawIndirect(const GpuOperation& operation) {
 			draw_count = max_count_or_count;
 		}
 	}
-	// KYTY_TRACE_INDIRECT_DRAWS: GPU-generated draw counts/arguments as the CP reads them.
+	// KYTY_TRACE_INDIRECT_DRAWS[=<frame>]: GPU-generated draw counts/arguments as the CP reads them (the first 400 from
+	// that frame on, with the debug marker path).
 	static constinit Common::OnceValue<bool> trace_indirect_once;
 	const bool trace_indirect = trace_indirect_once.Get([&] { return std::getenv("KYTY_TRACE_INDIRECT_DRAWS") != nullptr; });
+	static const uint32_t trace_indirect_from = [] {
+		const char* value = std::getenv("KYTY_TRACE_INDIRECT_DRAWS");
+		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+	}();
 	if (trace_indirect) {
 		static std::atomic<uint32_t> logged {0};
 		static std::atomic<uint32_t> packets {0};
@@ -2779,7 +2784,7 @@ void CommandProcessor::ExecuteDrawIndirect(const GpuOperation& operation) {
 		packets.fetch_add(1);
 		draws.fetch_add(draw_count);
 		if (draw_count == 0) zero_packets.fetch_add(1);
-		if (logged.fetch_add(1) < 400u) {
+		if (frame >= trace_indirect_from && logged.fetch_add(1) < 400u) {
 			auto&      cache    = m_renderer.GetBufferCache();
 			const auto args     = first_record;
 			const bool count_gpu = count_addr != nullptr &&
@@ -2789,10 +2794,11 @@ void CommandProcessor::ExecuteDrawIndirect(const GpuOperation& operation) {
 			const auto* first = reinterpret_cast<const uint32_t*>(args);
 			std::fprintf(stderr,
 			             "INDIRECT_DRAW frame=%u indexed=%d count_addr=0x%llx count_gpu=%d max=%u count=%u "
-			             "args=0x%llx args_gpu=%d stride=%u first=%u,%u,%u,%u,%u\n",
+			             "args=0x%llx args_gpu=%d stride=%u first=%u,%u,%u,%u,%u marker=[%s]\n",
 			             frame, indexed ? 1 : 0, static_cast<unsigned long long>(reinterpret_cast<uint64_t>(count_addr)),
 			             count_gpu ? 1 : 0, max_count_or_count, draw_count, static_cast<unsigned long long>(args),
-			             args_gpu ? 1 : 0, stride_in_bytes, first[0], first[1], first[2], first[3], first[4]);
+			             args_gpu ? 1 : 0, stride_in_bytes, first[0], first[1], first[2], first[3], first[4],
+			             DebugMarkerPath().c_str());
 		}
 	}
 
