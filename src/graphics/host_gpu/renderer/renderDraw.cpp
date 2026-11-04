@@ -2210,9 +2210,10 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 	}
 	// Image dumps run before the bindings are committed: the dump leaves an image in a transfer
 	// layout, and CommitBindings transitions it back to the layout its descriptor names.
-	if (!vertex_stages.empty() && state.vertex_info[0].stage.program != nullptr) {
-		DrawImageDumpTrace(m_context, vk_buffer, *state.vertex_info[0].stage.program, bindings.vertex[0],
-		                   state.vertex_info[0].stage.resources);
+	for (uint32_t k = 0; k < vertex_stages.size(); k++) { // every vertex-side stage (LS, HS, DS of a tessellated draw)
+		if (state.vertex_info[k].stage.program == nullptr) continue;
+		DrawImageDumpTrace(m_context, vk_buffer, *state.vertex_info[k].stage.program, bindings.vertex[k],
+		                   state.vertex_info[k].stage.resources);
 	}
 	if (state.ps_active && bindings.pixel && state.ps_input_info.stage.program != nullptr) {
 		DrawImageDumpTrace(m_context, vk_buffer, *state.ps_input_info.stage.program, *bindings.pixel,
