@@ -46,7 +46,7 @@ of system memory in play; with 16 GB Windows runs out of memory and pages to dis
    any game code). On the first Play the launcher finds those shaders in your game files and compiles them before the
    game starts; this takes a few minutes and runs only once. The game then starts by itself. Without it the first
    hours stutter while shaders compile during play. The v0.1.4 hints cover the game **from the start to the Snake
-   fight** only (the shader format changed in v0.1.4, so the older, larger hints could not be kept): later areas
+   fight** only (the shader format changed in v0.1.4, so the older hints could not be kept): later areas
    compile their shaders while you play, with short stutters the first time you reach them. Shaders compiled while
    playing are saved, so the next visit is smooth.
 4. **Graphics mode:** the game's own *Performance* mode is the one tested. In *Quality* mode the game changes its
