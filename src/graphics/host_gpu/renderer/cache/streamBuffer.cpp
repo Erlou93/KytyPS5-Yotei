@@ -96,15 +96,19 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	VmaAllocationInfo allocation_result {};
 	VkBuffer          native_buffer = VK_NULL_HANDLE;
 	vk::Result        result        = vk::Result::eErrorOutOfDeviceMemory;
-	// KYTY_DIAG_BIG_NO_BAR=<MiB> (diagnostic, 4.11: the 2.002 post-cutscene slowdown): guest buffers of at least that size
-	// get plain device-local memory instead of resizable-BAR memory (their CPU reads then download).
-	static const uint64_t big_no_bar = [] {
-		const char* value = std::getenv("KYTY_DIAG_BIG_NO_BAR");
-		if (value == nullptr) return uint64_t {0};
-		std::fprintf(stderr, "DIAG_BIG_NO_BAR from %s MiB\n", value);
-		return std::strtoull(value, nullptr, 10) << 20u;
+	// Guest buffers of 256 MiB and more (the buffer cache's joined spans) take plain device-local memory, not resizable-BAR
+	// memory; their CPU reads download through a copy. Ghost of Yotei 2.002 clears 11 MB of particle data every frame in
+	// a 523 MiB joined span: while that span sat in BAR memory, the GPU's writes there intermittently ran at bus speed
+	// (~95 ms per clear instead of ~0.03 ms; 5-7 fps in the Snake fight after its cutscene, map §3w, 4.11.2026).
+	// KYTY_FIX_BIG_BUFFER_DEVICE=0 (test switch, removed after the test): the old placement (BAR for every size).
+	static const bool big_device = [] {
+		const char* value = std::getenv("KYTY_FIX_BIG_BUFFER_DEVICE");
+		const bool  on    = value == nullptr || std::strcmp(value, "0") != 0;
+		if (!on) std::fprintf(stderr, "FIX_BIG_BUFFER_DEVICE=0: large guest buffers in BAR memory (old path)\n");
+		return on;
 	}();
-	if (usage == MemoryUsage::DeviceLocal && cpu_address != 0 && (big_no_bar == 0 || size < big_no_bar)) {
+	constexpr uint64_t BigBufferBytes = 256ull << 20u;
+	if (usage == MemoryUsage::DeviceLocal && cpu_address != 0 && (!big_device || size < BigBufferBytes)) {
 		// Device-local and host-visible (resizable BAR), persistently mapped; falls back to plain
 		// device-local memory when none is left.
 		auto bar           = allocation_info;
