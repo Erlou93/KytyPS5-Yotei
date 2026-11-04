@@ -99,17 +99,23 @@ void PackedCopies(const VulkanImage& image, uint64_t offset, std::vector<vk::Buf
 // Whether the texture may move now: a registered, clean color texture (its contents are its guest bytes or an upload of
 // them: not GPU- or buffer-written), no target, storage, depth, stencil, metadata or video-out image, nothing pending on
 // it (eviction, image read, probe, rebind), not bound by a draw, not referenced by a resident image heap, one layout for
-// all its subresources (a whole-image barrier and copy), single-sampled, contents defined.
-bool Movable(const Image& image, uint64_t now_ms) {
+// all its subresources (a whole-image barrier and copy), single-sampled, contents defined. Null when it may move, else
+// the first reason it may not (the TEXMOVE line names the first one of a batch).
+const char* Unmovable(const Image& image, uint64_t now_ms) {
 	const auto& b = image.backing;
-	return image.registered && !image.info.data.Empty() && b.image != nullptr && b.allocation != nullptr &&
-	       !image.IsGpuModified() && !image.IsBufferModified() && !image.usage.render_target && !image.usage.depth_target &&
-	       !image.usage.storage && !image.usage.video_out && !image.info.IsDepth() && !image.info.HasStencil() &&
-	       !image.info.HasMetadata() && !image.depth_id && image.stencil_ids.empty() && !image.eviction_pending &&
-	       !image.read_armed && image.probe_pending == 0 && image.heap_refs.load(std::memory_order_relaxed) == 0 &&
-	       image.plan_uses == 0 && !image.binding.is_bound && !image.binding.is_target && !image.binding.needs_rebind &&
-	       b.samples == 1 && b.subresource_states.empty() && b.state.layout != vk::ImageLayout::eUndefined &&
-	       vk::blockSize(b.format) != 0 && (image.texmove_ms == 0 || now_ms - image.texmove_ms >= MoveAgainMs);
+	if (!image.registered || image.info.data.Empty() || b.image == nullptr || b.allocation == nullptr) return "unregistered";
+	if (image.IsGpuModified() || image.IsBufferModified()) return "gpu_written";
+	if (image.usage.render_target || image.usage.depth_target || image.usage.storage || image.usage.video_out) return "target";
+	if (image.info.IsDepth() || image.info.HasStencil() || image.info.HasMetadata() || image.depth_id ||
+	    !image.stencil_ids.empty() || vk::blockSize(b.format) == 0 || b.samples != 1)
+		return "kind";
+	if (image.eviction_pending || image.read_armed || image.probe_pending != 0) return "pending";
+	if (image.heap_refs.load(std::memory_order_relaxed) != 0 || image.plan_uses != 0 || image.binding.is_bound ||
+	    image.binding.is_target || image.binding.needs_rebind)
+		return "bound";
+	if (!b.subresource_states.empty() || b.state.layout == vk::ImageLayout::eUndefined) return "layout";
+	if (image.texmove_ms != 0 && now_ms - image.texmove_ms < MoveAgainMs) return "moved_recently";
+	return nullptr;
 }
 
 vk::ImageMemoryBarrier2 ImageBarrier(vk::Image image, vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access,
@@ -163,14 +169,16 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	};
 	struct Drain {
 		VkDeviceMemory    memory = VK_NULL_HANDLE;
+		uint32_t          type   = 0;
 		uint64_t          used   = 0;
 		std::vector<Move> moves;
 		bool              ok = true;
 	};
 	struct Counters {
-		uint64_t candidates = 0, foreign = 0, busy = 0, no_room = 0, dest_in_drain = 0, newblock = 0, images = 0;
-		uint64_t moved = 0, emptied = 0, returned = 0, returned_bytes = 0, slots = 0, memos = 0, mismatches = 0;
-		uint64_t stale = 0, still_present = 0;
+		uint64_t candidates = 0, foreign = 0, busy = 0, over_batch = 0, no_room = 0, dest_in_drain = 0, newblock = 0;
+		uint64_t plugs = 0, plug_bytes = 0, images = 0, moved = 0, emptied = 0, returned = 0, returned_bytes = 0;
+		uint64_t slots = 0, memos = 0, mismatches = 0, stale = 0, still_present = 0;
+		const char* busy_why = "-";
 	} n;
 	double                  ms_record = 0, ms_wait = 0, ms_swap = 0;
 	std::vector<Drain>      drains;
@@ -188,14 +196,15 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		totals.still_present.fetch_add(n.still_present);
 		const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
 		std::fprintf(stderr,
-		             "TEXMOVE frame=%llu trigger_empty_MiB=%llu candidate_blocks=%llu skip(foreign=%llu busy=%llu no_room=%llu "
-		             "dest_in_drain=%llu) newblock_fallback=%llu drained=%zu images=%llu moved_MiB=%.1f emptied=%llu "
-		             "returned=%llu returned_MiB=%llu slots_rewritten=%llu memo_invalidations=%llu ms_record=%.2f "
-		             "ms_wait=%.2f ms_swap=%.2f ms_total=%.2f\n",
+		             "TEXMOVE frame=%llu trigger_empty_MiB=%llu candidate_blocks=%llu skip(foreign=%llu busy=%llu busy_why=%s "
+		             "over_batch=%llu no_room=%llu) dest_in_drain=%llu plugs=%llu/%lluMiB newblock_fallback=%llu drained=%zu "
+		             "images=%llu moved_MiB=%.1f emptied=%llu returned=%llu returned_MiB=%llu slots_rewritten=%llu "
+		             "memo_invalidations=%llu ms_record=%.2f ms_wait=%.2f ms_swap=%.2f ms_total=%.2f\n",
 		             u(m_graphics.presented_frames.load(std::memory_order_relaxed)), u(empty >> 20u), u(n.candidates),
-		             u(n.foreign), u(n.busy), u(n.no_room), u(n.dest_in_drain), u(n.newblock), drains.size(), u(n.images),
-		             static_cast<double>(n.moved) / 1048576.0, u(n.emptied), u(n.returned), u(n.returned_bytes >> 20u),
-		             u(n.slots), u(n.memos), ms_record, ms_wait, ms_swap, MsSince(start));
+		             u(n.foreign), u(n.busy), n.busy_why, u(n.over_batch), u(n.no_room), u(n.dest_in_drain), u(n.plugs),
+		             u(n.plug_bytes >> 20u), u(n.newblock), drains.size(), u(n.images), static_cast<double>(n.moved) / 1048576.0,
+		             u(n.emptied), u(n.returned), u(n.returned_bytes >> 20u), u(n.slots), u(n.memos), ms_record, ms_wait,
+		             ms_swap, MsSince(start));
 		if (mode >= 2) {
 			std::fprintf(stderr,
 			             "TEXMOVE_CHECK_SUMMARY batch=%llu images=%llu mismatches=%llu stale_slots=%llu "
@@ -226,7 +235,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		for (const auto& block: census) {
 			if (block.allocations.empty() || block.free * 100u < block.size * config.block_pct) continue;
 			n.candidates++;
-			Drain drain {block.memory, block.size - block.free, {}, true};
+			Drain drain {block.memory, block.type, block.size - block.free, {}, true};
 			for (const auto allocation: block.allocations) {
 				const auto owner = owners.find(allocation);
 				if (owner == owners.end()) { // a buffer, a placeholder, an image the cache does not hold
@@ -235,19 +244,49 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 					break;
 				}
 				const auto& image = m_slot_images[owner->second];
-				if (!Movable(image, now)) {
-					n.busy++;
+				if (const char* why = Unmovable(image, now); why != nullptr) {
+					if (n.busy++ == 0) n.busy_why = why;
 					drain.ok = false;
 					break;
 				}
 				drain.moves.push_back({owner->second, image.serial, allocation, image.backing.state, nullptr, {}, {}});
 			}
-			if (!drain.ok || batch_used + drain.used > config.batch_bytes) continue;
+			if (!drain.ok) continue;
+			if (batch_used + drain.used > config.batch_bytes) {
+				n.over_batch++;
+				continue;
+			}
 			batch_used += drain.used;
 			drains.push_back(std::move(drain));
 		}
-		std::unordered_set<VkDeviceMemory> drained;
-		for (const auto& drain: drains) drained.insert(drain.memory);
+		// The blocks no destination may take: those being emptied, and the empty block VMA keeps (a texture moved into it
+		// only moves the hole: VMA frees an emptied block only while another empty one exists; the first run's batches
+		// emptied 3 blocks and returned none). Their free ranges are plugged first; a destination that still lands in one
+		// stays there as a plug too, and the next try goes elsewhere.
+		std::unordered_map<uint32_t, std::vector<VkDeviceMemory>>   avoid;
+		std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> plug_sizes; // per type: largest free, smallest move
+		for (const auto& drain: drains) {
+			avoid[drain.type].push_back(drain.memory);
+			auto& sizes = plug_sizes.try_emplace(drain.type, 0, ~uint64_t {0}).first->second;
+			for (const auto& move: drain.moves)
+				sizes.second = std::min(sizes.second, m_graphics.GetAllocationSize(move.old_allocation));
+		}
+		for (const auto& block: census) {
+			if (!avoid.contains(block.type)) continue;
+			auto& list = avoid[block.type];
+			if (block.allocations.empty()) list.push_back(block.memory);
+			if (std::ranges::find(list, block.memory) != list.end())
+				plug_sizes[block.type].first = std::max(plug_sizes[block.type].first, block.free);
+		}
+		std::vector<VmaAllocation> plugs;
+		for (const auto& [type, sizes]: plug_sizes) {
+			for (const auto plug: m_graphics.PlugBlocks(type, avoid[type], sizes.first, sizes.second)) {
+				n.plugs++;
+				n.plug_bytes += m_graphics.GetAllocationSize(plug);
+				plugs.push_back(plug);
+			}
+		}
+		std::vector<std::unique_ptr<VulkanImage>> image_plugs;
 		// The new images: in a fuller block of the same memory type. One new block per batch is allowed when the batch
 		// empties two or more (gain = emptied - 1).
 		bool fallback = drains.size() >= 2;
@@ -269,28 +308,29 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				create.usage         = b.usage;
 				create.sharingMode   = vk::SharingMode::eExclusive;
 				create.initialLayout = vk::ImageLayout::eUndefined;
-				move.other = std::make_unique<VulkanImage>();
-				bool created = m_graphics.CreateImage(create, *move.other, &relocation);
-				if (!created && fallback) {
-					fallback                   = false;
-					relocation.allow_new_block = true;
-					n.newblock++;
-					move.other = std::make_unique<VulkanImage>();
-					created    = m_graphics.CreateImage(create, *move.other, &relocation);
-				}
-				if (!created) {
-					n.no_room++;
-					move.other.reset();
-					drain.ok = false;
-					break;
-				}
-				uint32_t type = 0;
-				(void)m_graphics.AllocationPlace(move.other->allocation, memory, type);
-				if (drained.contains(memory)) {
+				const auto& avoided = avoid[relocation.memory_type];
+				for (;;) { // ends: every try that lands in an avoided block keeps some of its free space
+					move.other   = std::make_unique<VulkanImage>();
+					bool created = m_graphics.CreateImage(create, *move.other, &relocation);
+					if (!created && fallback) {
+						fallback                   = false;
+						relocation.allow_new_block = true;
+						n.newblock++;
+						created = m_graphics.CreateImage(create, *move.other, &relocation);
+					}
+					if (!created) {
+						n.no_room++;
+						move.other.reset();
+						drain.ok = false;
+						break;
+					}
+					uint32_t type = 0;
+					(void)m_graphics.AllocationPlace(move.other->allocation, memory, type);
+					if (std::ranges::find(avoided, memory) == avoided.end()) break;
 					n.dest_in_drain++;
-					drain.ok = false;
-					break;
+					image_plugs.push_back(std::move(move.other));
 				}
+				if (!drain.ok) break;
 			}
 			if (!drain.ok) { // the block stays: its new images go
 				for (auto& move: drain.moves) {
@@ -299,6 +339,14 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				drain.moves.clear();
 			}
 		}
+		// Freeing a plug can let VMA free its spare empty block (a free while another empty block exists): counted too.
+		uint64_t frees_before = 0, bytes_before = 0, frees_after = 0, bytes_after = 0;
+		GraphicContext::DeviceMemoryFrees(frees_before, bytes_before);
+		m_graphics.FreePlugs(plugs);
+		for (auto& plug: image_plugs) m_graphics.DestroyImageNow(*plug);
+		GraphicContext::DeviceMemoryFrees(frees_after, bytes_after);
+		n.returned += frees_after - frees_before;
+		n.returned_bytes += bytes_after - bytes_before;
 		std::erase_if(drains, [](const Drain& drain) { return !drain.ok; });
 		if (drains.empty()) {
 			ms_record = MsSince(start);
@@ -404,7 +452,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				const auto* image = m_slot_images.try_get(move.id);
 				// Freed, replaced, used as more than a texture or rewritten meanwhile: the block stays.
 				const bool same = image != nullptr && image->serial == move.serial &&
-				                  image->backing.allocation == move.old_allocation && Movable(*image, now) &&
+				                  image->backing.allocation == move.old_allocation && Unmovable(*image, now) == nullptr &&
 				                  image->backing.state.layout == move.state.layout;
 				if (busy || !same) {
 					n.busy++;
@@ -473,8 +521,8 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	}
 	m_graphics.TrimRecycledImages();
 	GraphicContext::DeviceMemoryFrees(frees_after, bytes_after);
-	n.returned       = frees_after - frees_before;
-	n.returned_bytes = bytes_after - bytes_before;
+	n.returned += frees_after - frees_before;
+	n.returned_bytes += bytes_after - bytes_before;
 	// The drained blocks: gone, or left empty (VMA keeps one empty block per memory type), or still holding allocations.
 	std::unordered_map<VkDeviceMemory, size_t> present;
 	for (const auto& block: m_graphics.CollectBlocks()) present.emplace(block.memory, block.allocations.size());

@@ -200,6 +200,14 @@ struct GraphicContext {
 		std::vector<VmaAllocation> allocations;
 	};
 	[[nodiscard]] std::vector<BlockCensus> CollectBlocks() const;
+	// KYTY_TEXMOVE: VMA places a new allocation in the first block (fullest first) with a free range it fits, which for a
+	// large texture is often the emptiest block - the one being emptied, or the empty block VMA keeps. Plugs fill the free
+	// ranges of those blocks (memory type `type`, `avoid`) with raw allocations, largest first by halving sizes down to
+	// `min_size`, so the destinations go elsewhere; a plug that lands in another block is freed at once. FreePlugs after
+	// the destinations exist (plugs are never bound or used).
+	[[nodiscard]] std::vector<VmaAllocation> PlugBlocks(uint32_t type, std::span<const VkDeviceMemory> avoid,
+	                                                    uint64_t start_size, uint64_t min_size);
+	void FreePlugs(std::vector<VmaAllocation>& plugs);
 	// The device memory and memory type an allocation lives in (false without one).
 	[[nodiscard]] bool AllocationPlace(VmaAllocation allocation, VkDeviceMemory& memory, uint32_t& type) const;
 	// KYTY_TEXMOVE: vkFreeMemory calls of the allocator since start and the bytes they freed (counted only with the switch).

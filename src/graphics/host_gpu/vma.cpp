@@ -15,6 +15,7 @@
 #pragma clang diagnostic pop
 #endif
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/envDefaults.h"
 #include "common/logging/log.h"
@@ -744,6 +745,37 @@ std::vector<GraphicContext::BlockCensus> GraphicContext::CollectBlocks() const {
 		}
 	}
 	return blocks;
+}
+
+std::vector<VmaAllocation> GraphicContext::PlugBlocks(uint32_t type, std::span<const VkDeviceMemory> avoid,
+                                                      uint64_t start_size, uint64_t min_size) {
+	std::vector<VmaAllocation> plugs;
+	if (allocator == nullptr || avoid.empty()) return plugs;
+	VmaAllocationCreateInfo info {};
+	// MIN_TIME walks the blocks emptiest first: the blocks to avoid are tried before the others.
+	info.flags          = VMA_ALLOCATION_CREATE_NEVER_ALLOCATE_BIT | VMA_ALLOCATION_CREATE_STRATEGY_MIN_TIME_BIT;
+	info.memoryTypeBits = 1u << type;
+	constexpr uint64_t Alignment = 4096;
+	for (uint64_t size = Common::AlignDown(start_size, Alignment); size >= std::max(min_size, Alignment); size /= 2u) {
+		size = Common::AlignDown(size, Alignment);
+		for (;;) {
+			const VkMemoryRequirements requirements {size, Alignment, 1u << type};
+			VmaAllocation              plug = nullptr;
+			VmaAllocationInfo          placed {};
+			if (vmaAllocateMemory(allocator, &requirements, &info, &plug, &placed) != VK_SUCCESS) break;
+			if (std::find(avoid.begin(), avoid.end(), placed.deviceMemory) == avoid.end()) {
+				vmaFreeMemory(allocator, plug); // room elsewhere at this size: the destinations may take it
+				break;
+			}
+			plugs.push_back(plug);
+		}
+	}
+	return plugs;
+}
+
+void GraphicContext::FreePlugs(std::vector<VmaAllocation>& plugs) {
+	if (!plugs.empty()) vmaFreeMemoryPages(allocator, plugs.size(), plugs.data());
+	plugs.clear();
 }
 
 bool GraphicContext::AllocationPlace(VmaAllocation allocation, VkDeviceMemory& memory, uint32_t& type) const {
