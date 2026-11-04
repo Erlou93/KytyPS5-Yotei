@@ -514,12 +514,14 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		}
 	}
 	for (const auto view: old_views) m_graphics.device.destroyImageView(view, nullptr);
+	// The images the wait's deferred deletions parked go first, outside the count (their dedicated allocations would be
+	// freed within 2 s anyway; run 2 counted 6 frees / 383 MiB for one block that way).
+	m_graphics.TrimRecycledImages();
 	uint64_t frees_before = 0, bytes_before = 0, frees_after = 0, bytes_after = 0;
 	GraphicContext::DeviceMemoryFrees(frees_before, bytes_before);
 	for (auto& image: destroy) {
 		if (image != nullptr && image->image != nullptr) m_graphics.DestroyImageNow(*image);
 	}
-	m_graphics.TrimRecycledImages();
 	GraphicContext::DeviceMemoryFrees(frees_after, bytes_after);
 	n.returned += frees_after - frees_before;
 	n.returned_bytes += bytes_after - bytes_before;
