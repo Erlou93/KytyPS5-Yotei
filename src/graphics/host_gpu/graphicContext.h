@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <span>
@@ -156,7 +157,7 @@ struct GraphicContext {
 	// allocation counts, free ranges and the largest one - which kind of memory holds the empty space.
 	[[nodiscard]] std::string DeviceMemoryTypeCensus() const;
 	// KYTY_TRACE_VMA_MAP=<frame>,... (measurement): the allocator's full map to vma_map_<frame>.json at the listed frames.
-	void DumpVmaMapIfDue(uint32_t frame) const;
+	void DumpVmaMapIfDue(uint32_t frame, const std::function<void()>& before = {}) const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
 
 	struct HeapUsage {

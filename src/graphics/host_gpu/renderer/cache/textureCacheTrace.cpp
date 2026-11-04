@@ -315,6 +315,23 @@ void SliceStatsTick() {
 	}
 }
 
+void TextureCache::NameAllocationsForMap() {
+	std::scoped_lock lock {m_lock};
+	const uint64_t   now = m_scheduler.CurrentTick();
+	m_slot_images.ForEach([&](ImageId id, const Image& image) {
+		(void)id;
+		if (image.backing.allocation == nullptr) return;
+		const char* kind = image.usage.depth_target ? "ds" : image.usage.render_target ? "rt" : image.usage.storage ? "st" : "tex";
+		char        label[160];
+		std::snprintf(label, sizeof(label), "img %s %s %ux%u l%u m%u flags=%s%s%s age=%llu", kind,
+		              vk::to_string(image.info.pixel_format).c_str(), image.info.extent.width, image.info.extent.height,
+		              image.info.resources.layers, image.info.resources.levels, image.bindless_pinned ? "P" : "",
+		              image.IsGpuModified() ? "G" : "", image.registered ? "R" : "",
+		              static_cast<unsigned long long>(now > image.tick_accessed_last ? now - image.tick_accessed_last : 0));
+		vmaSetAllocationName(m_graphics.allocator, image.backing.allocation, label);
+	});
+}
+
 void TextureCache::TakeCensus(Census& census) {
 	std::scoped_lock lock {m_lock};
 	census = {};

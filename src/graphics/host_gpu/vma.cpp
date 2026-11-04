@@ -412,7 +412,7 @@ std::string GraphicContext::DeviceMemoryTypeCensus() const {
 	return line;
 }
 
-void GraphicContext::DumpVmaMapIfDue(uint32_t frame) const {
+void GraphicContext::DumpVmaMapIfDue(uint32_t frame, const std::function<void()>& before) const {
 	static const std::vector<uint32_t> frames = [] {
 		std::vector<uint32_t> list;
 		const char*           value = std::getenv("KYTY_TRACE_VMA_MAP");
@@ -430,6 +430,7 @@ void GraphicContext::DumpVmaMapIfDue(uint32_t frame) const {
 	static size_t next = 0;
 	if (allocator == nullptr || next >= frames.size() || frame < frames[next]) return;
 	while (next < frames.size() && frame >= frames[next]) next++;
+	if (before) before(); // e.g. the texture cache names its images' allocations
 	char* text = nullptr;
 	vmaBuildStatsString(allocator, &text, VK_TRUE);
 	if (text == nullptr) return;

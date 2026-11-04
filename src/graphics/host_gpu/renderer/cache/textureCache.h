@@ -303,6 +303,9 @@ public:
 	};
 	// Fills census and starts new collector statistics (GPU thread).
 	void TakeCensus(Census& census);
+	// KYTY_TRACE_VMA_MAP (measurement, map §3v): renames every cached image's allocation with what decides whether it
+	// may be evicted - "tex|rt|ds fmt WxH lL mM" + pinned (P), GPU-modified (G), registered (R), ticks since last use.
+	void NameAllocationsForMap();
 	// KYTY_VRAM_BUDGET: memory of images freed in the last collector ticks (their deletion waits for the GPU) and
 	// of images whose eviction is pending: the measured usage still holds it.
 	[[nodiscard]] uint64_t PendingReleaseBytes();
