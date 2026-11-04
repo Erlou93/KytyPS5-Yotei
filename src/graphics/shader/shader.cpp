@@ -983,24 +983,20 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 		params[0].code = merged->front;
 		params[0].hash = merged->front_hash;
 		params[1].code = merged->back;
-		// KYTY_DIAG_MERGED_HS_USER_BASE0 (diagnostic, 3.11 night: the 2.002 particles): the merged program's two parts run
-		// in one wave and see the user SGPRs at the same place. =1: both from s0 (the HS part as the LS part); =8: both from
-		// s8 (the LS part as the HS part, the RDNA2 merged-stage layout with s0:s7 reserved).
-		static const char mode = [] {
+		// KYTY_DIAG_MERGED_HS_USER_BASE0=1 (diagnostic, 3.11 night: the 2.002 particles): the merged program's HS part
+		// runs in the same wave as its LS part, so it sees the user SGPRs where the LS part does (from s0, as params[0]),
+		// not 8 higher as a fused back half with its own user-data block.
+		static const bool base0 = [] {
 			const char* value = Common::ShaderEnv::Read("KYTY_DIAG_MERGED_HS_USER_BASE0");
-			const char  m     = value != nullptr ? value[0] : '\0';
-			if (m == '1' || m == '8') std::fprintf(stderr, "DIAG_MERGED_HS_USER_BASE0 mode=%c\n", m);
-			return m;
+			const bool  on    = value != nullptr && value[0] == '1';
+			if (on) std::fprintf(stderr, "DIAG_MERGED_HS_USER_BASE0 enabled\n");
+			return on;
 		}();
-		if (mode == '1') {
+		if (base0) {
 			const auto hash = params[1].hash;
 			params[1]       = GetShaderParams(regs.ls_regs.data_addr, control_hash, local_users, local);
 			params[1].code  = merged->back;
 			params[1].hash  = hash;
-		} else if (mode == '8') {
-			params[0]      = GetShaderParams(regs.ls_regs.data_addr, local_hash, local_users, local, 8u);
-			params[0].code = merged->front;
-			params[0].hash = merged->front_hash;
 		}
 	} else {
 		params[1] = GetShaderParams(regs.hs_regs.data_addr, control_hash, local_users, control, 8u);
