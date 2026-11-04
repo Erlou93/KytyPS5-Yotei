@@ -3006,6 +3006,12 @@ void BufferCache::GpuDirtyAdd(uint64_t vaddr, uint64_t size) {
 	}
 }
 
+void BufferCache::GpuDirtySubtract(uint64_t vaddr, uint64_t size) {
+	NoteGpuCleanRange(vaddr, size); // the write memo
+	std::unique_lock lock(m_gpu_dirty_mutex);
+	m_gpu_modified_ranges.Subtract(vaddr, size);
+}
+
 bool BufferCache::HasPendingReadback(uint64_t vaddr, uint64_t size) const {
 	return std::ranges::any_of(m_eager_readbacks, [&](const EagerReadback& entry) {
 		return vaddr < entry.end && entry.start < vaddr + size;
