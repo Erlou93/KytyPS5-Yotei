@@ -996,7 +996,7 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 		}();
 		char       mode = spec.empty() ? '\0' : spec[0];
 		const auto only = spec.size() > 2u && spec[1] == ':' ? spec.substr(2) : std::string();
-		if ((mode == '8' || mode == 't') && !only.empty()) {
+		if (mode == '8' && !only.empty()) {
 			char text[17];
 			std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(local_hash));
 			if (only.find(text) == std::string::npos) mode = '\0';
@@ -1012,21 +1012,13 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 					std::snprintf(word, sizeof(word), " %08x", v);
 					text += word;
 				}
-				std::string tes;
-				for (const auto v: evaluation_users) {
-					char word[12];
-					std::snprintf(word, sizeof(word), " %08x", v);
-					tes += word;
-				}
 				std::fprintf(stderr,
 				             "MERGED_HS_USER hash=0x%016llx front=0x%016llx back=0x%016llx applied=%c ls_user_sgpr=%u "
-				             "hs_user_data_addr=0x%llx users:%s tes=0x%016llx tes_user_sgpr=%u tes_users:%s\n",
+				             "hs_user_data_addr=0x%llx users:%s\n",
 				             static_cast<unsigned long long>(local_hash), static_cast<unsigned long long>(merged->front_hash),
 				             static_cast<unsigned long long>(merged->back_hash), mode == '\0' ? '-' : mode,
 				             static_cast<unsigned>(local_users.size()),
-				             static_cast<unsigned long long>(regs.hs_regs.user_data_addr), text.c_str(),
-				             static_cast<unsigned long long>(evaluation_hash), static_cast<unsigned>(evaluation_users.size()),
-				             tes.c_str());
+				             static_cast<unsigned long long>(regs.hs_regs.user_data_addr), text.c_str());
 			}
 		}
 		if (mode == '1') {
@@ -1038,11 +1030,6 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 			params[0]      = GetShaderParams(regs.ls_regs.data_addr, local_hash, local_users, local, 8u);
 			params[0].code = merged->front;
 			params[0].hash = merged->front_hash;
-		} else if (mode == 't') { // =t:<hash>: the LS part and the evaluation (kGs) program from s8
-			params[0]      = GetShaderParams(regs.ls_regs.data_addr, local_hash, local_users, local, 8u);
-			params[0].code = merged->front;
-			params[0].hash = merged->front_hash;
-			params[2]      = GetShaderParams(regs.es_regs.data_addr, evaluation_hash, evaluation_users, evaluation, 8u);
 		}
 	} else {
 		params[1] = GetShaderParams(regs.hs_regs.data_addr, control_hash, local_users, control, 8u);
