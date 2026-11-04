@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -106,11 +107,16 @@ void PackedCopies(const VulkanImage& image, uint64_t offset, std::vector<vk::Buf
 // it (eviction, image read, probe, rebind), not bound by a draw, not referenced by a resident image heap, one layout for
 // all its subresources (a whole-image barrier and copy), single-sampled, contents defined. Null when it may move, else
 // the first reason it may not (the TEXMOVE line names the first one of a batch).
-const char* Unmovable(const Image& image, uint64_t now_ms) {
+// `ignore` (the ceiling census only, never a move): IgnoreGpuWritten drops the GPU/buffer-written check, IgnoreTargets also
+// the render-target and storage use (depth and video-out stay).
+constexpr uint32_t IgnoreGpuWritten = 1u, IgnoreTargets = 2u;
+const char* Unmovable(const Image& image, uint64_t now_ms, uint32_t ignore = 0) {
 	const auto& b = image.backing;
 	if (!image.registered || image.info.data.Empty() || b.image == nullptr || b.allocation == nullptr) return "unregistered";
-	if (image.IsGpuModified() || image.IsBufferModified()) return "gpu_written";
-	if (image.usage.render_target || image.usage.depth_target || image.usage.storage || image.usage.video_out) return "target";
+	if ((ignore & IgnoreGpuWritten) == 0 && (image.IsGpuModified() || image.IsBufferModified())) return "gpu_written";
+	if (image.usage.depth_target || image.usage.video_out ||
+	    ((ignore & IgnoreTargets) == 0 && (image.usage.render_target || image.usage.storage)))
+		return "target";
 	if (image.info.IsDepth() || image.info.HasStencil() || image.info.HasMetadata() || image.depth_id ||
 	    !image.stencil_ids.empty() || vk::blockSize(b.format) == 0 || b.samples != 1)
 		return "kind";
@@ -461,6 +467,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	double                  ms_record = 0, ms_wait = 0, ms_swap = 0;
 	std::vector<Drain>      drains;
 	std::unique_ptr<Buffer> check;
+	std::string             ceiling_text; // the ceiling census (measurement only, map §3v 5.11)
 	const auto report = [&] {
 		auto& totals = GetTexMoveTotals();
 		totals.batches.fetch_add(1);
@@ -477,12 +484,12 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		             "TEXMOVE frame=%llu trigger_empty_MiB=%llu candidate_blocks=%llu skip(foreign=%llu busy=%llu busy_why=%s "
 		             "over_batch=%llu no_room=%llu) dest_in_drain=%llu plugs=%llu/%lluMiB newblock_fallback=%llu drained=%zu "
 		             "images=%llu moved_MiB=%.1f emptied=%llu returned=%llu returned_MiB=%llu slots_rewritten=%llu "
-		             "memo_invalidations=%llu ms_record=%.2f ms_wait=%.2f ms_swap=%.2f ms_total=%.2f\n",
+		             "memo_invalidations=%llu ms_record=%.2f ms_wait=%.2f ms_swap=%.2f ms_total=%.2f%s\n",
 		             u(m_graphics.presented_frames.load(std::memory_order_relaxed)), u(empty >> 20u), u(n.candidates),
 		             u(n.foreign), u(n.busy), n.busy_why, u(n.over_batch), u(n.no_room), u(n.dest_in_drain), u(n.plugs),
 		             u(n.plug_bytes >> 20u), u(n.newblock), drains.size(), u(n.images), static_cast<double>(n.moved) / 1048576.0,
 		             u(n.emptied), u(n.returned), u(n.returned_bytes >> 20u), u(n.slots), u(n.memos), ms_record, ms_wait,
-		             ms_swap, MsSince(start));
+		             ms_swap, MsSince(start), ceiling_text.c_str());
 		if (mode >= 2) {
 			std::fprintf(stderr,
 			             "TEXMOVE_CHECK_SUMMARY batch=%llu images=%llu mismatches=%llu stale_slots=%llu "
@@ -510,6 +517,86 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		});
 		// Emptiest first; whole blocks up to the batch size.
 		std::ranges::sort(census, [](const auto& a, const auto& b) { return a.size - a.free < b.size - b.free; });
+		// The ceiling census (measurement only, map §3v 5.11: most attempts gave up on gpu_written): the candidate blocks
+		// that would empty if GPU-written textures could move (every other check kept), and if their render-target and
+		// storage use did not stop them either; the first reason each other block still keeps; and what the GPU-written
+		// residents of the candidate blocks are (top by bytes: format, extent, layers/levels, how written, usage flags,
+		// frames since last use, GPU writes of any image since its own last one).
+		{
+			struct Top {
+				uint64_t count = 0, bytes = 0, unused = ~uint64_t {0}, writes = ~uint64_t {0};
+			};
+			std::map<std::string, Top> top;
+			uint64_t                   gpu_count = 0, gpu_bytes = 0;
+			for (const uint32_t ignore: {IgnoreGpuWritten, IgnoreGpuWritten | IgnoreTargets}) {
+				uint64_t                        blocks = 0, block_bytes = 0, resident = 0;
+				std::map<std::string, uint64_t> blockers;
+				for (const auto& block: census) {
+					if (block.allocations.empty() || block.free * 100u < block.size * config.block_pct) continue;
+					const char* why = nullptr;
+					for (const auto allocation: block.allocations) {
+						const auto owner = owners.find(allocation);
+						why              = owner == owners.end() ? "foreign" : Unmovable(m_slot_images[owner->second], now, ignore);
+						if (why != nullptr) break;
+					}
+					if (why != nullptr) {
+						blockers[why]++;
+						continue;
+					}
+					blocks++;
+					block_bytes += block.size;
+					resident += block.size - block.free;
+				}
+				char part[160];
+				std::snprintf(part, sizeof(part), " | %s blocks=%llu MiB=%llu resident_MiB=%llu blockers_left=",
+				              ignore == IgnoreGpuWritten ? "ceil_gpu_written" : "ceil_gpu_targets",
+				              static_cast<unsigned long long>(blocks), static_cast<unsigned long long>(block_bytes >> 20u),
+				              static_cast<unsigned long long>(resident >> 20u));
+				ceiling_text += part;
+				for (const auto& [why, count]: blockers) ceiling_text += why + ":" + std::to_string(count) + ",";
+				if (blockers.empty()) ceiling_text += "-";
+			}
+			for (const auto& block: census) {
+				if (block.allocations.empty() || block.free * 100u < block.size * config.block_pct) continue;
+				for (const auto allocation: block.allocations) {
+					const auto owner = owners.find(allocation);
+					if (owner == owners.end()) continue;
+					const auto& image = m_slot_images[owner->second];
+					if (!image.registered || !(image.IsGpuModified() || image.IsBufferModified())) continue;
+					const char* how = image.IsBufferModified() && !image.IsGpuModified() ? "buf"
+					                  : image.usage.render_target                       ? "rt"
+					                  : image.usage.storage                             ? "st"
+					                  : image.usage.depth_target                        ? "ds"
+					                                                                    : "copy";
+					char key[160];
+					std::snprintf(key, sizeof(key), "%s/%ux%ux%u/l%u/m%u/%s/u%x%s", vk::to_string(image.backing.format).c_str(),
+					              image.backing.extent.width, image.backing.extent.height, image.backing.extent.depth,
+					              image.backing.layers, image.backing.mip_levels, how,
+					              static_cast<uint32_t>(image.backing.usage), image.bindless_pinned ? "/P" : "");
+					const uint64_t bytes  = m_graphics.GetAllocationSize(allocation);
+					const uint64_t used   = m_lru_cache.GetTick(image.lru_id);
+					auto&          entry  = top[key];
+					entry.count++;
+					entry.bytes += bytes;
+					entry.unused = std::min(entry.unused, m_gc_tick > used ? m_gc_tick - used : 0);
+					entry.writes = std::min(entry.writes, Image::s_content_serial - std::min(Image::s_content_serial, image.content_serial));
+					gpu_count++;
+					gpu_bytes += bytes;
+				}
+			}
+			std::vector<std::pair<std::string, Top>> sorted(top.begin(), top.end());
+			std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second.bytes > b.second.bytes; });
+			std::string line = "TEXMOVE_CEIL_TOP frame=" +
+			                   std::to_string(m_graphics.presented_frames.load(std::memory_order_relaxed)) +
+			                   " gpu_written_residents=" + std::to_string(gpu_count) + "/" +
+			                   std::to_string(gpu_bytes >> 20u) + "MiB kinds=" + std::to_string(sorted.size());
+			for (size_t i = 0; i < sorted.size() && i < 8u; i++) {
+				const auto& [key, entry] = sorted[i];
+				line += " [" + key + " x" + std::to_string(entry.count) + " " + std::to_string(entry.bytes >> 20u) +
+				        "MiB unused>=" + std::to_string(entry.unused) + " writes_since>=" + std::to_string(entry.writes) + "]";
+			}
+			std::fprintf(stderr, "%s\n", line.c_str());
+		}
 		uint64_t batch_used = 0;
 		for (const auto& block: census) {
 			if (block.allocations.empty() || block.free * 100u < block.size * config.block_pct) continue;
