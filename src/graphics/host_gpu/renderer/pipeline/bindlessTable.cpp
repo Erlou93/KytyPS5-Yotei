@@ -935,6 +935,7 @@ void BindlessTable::WriteSlot(uint32_t binding, uint32_t slot, vk::ImageView vie
 	write.pImageInfo      = &info;
 	UpdateSetDescriptors(m_graphics.device, 1, &write);
 	if (m_slot_views_on && binding < ImageArrays) { // KYTY_TEXMOVE
+		TexMoveCheck(static_cast<VkImageView>(view), "bindless_WriteSlot"); // =2: an old view of a moved texture
 		auto& views = m_slot_views[binding];
 		if (slot >= views.size()) views.resize(slot + 1u);
 		views[slot] = {view, layout};

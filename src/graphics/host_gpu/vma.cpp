@@ -445,16 +445,17 @@ std::string GraphicContext::DeviceMemoryTypeCensus() const {
 	line += " | imgsz created=" + TakeSizeHist(g_image_created_sizes) + " freed=" + TakeSizeHist(g_image_freed_sizes);
 	if (TexMoveMode() != 0) { // KYTY_TEXMOVE totals since start
 		const auto& t = GetTexMoveTotals();
-		char        part[256];
+		char        part[384];
 		std::snprintf(part, sizeof(part),
 		              " | texmove batches=%llu images=%llu moved_MiB=%llu emptied=%llu returned=%llu returned_MiB=%llu "
-		              "mismatches=%llu stale_slots=%llu still_present=%llu",
+		              "mismatches=%llu stale_slots=%llu still_present=%llu stale_uses=%llu",
 		              static_cast<unsigned long long>(t.batches.load()), static_cast<unsigned long long>(t.images.load()),
 		              mib(t.moved_bytes.load()), static_cast<unsigned long long>(t.emptied.load()),
 		              static_cast<unsigned long long>(t.returned.load()), mib(t.returned_bytes.load()),
 		              static_cast<unsigned long long>(t.mismatches.load()),
 		              static_cast<unsigned long long>(t.stale_slots.load()),
-		              static_cast<unsigned long long>(t.still_present.load()));
+		              static_cast<unsigned long long>(t.still_present.load()),
+		              static_cast<unsigned long long>(t.stale_uses.load()));
 		line += part;
 	}
 	return line;

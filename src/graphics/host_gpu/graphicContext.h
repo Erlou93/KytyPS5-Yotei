@@ -42,9 +42,23 @@ inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 // KYTY_TEXMOVE: totals since start, appended to the MEM_CENSUS line (GraphicContext::DeviceMemoryTypeCensus).
 struct TexMoveTotals {
 	std::atomic<uint64_t> batches {0}, images {0}, moved_bytes {0}, emptied {0}, returned {0}, returned_bytes {0};
-	std::atomic<uint64_t> mismatches {0}, stale_slots {0}, still_present {0};
+	std::atomic<uint64_t> mismatches {0}, stale_slots {0}, still_present {0}, stale_uses {0};
 };
 [[nodiscard]] TexMoveTotals& GetTexMoveTotals();
+// KYTY_TEXMOVE=2, the stale-use detector (textureMove.cpp): a moved texture's old views and image stay alive for
+// KYTY_TEXMOVE_RETIRE_S (10) after the swap, and every point where a view or image enters GPU work (the dispatcher's
+// descriptor writes, push descriptors, update templates, barriers, rendering attachments, copies, clears, view
+// creation, plus the bindless slot and commit packet writers) reports a use of one of them (TEXMOVE_STALE_USE). True
+// only while such views exist.
+inline std::atomic<bool> g_texmove_watch {false};
+void TexMoveStaleCheck(uint64_t handle, const char* path);
+template <typename Handle>
+inline void TexMoveCheck(Handle handle, const char* path) {
+	if (g_texmove_watch.load(std::memory_order_relaxed) && handle != VK_NULL_HANDLE)
+		TexMoveStaleCheck(reinterpret_cast<uint64_t>(handle), path);
+}
+// Wraps the dispatcher functions above (after CommandRecorder::Install, so the wrappers call its hooks); KYTY_TEXMOVE=2.
+void TexMoveInstallDetector();
 
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;

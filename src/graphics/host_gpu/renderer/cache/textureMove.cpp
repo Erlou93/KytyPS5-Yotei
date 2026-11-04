@@ -19,6 +19,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -36,6 +39,7 @@ struct TexMoveConfig {
 	uint64_t interval_ms = 0;
 	uint64_t block_pct   = 0;
 	uint64_t batch_bytes = 0;
+	uint64_t retire_ms   = 0; // KYTY_TEXMOVE=2: how long the old views and images stay (stale-use detector)
 };
 const TexMoveConfig& Config() {
 	static const TexMoveConfig config = [] {
@@ -48,10 +52,11 @@ const TexMoveConfig& Config() {
 		c.interval_ms = env("KYTY_TEXMOVE_INTERVAL_S", 10) * 1000u;
 		c.block_pct   = env("KYTY_TEXMOVE_BLOCK_EMPTY_PCT", 50);
 		c.batch_bytes = env("KYTY_TEXMOVE_BATCH_MB", 128) << 20u;
-		std::fprintf(stderr, "TEXMOVE config min_empty_MiB=%llu interval_s=%llu block_empty_pct=%llu batch_MiB=%llu\n",
+		c.retire_ms   = env("KYTY_TEXMOVE_RETIRE_S", 10) * 1000u;
+		std::fprintf(stderr, "TEXMOVE config min_empty_MiB=%llu interval_s=%llu block_empty_pct=%llu batch_MiB=%llu retire_s=%llu\n",
 		             static_cast<unsigned long long>(c.min_empty >> 20u),
 		             static_cast<unsigned long long>(c.interval_ms / 1000u), static_cast<unsigned long long>(c.block_pct),
-		             static_cast<unsigned long long>(c.batch_bytes >> 20u));
+		             static_cast<unsigned long long>(c.batch_bytes >> 20u), static_cast<unsigned long long>(c.retire_ms / 1000u));
 		return c;
 	}();
 	return config;
@@ -143,14 +148,285 @@ void PipelineBarrier(vk::CommandBuffer command, const std::vector<vk::ImageMemor
 	command.pipelineBarrier2(dependency);
 }
 
+// ---- KYTY_TEXMOVE=2, the stale-use detector (4.11: Rafał saw the ground texture vanish once at a hitch with =1). A holder
+// the swap does not update (a cached view, a set, a prepared binding) would keep using a moved texture's old view or
+// image; destroyed at once, the handle can be reused by a new view and the draw samples another image. In check mode
+// the old views and images stay alive for the retire period (a stale user still samples the right bytes) and every
+// point where a view or image enters GPU work looks them up here.
+struct RetiredInfo {
+	uint64_t     image_id = 0; // ImageId generation << 32 | index
+	vk::Format   format   = vk::Format::eUndefined;
+	vk::Extent3D extent {};
+	uint64_t     frame = 0; // presented frame of the batch that moved it
+	bool         view  = false;
+};
+struct RetiredBatch {
+	uint64_t                                  deadline_ms = 0, frame = 0;
+	std::vector<vk::ImageView>                views;
+	std::vector<std::unique_ptr<VulkanImage>> images;
+	std::vector<VkDeviceMemory>               drained;
+};
+std::shared_mutex                         g_retired_mutex;
+std::unordered_map<uint64_t, RetiredInfo> g_retired;         // old view and image handles
+std::vector<RetiredBatch>                 g_retired_batches; // GPU thread
+std::atomic<uint64_t>                     g_stale_frame {0};
+// The image entries of every descriptor update template (their data holds VkDescriptorImageInfo at offset + n * stride).
+std::mutex                                                                  g_template_mutex;
+std::unordered_map<uint64_t, std::vector<VkDescriptorUpdateTemplateEntry>> g_templates;
+
+bool ImageDescriptor(VkDescriptorType type) {
+	return type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+	       type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+}
+void CheckWrites(uint32_t count, const VkWriteDescriptorSet* writes, const char* path) {
+	if (!g_texmove_watch.load(std::memory_order_relaxed) || writes == nullptr) return;
+	for (uint32_t i = 0; i < count; i++) {
+		if (!ImageDescriptor(writes[i].descriptorType) || writes[i].pImageInfo == nullptr) continue;
+		for (uint32_t j = 0; j < writes[i].descriptorCount; j++) TexMoveCheck(writes[i].pImageInfo[j].imageView, path);
+	}
+}
+void CheckTemplate(VkDescriptorUpdateTemplate update, const void* data, const char* path) {
+	if (!g_texmove_watch.load(std::memory_order_relaxed) || data == nullptr) return;
+	std::lock_guard lock(g_template_mutex);
+	const auto      found = g_templates.find(reinterpret_cast<uint64_t>(update));
+	if (found == g_templates.end()) return;
+	for (const auto& entry: found->second) {
+		for (uint32_t j = 0; j < entry.descriptorCount; j++) {
+			VkDescriptorImageInfo info {};
+			std::memcpy(&info, static_cast<const uint8_t*>(data) + entry.offset + size_t {j} * entry.stride, sizeof(info));
+			TexMoveCheck(info.imageView, path);
+		}
+	}
+}
+void CheckAttachment(const VkRenderingAttachmentInfo* attachment, const char* path) {
+	if (attachment == nullptr) return;
+	TexMoveCheck(attachment->imageView, path);
+	TexMoveCheck(attachment->resolveImageView, path);
+}
+
+// The dispatcher's functions before the wrappers (CommandRecorder's hooks).
+#define TEXMOVE_DETECTED_FUNCTIONS(X)                                                                                      \
+	X(vkUpdateDescriptorSets)                                                                                          \
+	X(vkUpdateDescriptorSetWithTemplate)                                                                               \
+	X(vkCreateDescriptorUpdateTemplate)                                                                                \
+	X(vkCmdPushDescriptorSetKHR)                                                                                       \
+	X(vkCmdPushDescriptorSetWithTemplateKHR)                                                                           \
+	X(vkCmdPipelineBarrier)                                                                                            \
+	X(vkCmdPipelineBarrier2)                                                                                           \
+	X(vkCmdBeginRendering)                                                                                             \
+	X(vkCmdCopyImage)                                                                                                  \
+	X(vkCmdCopyBufferToImage)                                                                                          \
+	X(vkCmdCopyImageToBuffer)                                                                                          \
+	X(vkCmdResolveImage)                                                                                               \
+	X(vkCmdBlitImage)                                                                                                  \
+	X(vkCmdClearColorImage)                                                                                            \
+	X(vkCmdClearDepthStencilImage)                                                                                     \
+	X(vkCreateImageView)
+#define TEXMOVE_PREVIOUS(name) PFN_##name g_prev_##name = nullptr;
+TEXMOVE_DETECTED_FUNCTIONS(TEXMOVE_PREVIOUS)
+#undef TEXMOVE_PREVIOUS
+
+VKAPI_ATTR void VKAPI_CALL Wrap_vkUpdateDescriptorSets(VkDevice device, uint32_t count, const VkWriteDescriptorSet* writes,
+                                                       uint32_t copy_count, const VkCopyDescriptorSet* copies) {
+	CheckWrites(count, writes, "vkUpdateDescriptorSets");
+	g_prev_vkUpdateDescriptorSets(device, count, writes, copy_count, copies);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkUpdateDescriptorSetWithTemplate(VkDevice device, VkDescriptorSet set,
+                                                                  VkDescriptorUpdateTemplate update, const void* data) {
+	CheckTemplate(update, data, "vkUpdateDescriptorSetWithTemplate");
+	g_prev_vkUpdateDescriptorSetWithTemplate(device, set, update, data);
+}
+VKAPI_ATTR VkResult VKAPI_CALL Wrap_vkCreateDescriptorUpdateTemplate(VkDevice device,
+                                                                     const VkDescriptorUpdateTemplateCreateInfo* info,
+                                                                     const VkAllocationCallbacks* callbacks,
+                                                                     VkDescriptorUpdateTemplate* update) {
+	const VkResult result = g_prev_vkCreateDescriptorUpdateTemplate(device, info, callbacks, update);
+	if (result == VK_SUCCESS && info != nullptr) {
+		std::vector<VkDescriptorUpdateTemplateEntry> images;
+		for (uint32_t i = 0; i < info->descriptorUpdateEntryCount; i++) {
+			if (ImageDescriptor(info->pDescriptorUpdateEntries[i].descriptorType))
+				images.push_back(info->pDescriptorUpdateEntries[i]);
+		}
+		std::lock_guard lock(g_template_mutex);
+		g_templates[reinterpret_cast<uint64_t>(*update)] = std::move(images);
+	}
+	return result;
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdPushDescriptorSetKHR(VkCommandBuffer buffer, VkPipelineBindPoint point,
+                                                          VkPipelineLayout layout, uint32_t set, uint32_t count,
+                                                          const VkWriteDescriptorSet* writes) {
+	CheckWrites(count, writes, "vkCmdPushDescriptorSetKHR");
+	g_prev_vkCmdPushDescriptorSetKHR(buffer, point, layout, set, count, writes);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer buffer,
+                                                                      VkDescriptorUpdateTemplate update,
+                                                                      VkPipelineLayout layout, uint32_t set,
+                                                                      const void* data) {
+	CheckTemplate(update, data, "vkCmdPushDescriptorSetWithTemplateKHR");
+	g_prev_vkCmdPushDescriptorSetWithTemplateKHR(buffer, update, layout, set, data);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdPipelineBarrier(VkCommandBuffer buffer, VkPipelineStageFlags src,
+                                                     VkPipelineStageFlags dst, VkDependencyFlags flags,
+                                                     uint32_t memory_count, const VkMemoryBarrier* memory,
+                                                     uint32_t buffer_count, const VkBufferMemoryBarrier* buffers,
+                                                     uint32_t image_count, const VkImageMemoryBarrier* images) {
+	for (uint32_t i = 0; images != nullptr && i < image_count; i++) TexMoveCheck(images[i].image, "vkCmdPipelineBarrier");
+	g_prev_vkCmdPipelineBarrier(buffer, src, dst, flags, memory_count, memory, buffer_count, buffers, image_count, images);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdPipelineBarrier2(VkCommandBuffer buffer, const VkDependencyInfo* info) {
+	for (uint32_t i = 0; info != nullptr && info->pImageMemoryBarriers != nullptr && i < info->imageMemoryBarrierCount; i++)
+		TexMoveCheck(info->pImageMemoryBarriers[i].image, "vkCmdPipelineBarrier2");
+	g_prev_vkCmdPipelineBarrier2(buffer, info);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdBeginRendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
+	if (info != nullptr) {
+		for (uint32_t i = 0; info->pColorAttachments != nullptr && i < info->colorAttachmentCount; i++)
+			CheckAttachment(&info->pColorAttachments[i], "vkCmdBeginRendering");
+		CheckAttachment(info->pDepthAttachment, "vkCmdBeginRendering");
+		CheckAttachment(info->pStencilAttachment, "vkCmdBeginRendering");
+	}
+	g_prev_vkCmdBeginRendering(buffer, info);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdCopyImage(VkCommandBuffer buffer, VkImage source, VkImageLayout source_layout,
+                                               VkImage target, VkImageLayout target_layout, uint32_t count,
+                                               const VkImageCopy* regions) {
+	TexMoveCheck(source, "vkCmdCopyImage");
+	TexMoveCheck(target, "vkCmdCopyImage");
+	g_prev_vkCmdCopyImage(buffer, source, source_layout, target, target_layout, count, regions);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdCopyBufferToImage(VkCommandBuffer buffer, VkBuffer source, VkImage target,
+                                                       VkImageLayout layout, uint32_t count, const VkBufferImageCopy* regions) {
+	TexMoveCheck(target, "vkCmdCopyBufferToImage");
+	g_prev_vkCmdCopyBufferToImage(buffer, source, target, layout, count, regions);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdCopyImageToBuffer(VkCommandBuffer buffer, VkImage source, VkImageLayout layout,
+                                                       VkBuffer target, uint32_t count, const VkBufferImageCopy* regions) {
+	TexMoveCheck(source, "vkCmdCopyImageToBuffer");
+	g_prev_vkCmdCopyImageToBuffer(buffer, source, layout, target, count, regions);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdResolveImage(VkCommandBuffer buffer, VkImage source, VkImageLayout source_layout,
+                                                  VkImage target, VkImageLayout target_layout, uint32_t count,
+                                                  const VkImageResolve* regions) {
+	TexMoveCheck(source, "vkCmdResolveImage");
+	TexMoveCheck(target, "vkCmdResolveImage");
+	g_prev_vkCmdResolveImage(buffer, source, source_layout, target, target_layout, count, regions);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdBlitImage(VkCommandBuffer buffer, VkImage source, VkImageLayout source_layout,
+                                               VkImage target, VkImageLayout target_layout, uint32_t count,
+                                               const VkImageBlit* regions, VkFilter filter) {
+	TexMoveCheck(source, "vkCmdBlitImage");
+	TexMoveCheck(target, "vkCmdBlitImage");
+	g_prev_vkCmdBlitImage(buffer, source, source_layout, target, target_layout, count, regions, filter);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdClearColorImage(VkCommandBuffer buffer, VkImage image, VkImageLayout layout,
+                                                     const VkClearColorValue* color, uint32_t count,
+                                                     const VkImageSubresourceRange* ranges) {
+	TexMoveCheck(image, "vkCmdClearColorImage");
+	g_prev_vkCmdClearColorImage(buffer, image, layout, color, count, ranges);
+}
+VKAPI_ATTR void VKAPI_CALL Wrap_vkCmdClearDepthStencilImage(VkCommandBuffer buffer, VkImage image, VkImageLayout layout,
+                                                            const VkClearDepthStencilValue* value, uint32_t count,
+                                                            const VkImageSubresourceRange* ranges) {
+	TexMoveCheck(image, "vkCmdClearDepthStencilImage");
+	g_prev_vkCmdClearDepthStencilImage(buffer, image, layout, value, count, ranges);
+}
+VKAPI_ATTR VkResult VKAPI_CALL Wrap_vkCreateImageView(VkDevice device, const VkImageViewCreateInfo* info,
+                                                      const VkAllocationCallbacks* callbacks, VkImageView* view) {
+	if (info != nullptr) TexMoveCheck(info->image, "vkCreateImageView");
+	return g_prev_vkCreateImageView(device, info, callbacks, view);
+}
+
+// The retire period is over (or `all`): the old views and images go, the returned blocks are counted from the driver's
+// frees, and the drained blocks of each batch are checked (gone, or the one empty block VMA keeps).
+void ExpireRetired(GraphicContext& graphics, uint64_t now, bool all) {
+	for (size_t i = 0; i < g_retired_batches.size();) {
+		auto& batch = g_retired_batches[i];
+		if (!all && now < batch.deadline_ms) {
+			i++;
+			continue;
+		}
+		{
+			std::unique_lock lock(g_retired_mutex);
+			for (const auto view: batch.views) g_retired.erase(reinterpret_cast<uint64_t>(static_cast<VkImageView>(view)));
+			for (const auto& image: batch.images)
+				g_retired.erase(reinterpret_cast<uint64_t>(static_cast<VkImage>(image->image)));
+			g_texmove_watch.store(!g_retired.empty(), std::memory_order_relaxed);
+		}
+		for (const auto view: batch.views) graphics.device.destroyImageView(view, nullptr);
+		uint64_t frees_before = 0, bytes_before = 0, frees_after = 0, bytes_after = 0;
+		GraphicContext::DeviceMemoryFrees(frees_before, bytes_before);
+		for (auto& image: batch.images) graphics.DestroyImageNow(*image);
+		GraphicContext::DeviceMemoryFrees(frees_after, bytes_after);
+		uint64_t emptied = 0, still_present = 0;
+		std::unordered_map<VkDeviceMemory, size_t> present;
+		for (const auto& block: graphics.CollectBlocks()) present.emplace(block.memory, block.allocations.size());
+		for (const auto memory: batch.drained) {
+			const auto found = present.find(memory);
+			(found == present.end() || found->second == 0 ? emptied : still_present)++;
+		}
+		auto& totals = GetTexMoveTotals();
+		totals.emptied.fetch_add(emptied);
+		totals.returned.fetch_add(frees_after - frees_before);
+		totals.returned_bytes.fetch_add(bytes_after - bytes_before);
+		totals.still_present.fetch_add(still_present);
+		std::fprintf(stderr,
+		             "TEXMOVE_RETIRE frame=%llu batch_frame=%llu views=%zu images=%zu returned=%llu returned_MiB=%llu "
+		             "emptied=%llu blocks_still_present=%llu stale_uses_total=%llu\n",
+		             static_cast<unsigned long long>(g_stale_frame.load()), static_cast<unsigned long long>(batch.frame),
+		             batch.views.size(), batch.images.size(), static_cast<unsigned long long>(frees_after - frees_before),
+		             static_cast<unsigned long long>((bytes_after - bytes_before) >> 20u),
+		             static_cast<unsigned long long>(emptied), static_cast<unsigned long long>(still_present),
+		             static_cast<unsigned long long>(totals.stale_uses.load()));
+		g_retired_batches.erase(g_retired_batches.begin() + static_cast<std::ptrdiff_t>(i));
+	}
+}
+
 } // namespace
+
+void TexMoveStaleCheck(uint64_t handle, const char* path) {
+	RetiredInfo info;
+	{
+		std::shared_lock lock(g_retired_mutex);
+		const auto       found = g_retired.find(handle);
+		if (found == g_retired.end()) return;
+		info = found->second;
+	}
+	const uint64_t n = GetTexMoveTotals().stale_uses.fetch_add(1);
+	if (n >= 64u) return;
+	std::fprintf(stderr,
+	             "TEXMOVE_STALE_USE frame=%llu path=%s %s=0x%llx imageid=%u/%u fmt=%s extent=%ux%ux%u moved_at_frame=%llu\n",
+	             static_cast<unsigned long long>(g_stale_frame.load()), path, info.view ? "view" : "image",
+	             static_cast<unsigned long long>(handle), static_cast<uint32_t>(info.image_id & 0xffffffffu),
+	             static_cast<uint32_t>(info.image_id >> 32u), vk::to_string(info.format).c_str(), info.extent.width,
+	             info.extent.height, info.extent.depth, static_cast<unsigned long long>(info.frame));
+}
+
+void TexMoveInstallDetector() {
+	if (TexMoveMode() < 2) return;
+	auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+	std::string missing;
+#define TEXMOVE_WRAP(name)                                                                                                 \
+	if (d.name != nullptr) {                                                                                           \
+		g_prev_##name = d.name;                                                                                    \
+		d.name        = Wrap_##name;                                                                               \
+	} else {                                                                                                           \
+		missing += " " #name;                                                                                      \
+	}
+	TEXMOVE_DETECTED_FUNCTIONS(TEXMOVE_WRAP)
+#undef TEXMOVE_WRAP
+	std::fprintf(stderr, "TEXMOVE stale-use detector installed (missing:%s)\n", missing.empty() ? " none" : missing.c_str());
+}
 
 void TextureCache::RunTextureMove(BindlessTable& table) {
 	const uint32_t mode = TexMoveMode();
 	if (mode == 0 || !m_scheduler.Active()) return;
-	const auto&     config = Config();
-	const uint64_t  now    = NowMs();
-	static uint64_t last   = now; // the first batch an interval after the first frame boundary
+	const auto&    config = Config();
+	const uint64_t now    = NowMs();
+	if (mode >= 2) { // the stale-use detector: the frame its lines name, and the old views and images whose time is up
+		g_stale_frame.store(m_graphics.presented_frames.load(std::memory_order_relaxed), std::memory_order_relaxed);
+		ExpireRetired(m_graphics, now, false);
+	}
+	static uint64_t last = now; // the first batch an interval after the first frame boundary
 	if (now - last < config.interval_ms) return;
 	uint64_t usage = 0, budget = 0, block_bytes = 0, allocated = 0;
 	m_graphics.GetDeviceLocalMemoryStats(usage, budget, block_bytes, allocated);
@@ -208,9 +484,10 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		if (mode >= 2) {
 			std::fprintf(stderr,
 			             "TEXMOVE_CHECK_SUMMARY batch=%llu images=%llu mismatches=%llu stale_slots=%llu "
-			             "blocks_still_present=%llu total_mismatches=%llu total_stale_slots=%llu total_still_present=%llu\n",
-			             u(totals.batches.load()), u(n.images), u(n.mismatches), u(n.stale), u(n.still_present),
-			             u(totals.mismatches.load()), u(totals.stale_slots.load()), u(totals.still_present.load()));
+			             "total_mismatches=%llu total_stale_slots=%llu total_still_present=%llu stale_uses=%llu "
+			             "(blocks are counted at TEXMOVE_RETIRE)\n",
+			             u(totals.batches.load()), u(n.images), u(n.mismatches), u(n.stale), u(totals.mismatches.load()),
+			             u(totals.stale_slots.load()), u(totals.still_present.load()), u(totals.stale_uses.load()));
 		}
 	};
 
@@ -441,7 +718,10 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	const auto                                   swap_start = std::chrono::steady_clock::now();
 	std::unordered_map<VkImageView, vk::ImageView> view_map;
 	std::vector<vk::ImageView>                   old_views;
-	std::vector<std::unique_ptr<VulkanImage>>    destroy; // old images of swapped textures, new ones of abandoned blocks
+	std::vector<std::unique_ptr<VulkanImage>>    destroy;   // old images of swapped textures
+	std::vector<std::unique_ptr<VulkanImage>>    abandoned; // new images of abandoned blocks (never published)
+	std::vector<std::pair<uint64_t, RetiredInfo>> retired;  // =2: the old view and image handles
+	const uint64_t frame = m_graphics.presented_frames.load(std::memory_order_relaxed);
 	{
 		std::lock_guard  binder_lock(table.BinderMutex());
 		std::scoped_lock lock {m_lock};
@@ -480,7 +760,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				if (!drain.ok) break;
 			}
 			if (!drain.ok) {
-				for (auto& move: drain.moves) destroy.push_back(std::move(move.other));
+				for (auto& move: drain.moves) abandoned.push_back(std::move(move.other));
 				continue;
 			}
 			for (auto& move: drain.moves) {
@@ -491,10 +771,17 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				// The views again from their stored (already normalized) infos, on the new image.
 				auto previous = std::move(image.views);
 				image.views.clear();
+				const RetiredInfo info {(uint64_t {move.id.generation} << 32u) | move.id.index, image.backing.format,
+				                        image.backing.extent, frame, true};
 				for (const auto& cached: previous) {
 					view_map[static_cast<VkImageView>(cached.view)] = image.FindView(cached.info);
 					old_views.push_back(cached.view);
 					if (mode >= 2 && (image.views.empty() || !(image.views.back().info == cached.info))) n.mismatches++;
+					if (mode >= 2) retired.emplace_back(reinterpret_cast<uint64_t>(static_cast<VkImageView>(cached.view)), info);
+				}
+				if (mode >= 2) {
+					retired.emplace_back(reinterpret_cast<uint64_t>(static_cast<VkImage>(move.other->image)), info);
+					retired.back().second.view = false;
 				}
 				image.texmove_ms = now;
 				image.HeapChanged();
@@ -513,10 +800,29 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 			n.stale = table.CountSlotViews(old_set);
 		}
 	}
-	for (const auto view: old_views) m_graphics.device.destroyImageView(view, nullptr);
+	for (auto& image: abandoned) {
+		if (image != nullptr && image->image != nullptr) m_graphics.DestroyImageNow(*image);
+	}
 	// The images the wait's deferred deletions parked go first, outside the count (their dedicated allocations would be
 	// freed within 2 s anyway; run 2 counted 6 frees / 383 MiB for one block that way).
 	m_graphics.TrimRecycledImages();
+	if (mode >= 2) { // the old views and images stay for the retire period; their blocks are counted when they go
+		RetiredBatch batch {now + config.retire_ms, frame, std::move(old_views), std::move(destroy), {}};
+		for (const auto& drain: drains) {
+			if (drain.ok) batch.drained.push_back(drain.memory);
+		}
+		{
+			std::unique_lock lock(g_retired_mutex);
+			for (const auto& [handle, info]: retired) g_retired[handle] = info;
+			g_texmove_watch.store(!g_retired.empty(), std::memory_order_relaxed);
+		}
+		g_retired_batches.push_back(std::move(batch));
+		ms_swap = MsSince(swap_start);
+		check.reset();
+		report();
+		return;
+	}
+	for (const auto view: old_views) m_graphics.device.destroyImageView(view, nullptr);
 	uint64_t frees_before = 0, bytes_before = 0, frees_after = 0, bytes_after = 0;
 	GraphicContext::DeviceMemoryFrees(frees_before, bytes_before);
 	for (auto& image: destroy) {
