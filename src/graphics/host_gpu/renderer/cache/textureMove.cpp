@@ -170,6 +170,7 @@ std::shared_mutex                         g_retired_mutex;
 std::unordered_map<uint64_t, RetiredInfo> g_retired;         // old view and image handles
 std::vector<RetiredBatch>                 g_retired_batches; // GPU thread
 std::atomic<uint64_t>                     g_stale_frame {0};
+std::atomic<uint64_t>                     g_stale_checked {0}; // handles looked up while watching (the detector sees traffic)
 // The image entries of every descriptor update template (their data holds VkDescriptorImageInfo at offset + n * stride).
 std::mutex                                                                  g_template_mutex;
 std::unordered_map<uint64_t, std::vector<VkDescriptorUpdateTemplateEntry>> g_templates;
@@ -357,26 +358,26 @@ void ExpireRetired(GraphicContext& graphics, uint64_t now, bool all) {
 		GraphicContext::DeviceMemoryFrees(frees_before, bytes_before);
 		for (auto& image: batch.images) graphics.DestroyImageNow(*image);
 		GraphicContext::DeviceMemoryFrees(frees_after, bytes_after);
-		uint64_t emptied = 0, still_present = 0;
+		uint64_t emptied = 0, reused = 0; // reused: a block other allocations took during the retire period
 		std::unordered_map<VkDeviceMemory, size_t> present;
 		for (const auto& block: graphics.CollectBlocks()) present.emplace(block.memory, block.allocations.size());
 		for (const auto memory: batch.drained) {
 			const auto found = present.find(memory);
-			(found == present.end() || found->second == 0 ? emptied : still_present)++;
+			(found == present.end() || found->second == 0 ? emptied : reused)++;
 		}
 		auto& totals = GetTexMoveTotals();
 		totals.emptied.fetch_add(emptied);
 		totals.returned.fetch_add(frees_after - frees_before);
 		totals.returned_bytes.fetch_add(bytes_after - bytes_before);
-		totals.still_present.fetch_add(still_present);
 		std::fprintf(stderr,
 		             "TEXMOVE_RETIRE frame=%llu batch_frame=%llu views=%zu images=%zu returned=%llu returned_MiB=%llu "
-		             "emptied=%llu blocks_still_present=%llu stale_uses_total=%llu\n",
+		             "emptied=%llu reused_meanwhile=%llu stale_uses_total=%llu checked_total=%llu\n",
 		             static_cast<unsigned long long>(g_stale_frame.load()), static_cast<unsigned long long>(batch.frame),
 		             batch.views.size(), batch.images.size(), static_cast<unsigned long long>(frees_after - frees_before),
 		             static_cast<unsigned long long>((bytes_after - bytes_before) >> 20u),
-		             static_cast<unsigned long long>(emptied), static_cast<unsigned long long>(still_present),
-		             static_cast<unsigned long long>(totals.stale_uses.load()));
+		             static_cast<unsigned long long>(emptied), static_cast<unsigned long long>(reused),
+		             static_cast<unsigned long long>(totals.stale_uses.load()),
+		             static_cast<unsigned long long>(g_stale_checked.load()));
 		g_retired_batches.erase(g_retired_batches.begin() + static_cast<std::ptrdiff_t>(i));
 	}
 }
@@ -384,6 +385,7 @@ void ExpireRetired(GraphicContext& graphics, uint64_t now, bool all) {
 } // namespace
 
 void TexMoveStaleCheck(uint64_t handle, const char* path) {
+	g_stale_checked.fetch_add(1, std::memory_order_relaxed);
 	RetiredInfo info;
 	{
 		std::shared_lock lock(g_retired_mutex);
@@ -810,6 +812,14 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		RetiredBatch batch {now + config.retire_ms, frame, std::move(old_views), std::move(destroy), {}};
 		for (const auto& drain: drains) {
 			if (drain.ok) batch.drained.push_back(drain.memory);
+		}
+		// The check of mode 1's census, now: a drained block holds nothing but the retired old images.
+		std::unordered_set<VmaAllocation> old_allocations;
+		for (const auto& image: batch.images) old_allocations.insert(image->allocation);
+		for (const auto& block: m_graphics.CollectBlocks()) {
+			if (std::ranges::find(batch.drained, block.memory) == batch.drained.end()) continue;
+			if (std::ranges::any_of(block.allocations, [&](VmaAllocation a) { return !old_allocations.contains(a); }))
+				n.still_present++;
 		}
 		{
 			std::unique_lock lock(g_retired_mutex);
