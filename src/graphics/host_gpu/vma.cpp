@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -61,6 +62,40 @@ bool VramBudgetEnabled() {
 	}();
 	return on;
 }
+
+// KYTY_TRACE_VMA_MAP=<frame>[,<frame>...] (measurement, map §3v): every image and buffer allocation is named (format and
+// extent / size) and at each listed presented frame the allocator's full map (blocks, allocations by name, free ranges)
+// is written to vma_map_<frame>.json in the working folder (GraphicContext::DumpVmaMapIfDue, from MEM_CENSUS).
+bool VmaMapNamesEnabled() {
+	static const bool on = std::getenv("KYTY_TRACE_VMA_MAP") != nullptr;
+	return on;
+}
+
+namespace {
+// MEM_CENSUS imgsz (map §3v): images created and destroyed by allocation size (<64 KiB, <1 MiB, <16 MiB, <128 MiB, more).
+struct SizeHist {
+	std::array<std::atomic<uint64_t>, 5> count {};
+	std::array<std::atomic<uint64_t>, 5> bytes {};
+};
+SizeHist g_image_created_sizes, g_image_freed_sizes;
+void NoteImageSize(SizeHist& hist, uint64_t bytes) {
+	const uint32_t bucket = bytes < (64ull << 10u) ? 0u : bytes < (1ull << 20u) ? 1u : bytes < (16ull << 20u) ? 2u
+	                      : bytes < (128ull << 20u) ? 3u : 4u;
+	hist.count[bucket].fetch_add(1, std::memory_order_relaxed);
+	hist.bytes[bucket].fetch_add(bytes, std::memory_order_relaxed);
+}
+std::string TakeSizeHist(SizeHist& hist) {
+	std::string out;
+	for (size_t i = 0; i < hist.count.size(); i++) {
+		char part[48];
+		std::snprintf(part, sizeof(part), "%s%llu/%llu", i == 0 ? "" : ",",
+		              static_cast<unsigned long long>(hist.count[i].exchange(0, std::memory_order_relaxed)),
+		              static_cast<unsigned long long>(hist.bytes[i].exchange(0, std::memory_order_relaxed) >> 20u));
+		out += part;
+	}
+	return out;
+}
+} // namespace
 
 // KYTY_VRAM_BUDGET_MB=<n>: the caches size their garbage-collection thresholds for at most n MiB.
 static uint64_t VramBudgetCap() {
@@ -371,7 +406,40 @@ std::string GraphicContext::DeviceMemoryTypeCensus() const {
 		              s.unusedRangeCount != 0 ? mib(s.unusedRangeSizeMax) : 0ull);
 		line += part;
 	}
+	// imgsz: images created / destroyed since the last line by allocation size, "count/MiB" for <64K,<1M,<16M,<128M,more.
+	line += " | imgsz created=" + TakeSizeHist(g_image_created_sizes) + " freed=" + TakeSizeHist(g_image_freed_sizes);
 	return line;
+}
+
+void GraphicContext::DumpVmaMapIfDue(uint32_t frame) const {
+	static const std::vector<uint32_t> frames = [] {
+		std::vector<uint32_t> list;
+		const char*           value = std::getenv("KYTY_TRACE_VMA_MAP");
+		if (value == nullptr) return list;
+		for (const char* p = value; *p != '\0';) {
+			char*      end = nullptr;
+			const auto n   = std::strtoul(p, &end, 10);
+			if (end == p) break;
+			list.push_back(static_cast<uint32_t>(n));
+			p = *end == ',' ? end + 1 : end;
+		}
+		std::sort(list.begin(), list.end());
+		return list;
+	}();
+	static size_t next = 0;
+	if (allocator == nullptr || next >= frames.size() || frame < frames[next]) return;
+	while (next < frames.size() && frame >= frames[next]) next++;
+	char* text = nullptr;
+	vmaBuildStatsString(allocator, &text, VK_TRUE);
+	if (text == nullptr) return;
+	char name[64];
+	std::snprintf(name, sizeof(name), "vma_map_%u.json", frame);
+	if (FILE* file = std::fopen(name, "wb"); file != nullptr) {
+		std::fputs(text, file);
+		std::fclose(file);
+		std::fprintf(stderr, "VMA_MAP frame=%u written %s\n", frame, name);
+	}
+	vmaFreeStatsString(allocator, text);
 }
 
 uint64_t GraphicContext::GetAllocationSize(VmaAllocation allocation) const {
@@ -497,6 +565,18 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		std::lock_guard lock(g_recycle_mutex);
 		g_recyclable[native_image] = key;
 	}
+	if (!reused) { // MEM_CENSUS imgsz; KYTY_TRACE_VMA_MAP names
+		VmaAllocationInfo created {};
+		vmaGetAllocationInfo(allocator, image.allocation, &created);
+		NoteImageSize(g_image_created_sizes, created.size);
+		if (VmaMapNamesEnabled()) {
+			char label[128];
+			std::snprintf(label, sizeof(label), "img %s %ux%ux%u l%u m%u u%x", vk::to_string(image_info.format).c_str(),
+			              image_info.extent.width, image_info.extent.height, image_info.extent.depth,
+			              image_info.arrayLayers, image_info.mipLevels, static_cast<uint32_t>(image_info.usage));
+			vmaSetAllocationName(allocator, image.allocation, label);
+		}
+	}
 
 	g_image_creates.fetch_add(1, std::memory_order_relaxed);
 	if (t_allocs != allocs_before) {
@@ -548,6 +628,11 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	// A command in the ring may still name this image (VMA does not go through the
 	// dispatcher's destroy functions).
 	CommandRecorder::DrainBeforeDestroy();
+	{
+		VmaAllocationInfo freed {}; // MEM_CENSUS imgsz
+		vmaGetAllocationInfo(allocator, image.allocation, &freed);
+		NoteImageSize(g_image_freed_sizes, freed.size);
+	}
 	vmaDestroyImage(allocator, image.image, image.allocation);
 	image.image      = nullptr;
 	image.allocation = nullptr;

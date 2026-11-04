@@ -149,6 +149,12 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	m_buffer = native_buffer;
+	if (VmaMapNamesEnabled()) { // KYTY_TRACE_VMA_MAP (measurement): names in the allocator map
+		char label[96];
+		std::snprintf(label, sizeof(label), "buf %llu u%d guest=%d", static_cast<unsigned long long>(size),
+		              static_cast<int>(usage), cpu_address != 0 ? 1 : 0);
+		vmaSetAllocationName(graphics.allocator, m_allocation, label);
+	}
 	if (with_bda) {
 		vk::BufferDeviceAddressInfo address_info {};
 		address_info.buffer = m_buffer;

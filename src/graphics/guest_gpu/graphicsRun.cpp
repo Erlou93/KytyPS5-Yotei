@@ -194,6 +194,7 @@ static void MemCensusLine(RenderContext& renderer) {
 	// mtype: the same per device-local memory type (bar = host-visible: the guest buffers below 256 MiB; dev: images,
 	// the larger buffers and the caches' own), "blocks/alloc/empty(blocks/allocations free=ranges max=largest range)".
 	std::fputs(graphics.DeviceMemoryTypeCensus().c_str(), stderr);
+	graphics.DumpVmaMapIfDue(DebugPresentCount().load()); // KYTY_TRACE_VMA_MAP
 	// vm: the process's committed host memory by kind (private allocations >= 1 GiB / 64 MiB+ / 1 MiB+ / smaller, mapped,
 	// modules), MiB; what grows over a long session (24.10: 18.7 -> 28.2 GB in 24 minutes).
 	const auto vm = Common::StartupTrace::ProcessVmSummary();

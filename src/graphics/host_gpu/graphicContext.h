@@ -25,6 +25,8 @@ inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 // instead of stopping at them, and downloads GPU-written color images to guest memory before it frees them
 // (TextureCache::CollectGarbageFixed).
 [[nodiscard]] bool VramGcFixEnabled();
+// KYTY_TRACE_VMA_MAP (measurement): image and buffer allocations carry names for the allocator map dumps.
+[[nodiscard]] bool VmaMapNamesEnabled();
 // KYTY_VRAM_BUDGET=1 (default off, logged once): the caches keep the device-local memory they hold under a target
 // re-read at every collector run (GraphicContext::GetVramBudgetState), evicting old images before new ones are
 // created over it; implies the KYTY_VRAM_GC_FIX collector.
@@ -153,6 +155,8 @@ struct GraphicContext {
 	// MEM_CENSUS (map §3v): per device-local memory type, VMA blocks / allocations / empty space (MiB), block and
 	// allocation counts, free ranges and the largest one - which kind of memory holds the empty space.
 	[[nodiscard]] std::string DeviceMemoryTypeCensus() const;
+	// KYTY_TRACE_VMA_MAP=<frame>,... (measurement): the allocator's full map to vma_map_<frame>.json at the listed frames.
+	void DumpVmaMapIfDue(uint32_t frame) const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
 
 	struct HeapUsage {
