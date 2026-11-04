@@ -692,19 +692,38 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ull;
 		});
 		if (watch != 0 && program.shader_hash == watch) {
-			static uint32_t frame = 0, n = 0, max_records = 0, stride = 0;
-			static uint64_t groups = 0, first = 0;
+			static uint32_t frame = 0, n = 0, max_records = 0, stride = 0, direct = 0, mapped = 0, plain = 0, unbound = 0;
+			static uint64_t groups = 0, first = 0, host_size = 0;
 			static std::vector<uint64_t> bases;
 			const auto now = DebugPresentCount().load();
 			if (now != frame && n != 0) {
-				std::fprintf(stderr, "DISPATCH_WATCH frame=%u n=%u groups=%llu max_records=%u stride=%u bases=%zu first=0x%llx\n", frame, n,
-				             static_cast<unsigned long long>(groups), max_records, stride, bases.size(),
-				             static_cast<unsigned long long>(first));
-				n = 0, groups = 0, max_records = 0, stride = 0, first = 0;
+				std::fprintf(stderr,
+				             "DISPATCH_WATCH frame=%u n=%u groups=%llu max_records=%u stride=%u bases=%zu first=0x%llx "
+				             "host[direct=%u bar_mapped=%u device=%u none=%u largest=0x%llx]\n",
+				             frame, n, static_cast<unsigned long long>(groups), max_records, stride, bases.size(),
+				             static_cast<unsigned long long>(first), direct, mapped, plain, unbound,
+				             static_cast<unsigned long long>(host_size));
+				n = 0, groups = 0, max_records = 0, stride = 0, first = 0, direct = 0, mapped = 0, plain = 0, unbound = 0;
+				host_size = 0;
 				bases.clear();
 			}
 			frame = now;
 			n++;
+			// The host buffer the dispatch's first binding uses: guest memory imported (direct), resizable-BAR mapped, or
+			// plain device memory.
+			if (!bindings.buffer_sources.empty() && bindings.buffer_sources[0].id) {
+				auto& host = m_context.GetBufferCache().GetBuffer(bindings.buffer_sources[0].id);
+				if (host.IsDirect()) {
+					direct++;
+				} else if (!host.Mapped().empty()) {
+					mapped++;
+				} else {
+					plain++;
+				}
+				host_size = std::max<uint64_t>(host_size, host.Size());
+			} else {
+				unbound++;
+			}
 			groups += uint64_t {thread_group_x} * thread_group_y * thread_group_z;
 			if (resources.user_data.size() >= 4u) {
 				ShaderBufferResource v {};
