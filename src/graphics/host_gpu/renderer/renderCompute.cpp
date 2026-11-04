@@ -721,6 +721,18 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 					plain++;
 				}
 				host_size = std::max<uint64_t>(host_size, host.Size());
+				// Every 100th frame, each dispatch: the range it writes and the host buffer holding it.
+				if (now % 100u == 0u && resources.user_data.size() >= 4u) {
+					ShaderBufferResource v {};
+					std::copy_n(resources.user_data.begin(), 4, v.fields);
+					std::fprintf(stderr,
+					             "DISPATCH_WATCH_DETAIL frame=%u groups=%u base=0x%llx bytes=0x%llx host=0x%llx+0x%llx %s\n", now,
+					             thread_group_x * thread_group_y * thread_group_z, static_cast<unsigned long long>(v.Base48()),
+					             static_cast<unsigned long long>(v.GetSize()),
+					             static_cast<unsigned long long>(host.CpuAddress()),
+					             static_cast<unsigned long long>(host.Size()),
+					             host.IsDirect() ? "direct" : !host.Mapped().empty() ? "bar" : "device");
+				}
 			} else {
 				unbound++;
 			}
