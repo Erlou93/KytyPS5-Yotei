@@ -191,6 +191,9 @@ static void MemCensusLine(RenderContext& renderer) {
 	             "non_vma=%llu host_blocks=%llu",
 	             DebugPresentCount().load(), mib(usage), mib(budget), mib(blocks), num(block_count), mib(allocated),
 	             num(allocation_count), mib(empty), mib(non_vma), mib(host_blocks));
+	// mtype: the same per device-local memory type (bar = host-visible: the guest buffers below 256 MiB; dev: images,
+	// the larger buffers and the caches' own), "blocks/alloc/empty(blocks/allocations free=ranges max=largest range)".
+	std::fputs(graphics.DeviceMemoryTypeCensus().c_str(), stderr);
 	// vm: the process's committed host memory by kind (private allocations >= 1 GiB / 64 MiB+ / 1 MiB+ / smaller, mapped,
 	// modules), MiB; what grows over a long session (24.10: 18.7 -> 28.2 GB in 24 minutes).
 	const auto vm = Common::StartupTrace::ProcessVmSummary();

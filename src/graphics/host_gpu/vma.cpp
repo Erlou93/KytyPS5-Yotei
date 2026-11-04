@@ -350,6 +350,30 @@ void GraphicContext::GetVramBudgetState(uint64_t& target, uint64_t& effective) c
 	effective            = usage > empty ? usage - empty : 0;
 }
 
+std::string GraphicContext::DeviceMemoryTypeCensus() const {
+	if (allocator == nullptr || physical_device == nullptr) return {};
+	VmaTotalStatistics stats {};
+	vmaCalculateStatistics(allocator, &stats);
+	const auto& properties = GetPhysicalDeviceMemoryProperties();
+	const auto  mib        = [](uint64_t bytes) { return static_cast<unsigned long long>(bytes >> 20u); };
+	std::string line       = " | mtype";
+	for (uint32_t i = 0; i < properties.memoryTypeCount; i++) {
+		const auto flags = properties.memoryTypes[i].propertyFlags;
+		if (!(flags & vk::MemoryPropertyFlagBits::eDeviceLocal)) continue;
+		const auto& s = stats.memoryType[i];
+		if (s.statistics.blockCount == 0) continue;
+		const uint64_t empty = s.statistics.blockBytes - s.statistics.allocationBytes;
+		char           part[200];
+		std::snprintf(part, sizeof(part), " t%u%s=%llu/%llu/%llu(%u/%u free=%u max=%llu)", i,
+		              (flags & vk::MemoryPropertyFlagBits::eHostVisible) ? "bar" : "dev", mib(s.statistics.blockBytes),
+		              mib(s.statistics.allocationBytes), mib(empty), s.statistics.blockCount,
+		              s.statistics.allocationCount, s.unusedRangeCount,
+		              s.unusedRangeCount != 0 ? mib(s.unusedRangeSizeMax) : 0ull);
+		line += part;
+	}
+	return line;
+}
+
 uint64_t GraphicContext::GetAllocationSize(VmaAllocation allocation) const {
 	if (allocator == nullptr || allocation == nullptr) {
 		return 0;

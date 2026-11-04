@@ -150,6 +150,9 @@ struct GraphicContext {
 	// now (the driver budget moves with other processes; 0 when it reports none), and effective = the driver-reported
 	// usage minus the free space inside VMA blocks (what eviction can lower).
 	void GetVramBudgetState(uint64_t& target, uint64_t& effective) const;
+	// MEM_CENSUS (map §3v): per device-local memory type, VMA blocks / allocations / empty space (MiB), block and
+	// allocation counts, free ranges and the largest one - which kind of memory holds the empty space.
+	[[nodiscard]] std::string DeviceMemoryTypeCensus() const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
 
 	struct HeapUsage {
