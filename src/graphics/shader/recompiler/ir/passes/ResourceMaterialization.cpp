@@ -11,7 +11,6 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/SrtTape.h"
 #include "graphics/shader/shaderBindings.h"
-#include "kernel/memory.h"
 
 #include <atomic>
 #include <algorithm>
@@ -2284,18 +2283,7 @@ void ReadOrdinaryMemory(uint64_t vaddr, void* data, uint64_t size) {
 		return;
 	}
 	if (const auto hook = g_ordinary_read_hook.load(std::memory_order_relaxed); hook == nullptr || !hook(vaddr, data, size)) {
-		// KYTY_DIAG_SRT_GUARDED_READ (diagnostic, 4.11): a read that faults is logged and reads zero.
-		static const bool guarded = std::getenv("KYTY_DIAG_SRT_GUARDED_READ") != nullptr;
-		if (guarded && !Libs::LibKernel::Memory::GuardedGuestCopy(data, reinterpret_cast<const void*>(vaddr), size)) {
-			static std::atomic_uint logged {0};
-			if (logged.fetch_add(1) < 32u) {
-				std::fprintf(stderr, "DIAG_SRT_GUARDED_READ fault address=0x%llx size=%llu\n", static_cast<unsigned long long>(vaddr),
-				             static_cast<unsigned long long>(size));
-			}
-			std::memset(data, 0, size);
-			return;
-		}
-		if (!guarded) ReadPlainMemory(data, vaddr, size);
+		ReadPlainMemory(data, vaddr, size);
 	}
 }
 
