@@ -721,6 +721,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	std::unordered_map<VkImageView, vk::ImageView> view_map;
 	std::vector<vk::ImageView>                   old_views;
 	std::vector<std::unique_ptr<VulkanImage>>    destroy;   // old images of swapped textures
+	vk::ImageLayout                              first_layout = vk::ImageLayout::eUndefined; // the first old image's layout
 	std::vector<std::unique_ptr<VulkanImage>>    abandoned; // new images of abandoned blocks (never published)
 	std::vector<std::pair<uint64_t, RetiredInfo>> retired;  // =2: the old view and image handles
 	const uint64_t frame = m_graphics.presented_frames.load(std::memory_order_relaxed);
@@ -792,6 +793,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				n.memos++;
 				SetVulkanObjectNameF(m_graphics.device, image.backing.image, "Kyty.Image[moved guest=0x{:016x}]",
 				                     image.info.data.address);
+				if (destroy.empty()) first_layout = move.state.layout; // KYTY_TEXMOVE_SELFTEST
 				destroy.push_back(std::move(move.other));
 			}
 		}
@@ -825,6 +827,21 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 			std::unique_lock lock(g_retired_mutex);
 			for (const auto& [handle, info]: retired) g_retired[handle] = info;
 			g_texmove_watch.store(!g_retired.empty(), std::memory_order_relaxed);
+		}
+		// KYTY_TEXMOVE_SELFTEST=1 (positive control of the detector): one legal use of a retired image (a barrier that
+		// keeps its layout) in the open command buffer must come out as TEXMOVE_STALE_USE path=vkCmdPipelineBarrier2.
+		static const bool selftest = std::getenv("KYTY_TEXMOVE_SELFTEST") != nullptr;
+		static bool       selftest_done = false;
+		if (selftest && !selftest_done && !batch.images.empty() && first_layout != vk::ImageLayout::eUndefined) {
+			selftest_done = true;
+			std::fprintf(stderr, "TEXMOVE_SELFTEST barrier on retired image 0x%llx\n",
+			             static_cast<unsigned long long>(reinterpret_cast<uint64_t>(static_cast<VkImage>(batch.images[0]->image))));
+			m_scheduler.EndRendering();
+			PipelineBarrier(m_scheduler.Current().Handle(),
+			                {ImageBarrier(batch.images[0]->image, vk::PipelineStageFlagBits2::eAllCommands,
+			                              vk::AccessFlagBits2::eMemoryRead, first_layout,
+			                              vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryRead,
+			                              first_layout)});
 		}
 		g_retired_batches.push_back(std::move(batch));
 		ms_swap = MsSince(swap_start);
