@@ -88,7 +88,9 @@ constexpr size_t   HeaderBytes     = sizeof(JournalMagic) + sizeof(uint32_t) + s
 // The graphics journal: magic, version, schema fingerprint, device fingerprint; then stage and pipeline records.
 constexpr char     GraphicsJournalMagic[8] = {'K', 'Y', 'G', 'F', 'J', 'R', 'N', 'L'};
 // 2 (4.11.2026): ShaderTessellationInputInfo::carried_vgprs (the 2.000 merged LS+HS program's carried VGPRs).
-constexpr uint32_t GraphicsJournalVersion  = 2;
+// 3 (4.11.2026): the pixel inputs target_packed_unorm_mask, target_round_mode, ps_front_face_all_bits,
+// object_primitive_id and lds_size_dwords (part of the stage key, missing from the records).
+constexpr uint32_t GraphicsJournalVersion  = 3;
 constexpr uint32_t StageRecordMagic        = 0x47545347u; // "GSTG"
 constexpr uint32_t PipelineRecordMagic     = 0x50495047u; // "GPIP"
 constexpr size_t   GraphicsHeaderBytes = sizeof(GraphicsJournalMagic) + sizeof(uint32_t) + 2 * sizeof(uint64_t);
@@ -586,6 +588,11 @@ void WritePixelInput(Writer& w, const ShaderPixelInputInfo& in) {
 	w.U32(bits);
 	w.U32(static_cast<uint32_t>(in.parameter_mode));
 	w.U32(static_cast<uint32_t>(in.alpha_blend_source));
+	// Version 3: the pixel inputs BuildStageStaticKey also keys on (records without them reloaded with zeros there, so their
+	// permutations were looked up under another key and translated again every session, 4.11.2026).
+	w.U32(uint32_t {in.target_packed_unorm_mask} | (uint32_t {in.target_round_mode} << 8u) |
+	      (static_cast<uint32_t>(in.ps_front_face_all_bits) << 16u) | (static_cast<uint32_t>(in.object_primitive_id) << 17u));
+	w.U32(in.lds_size_dwords);
 }
 
 bool ReadPixelInput(Reader& r, ShaderPixelInputInfo& in, uint8_t& table_mode) {
@@ -621,6 +628,12 @@ bool ReadPixelInput(Reader& r, ShaderPixelInputInfo& in, uint8_t& table_mode) {
 	table_mode            = static_cast<uint8_t>((bits >> 27u) & 7u);
 	in.parameter_mode     = static_cast<ShaderPixelParameterMode>(r.U32());
 	in.alpha_blend_source = static_cast<ShaderAlphaBlendSource>(r.U32());
+	const auto targets            = r.U32();
+	in.target_packed_unorm_mask   = static_cast<uint8_t>(targets & 0xffu);
+	in.target_round_mode          = static_cast<uint8_t>((targets >> 8u) & 0xffu);
+	in.ps_front_face_all_bits     = ((targets >> 16u) & 1u) != 0u;
+	in.object_primitive_id        = ((targets >> 17u) & 1u) != 0u;
+	in.lds_size_dwords            = r.U32();
 	return r.ok && in.input_num <= std::size(in.interpolator_settings);
 }
 
@@ -2901,7 +2914,17 @@ void ShaderPrecompiler::Record(const PrecompileStageRecord& record) {
 		return;
 	}
 	if (m_graphics_journal == nullptr || !m_recorded_graphics.insert(key).second) return;
-	WritePayload(m_graphics_journal, SerializeStage(record));
+	const auto words = SerializeStage(record);
+	// Guard: a record must reload to the key it was made under, or the next session never finds it (4.11.2026: five
+	// pixel inputs of the key were not serialized and those permutations were translated again every session).
+	if (PrecompileStageRecord reloaded; !DeserializeStage(words, reloaded) || reloaded.Key() != key) {
+		static std::atomic_uint logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 16u) {
+			std::fprintf(stderr, "SHADER_PRECOMPILE record does not reload to its key: hash=0x%016llx stage=%u\n",
+			             static_cast<unsigned long long>(record.shader_hash), static_cast<unsigned>(record.stage));
+		}
+	}
+	WritePayload(m_graphics_journal, words);
 	std::fflush(m_graphics_journal);
 }
 
