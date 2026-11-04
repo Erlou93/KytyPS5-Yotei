@@ -224,6 +224,7 @@ void TrimRecycled(VmaAllocator allocator, bool all) {
 	// A command in the ring may still name these images.
 	CommandRecorder::DrainBeforeDestroy();
 	for (size_t i = 0; i < drop; i++) {
+		NoteImageSize(g_image_freed_sizes, g_recycled[i].bytes); // MEM_CENSUS imgsz
 		vmaDestroyImage(allocator, g_recycled[i].image, g_recycled[i].allocation);
 		g_recycle_destroys.fetch_add(1, std::memory_order_relaxed);
 	}
