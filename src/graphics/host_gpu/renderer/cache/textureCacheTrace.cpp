@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
