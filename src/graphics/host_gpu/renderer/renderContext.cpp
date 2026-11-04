@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/syncTimeline.h"
+#include "graphics/host_gpu/renderer/cache/textureCacheTrace.h"
 
 #include "common/assert.h"
 #include "common/envRead.h"
@@ -219,6 +220,18 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	const auto unmap = [this, vaddr, size] {
 		// Check cache ownership on the GPU thread. Guest-memory callbacks can still
 		// access a range with no cached data, so they must finish before it is unmapped.
+		// PROJEKT-OKNO-TEKSTUR step 0 (counters only, PERF image_unregister): which clause makes the unmap drain.
+		if (m_command_scheduler.Active()) {
+			const bool  buffer   = m_buffer_cache.IsRegionRegistered(vaddr, size);
+			const bool  image    = m_texture_cache.IsRegionRegistered(vaddr, size);
+			const bool  priority = m_command_scheduler.HasPendingPriorityOperations();
+			const char* clause   = buffer     ? (image ? "drain_buffer_image" : "drain_buffer")
+			                       : image    ? (priority ? "drain_image_prio" : "drain_image")
+			                       : priority ? "drain_prio"
+			                                  : "drain_none";
+			std::lock_guard stats_lock(g_unregister_mutex);
+			g_unregister_reasons[clause]++;
+		}
 		if (m_command_scheduler.Active() &&
 		    (m_buffer_cache.IsRegionRegistered(vaddr, size) ||
 		     m_texture_cache.IsRegionRegistered(vaddr, size) ||

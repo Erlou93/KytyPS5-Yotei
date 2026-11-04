@@ -3113,6 +3113,20 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		int32_t view_mip   = -1;
 		int32_t view_layer = -1;
 		if (!result) {
+			// PROJEKT-OKNO-TEKSTUR step 0 (counters only, PERF image_unregister): a texture lookup with no same-backing
+			// image while an image of the same texture (same start address, guest format and tile mode, one layer) is
+			// registered - what rules R1/R3/R5 would serve from that image instead of a new one.
+			if (desc.type == BindingType::Texture && desc.info.resources.layers <= 1u) {
+				const bool same_texture = std::ranges::any_of(candidates, [&](ImageId id) {
+					const auto* other = m_slot_images.try_get(id);
+					return other != nullptr && other->registered && other->info.data.address == desc.info.data.address &&
+					       other->info.guest_format == desc.info.guest_format &&
+					       other->info.tile_mode == desc.info.tile_mode && other->info.resources.layers <= 1u &&
+					       !other->usage.render_target && !other->usage.storage;
+				});
+				std::lock_guard stats_lock(g_unregister_mutex);
+				g_unregister_reasons[same_texture ? "texwin_lookup_same_texture" : "texwin_lookup_new"]++;
+			}
 			for (const auto candidate: candidates) {
 				view_mip                = -1;
 				view_layer              = -1;
@@ -4661,6 +4675,44 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 		if (owner == nullptr) {
 			continue;
 		}
+		// PROJEKT-OKNO-TEKSTUR step 0 (counters only, KYTY_TRACE_PERF: PERF image_unregister): why the unmap frees the image
+		// and what rule R6 (trim by GPU copy) would do instead. unmap_trim: a single-layer tiled colour image whose
+		// coarser levels k..L-1 (they lie first, the chain runs backwards) all end below the unmapped range; unmap_whole:
+		// the range reaches the coarsest levels; the others are kinds R6 leaves out.
+		const auto& info = owner->info;
+		const char* why  = "unmap_trim";
+		uint64_t    keep = 0;
+		if (info.resources.layers > 1u) {
+			why = "unmap_array";
+		} else if (info.type == Prospero::ImageType::kColor3D) {
+			why = "unmap_3d";
+		} else if (owner->IsGpuModified() || owner->usage.render_target || owner->usage.storage) {
+			why = "unmap_gpu";
+		} else if (info.metadata.kind != ImageMetadataKind::None) {
+			why = "unmap_meta";
+		} else if (info.IsDepth()) {
+			why = "unmap_depth";
+		} else if (!info.IsTiled()) {
+			why = "unmap_linear";
+		} else {
+			const uint32_t levels = std::min<uint32_t>(info.resources.levels, static_cast<uint32_t>(info.mip_layout.size()));
+			uint32_t       k      = 0;
+			for (uint32_t level = 1; level < levels && address > info.data.address; ++level) {
+				const auto& mip = info.mip_layout[level];
+				if (info.data.address + mip.offset + mip.size <= address) {
+					k    = level;
+					keep = mip.offset + mip.size;
+					break;
+				}
+			}
+			if (k == 0) why = "unmap_whole";
+		}
+		if (keep != 0) {
+			std::lock_guard stats_lock(g_unregister_mutex);
+			g_unregister_reasons["unmap_trim_keep_kb"] += keep >> 10u;
+			g_unregister_reasons["unmap_trim_full_kb"] += info.data.size >> 10u;
+		}
+		UnregisterReason image_reason(m_unregister_reason, why);
 		FreeImage(id);
 	}
 	// The detached copies under the range landed (RenderContext::UnmapMemory waited for the priority operations) or
