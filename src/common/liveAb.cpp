@@ -47,6 +47,10 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, map §3c): whether a guest CPU write into a GPU-modified page skips the download of
     // the page's GPU bytes (the CPU's bytes win; per fault, nothing outlives it but the dropped GPU bytes).
     {Switch::DiagCeilingWriteNoDownload, "KYTY_DIAG_CEILING_WRITE_NO_DOWNLOAD", 1},
+    // Map §3c: whether a guest CPU write into a GPU-modified page downloads the GPU-dirty bytes of the read window around
+    // it (and publishes the neighbour pages) or only of its page. Per fault; the published neighbours are what a later
+    // fault would download, so either value continues from what the other left.
+    {Switch::WriteFaultWindow, "KYTY_FIX_WRITE_FAULT_WINDOW", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

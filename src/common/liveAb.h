@@ -34,6 +34,7 @@ enum class Switch : uint32_t {
 	SharedImageMemory,     // KYTY_FIX_SHARED_IMAGE_MEMORY (0/1 per bind; =2, the check, only as the start value; D4 K1)
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingWriteNoDownload, // KYTY_DIAG_CEILING_WRITE_NO_DOWNLOAD (measurement only, APPROXIMATION)
+	WriteFaultWindow,          // KYTY_FIX_WRITE_FAULT_WINDOW (0/1 live; =2, the check, only as the start value)
 	Count
 };
 
