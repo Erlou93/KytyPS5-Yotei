@@ -194,8 +194,6 @@ void ReadGuestPlain(void* dst, uint64_t vaddr, uint64_t size);
 [[nodiscard]] const void* GuestBytesForKernelRead(const void* guest, size_t size, std::vector<uint8_t>& scratch);
 // A copy from guest memory that survives an access violation (false: it faulted, or the ranges overlap).
 [[nodiscard]] bool GuardedGuestCopy(void* dst, const void* src, size_t size);
-// Diagnostic: whether [vaddr, vaddr + size) is committed, readable host memory (VirtualQuery).
-[[nodiscard]] bool HostRangeReadable(uint64_t vaddr, uint64_t size);
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);
