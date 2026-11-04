@@ -354,10 +354,15 @@ enum class TessellationAttribute {
 	EvaluationInput,
 	PatchOutput,
 	PatchInput,
-	Factor
+	Factor,
+	// The VGPRs a split merged LS+HS program carries from its LS part into its HS part (ShaderTessellationInputInfo::
+	// carried_vgprs): the LS stage's per-vertex output and the HS stage's per-control-point input, one u32 each, packed
+	// four per vec4 after the LS outputs; address = 4 * the register's rank in the set.
+	CarriedOutput,
+	CarriedInput
 };
 constexpr uint32_t NumTessellationAttributes =
-    static_cast<uint32_t>(TessellationAttribute::Factor) + 1u;
+    static_cast<uint32_t>(TessellationAttribute::CarriedInput) + 1u;
 
 enum class StageInputKind {
 	VertexIndex,

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstdio>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
@@ -18,9 +19,25 @@ uint32_t TessellationPointer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  variable = state.tess_variables.at(static_cast<uint32_t>(kind));
 	EXIT_IF(variable == 0);
 	const auto input   = kind == Attribute::ControlInput || kind == Attribute::EvaluationInput ||
-	                   kind == Attribute::PatchInput;
+	                   kind == Attribute::PatchInput || kind == Attribute::CarriedInput;
 	const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
 	const auto pointer = state.builder.AllocateId();
+	if (kind == Attribute::CarriedOutput || kind == Attribute::CarriedInput) {
+		// One u32 per carried VGPR, four per vec4; the HS invocation reads its own control point's (the lane the LS
+		// part ran in for it).
+		EXIT_NOT_IMPLEMENTED(!inst.Arg(1).IsImmediate());
+		const auto rank      = inst.Arg(1).U32() / 4u;
+		const auto attribute = ConstantU32(state, rank / 4u);
+		const auto component = ConstantU32(state, rank % 4u);
+		const auto type      = TypePointer(state, storage, TypeU32(state));
+		if (kind == Attribute::CarriedOutput) {
+			state.builder.AddFunction(spv::OpAccessChain, type, pointer, variable, attribute, component);
+		} else {
+			state.builder.AddFunction(spv::OpAccessChain, type, pointer, variable, EmitLaneId(state), attribute,
+			                          component);
+		}
+		return pointer;
+	}
 	if (kind == Attribute::Factor) {
 		// Hardware tess-factor layout: the outer factors of the domain, then its inner ones (isoline 2+0, triangle
 		// 3+1, quad 4+2).
@@ -124,11 +141,18 @@ void DefineTessellationInterfaces(EmitterState& state) {
 		if (!used[index]) continue;
 		const auto kind    = static_cast<Attribute>(index);
 		const bool input   = kind == Attribute::ControlInput || kind == Attribute::EvaluationInput ||
-		                   kind == Attribute::PatchInput;
+		                   kind == Attribute::PatchInput || kind == Attribute::CarriedInput;
 		const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
+		const bool carried = kind == Attribute::CarriedOutput || kind == Attribute::CarriedInput;
 		uint32_t   type;
 		if (kind == Attribute::Factor) {
 			type = array(TypeF32(state), 4u);
+		} else if (carried) {
+			uint32_t count = 0;
+			for (const auto word: tess.carried_vgprs) count += static_cast<uint32_t>(std::popcount(word));
+			EXIT_IF(count == 0u);
+			type = array(TypeU32Vector(state, 4), (count + 3u) / 4u);
+			if (kind == Attribute::CarriedInput) type = array(type, tess.input_control_points);
 		} else if (kind == Attribute::PatchOutput || kind == Attribute::PatchInput) {
 			type = array(TypeU32Vector(state, 4), 16u);
 		} else {
@@ -153,7 +177,9 @@ void DefineTessellationInterfaces(EmitterState& state) {
 		} else {
 			state.builder.AddAnnotation(
 			    spv::OpDecorate, variable, spv::DecorationLocation,
-			    kind == Attribute::PatchOutput || kind == Attribute::PatchInput ? (tess.hs_stride + 15u) / 16u : 0u);
+			    kind == Attribute::PatchOutput || kind == Attribute::PatchInput ? (tess.hs_stride + 15u) / 16u
+			    : carried                                                       ? (tess.ls_stride + 15u) / 16u
+			                                                                    : 0u);
 		}
 		if (kind == Attribute::Factor || kind == Attribute::PatchOutput || kind == Attribute::PatchInput) {
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationPatch);

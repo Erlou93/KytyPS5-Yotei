@@ -142,6 +142,11 @@ struct ShaderTessellationInputInfo {
 	uint32_t domain                = 0;
 	uint32_t partitioning          = 0;
 	uint32_t output_topology       = 0;
+	// Ghost of Yotei 2.000's merged LS+HS program, split in two (SplitMergedHullProgram, shader.cpp): the VGPRs its HS
+	// part reads before writing them, which on the hardware still hold what the LS part left in the same lane (one wave
+	// runs both parts); bit k = v<k>. The LS stage exports them after its outputs and the HS stage starts with them
+	// (CarriedOutput/CarriedInput, Translate.cpp). Empty for every other pair (AnalyzeTessellationPrograms).
+	std::array<uint32_t, 8> carried_vgprs {};
 };
 
 // GPU indirect draws: vertex program variant for indirect

@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -402,11 +404,96 @@ bool EvaluateActiveAddress(IR::Value value, uint32_t& result, uint32_t depth = 0
 	}
 }
 
+// The VGPRs the HS part of a split merged LS+HS program reads before writing them (ShaderTessellationInputInfo::
+// carried_vgprs). On the hardware one wave runs the LS part and then the HS part, so such a register still holds what
+// the LS part left in the lane: the 2.000 translucent-particle HS takes the particle's index, flags and camera-relative
+// position that way (v6-v9, v12, v13) instead of reading them back from LDS as the 1.x HS halves do.
+// The set may only err on the large side: a read counts every register its operand could cover, a write counts only
+// when it certainly replaces the whole register in every lane that later reads it, i.e. a full-width write in the
+// straight-line code after the entry sequence (EXEC = all, V_CMPX lane < HS threads, S_CBRANCH_EXECZ) and before the
+// first branch or other EXEC change (a write under a narrower EXEC keeps the LS value in the other lanes). An extra
+// register only costs one carried u32.
+std::array<uint32_t, 8> MergedHullCarriedVgprs(const Decoder::Program& control) {
+	using namespace Decoder;
+	std::bitset<IR::NumVectorRegs> defined, live;
+	defined.set(0); // the back half's own V_MBCNT lane index (SplitMergedHullProgram)
+	defined.set(1); // the packed HS IDs the frontend sets
+	bool entry    = true;
+	bool definite = true;
+	for (const auto& inst: control.instructions) {
+		const auto text  = InstructionToString(inst);
+		const auto colon = text.find(": ");
+		const auto start = colon == std::string::npos ? 0u : colon + 2u;
+		const auto name  = text.substr(start, text.find(' ', start) - start);
+		const auto has   = [&](const char* part) { return name.find(part) != std::string::npos; };
+		const bool memory = inst.family == Family::MUBUF || inst.family == Family::MTBUF ||
+		                    inst.family == Family::FLAT || inst.family == Family::DS || inst.family == Family::MIMG;
+		const bool load   = memory && !has("D16") &&
+		                  (has("LOAD") || name.starts_with("DS_READ") || has("SAMPLE") || has("GATHER"));
+		const bool valu   = inst.family == Family::VOP1 || inst.family == Family::VOP2 ||
+		                  inst.family == Family::VOP3 || inst.family == Family::VOP3P;
+		// Destinations that keep part of the old value (or read it): accumulators, lane writes, sub-dword writes.
+		const bool partial = has("MAC") || has("DOT2C") || has("DOT4C") || has("DOT8C") || has("WRITELANE") ||
+		                     has("MOVREL") || has("D16") || inst.dst.sdwa_sel != 6u || inst.dst.op_sel || inst.dst.dpp;
+		const auto read = [&](const Operand& operand, uint32_t width) {
+			if (operand.kind != OperandKind::Vgpr) return;
+			for (uint32_t index = 0; index < width && operand.reg + index < IR::NumVectorRegs; index++) {
+				if (!defined[operand.reg + index]) live.set(operand.reg + index);
+			}
+		};
+		const uint32_t source_width = memory ? std::max(inst.data_dwords, 4u)
+		                              : has("64")  ? 2u
+		                                           : 1u;
+		for (const auto* operand: {&inst.src0, &inst.src1, &inst.src2, &inst.src3}) read(*operand, source_width);
+		if (inst.family == Family::MIMG) {
+			read(inst.src0, std::max(inst.image_address_components, 4u));
+			for (uint32_t index = 0; index < inst.image_nsa_dwords && index < MaxImageNsaAddressComponents; index++) {
+				const Operand address {.kind = OperandKind::Vgpr, .reg = inst.image_nsa_addr[index]};
+				read(address, 1u);
+			}
+		}
+		if ((memory && !load) || ((valu || memory) && partial)) {
+			read(inst.dst, std::max(inst.data_dwords, 2u)); // store data, atomics, partial writes
+		}
+		if (entry) {
+			const bool entry_inst = inst.opcode == Opcode::V_MBCNT_LO_U32_B32 || inst.opcode == Opcode::V_MBCNT_HI_U32_B32 ||
+			                        inst.opcode == Opcode::S_MOV_B64 || inst.opcode == Opcode::V_CMPX_LT_U32 ||
+			                        inst.opcode == Opcode::S_BARRIER || inst.opcode == Opcode::S_INST_PREFETCH ||
+			                        inst.opcode == Opcode::S_WAITCNT || inst.opcode == Opcode::S_NOP;
+			if (inst.opcode == Opcode::S_CBRANCH_EXECZ || !entry_inst) entry = false;
+			if (entry || inst.opcode == Opcode::S_CBRANCH_EXECZ) continue;
+		}
+		if (IsDirectBranch(inst.opcode) || inst.opcode == Opcode::S_SETPC_B64 || inst.opcode == Opcode::S_SWAPPC_B64 ||
+		    inst.opcode == Opcode::S_ENDPGM || text.find("exec") != std::string::npos ||
+		    text.find("EXEC") != std::string::npos) {
+			definite = false;
+		}
+		if (!definite || inst.dst.kind != OperandKind::Vgpr || partial) continue;
+		if (valu) {
+			defined.set(inst.dst.reg);
+		} else if (load && (inst.family == Family::DS || inst.family == Family::MUBUF || inst.family == Family::MTBUF)) {
+			for (uint32_t index = 0; index < std::max(inst.data_dwords, 1u) && inst.dst.reg + index < IR::NumVectorRegs;
+			     index++) {
+				defined.set(inst.dst.reg + index);
+			}
+		} else if (load) {
+			defined.set(inst.dst.reg);
+		}
+	}
+	live.reset(0);
+	live.reset(1);
+	std::array<uint32_t, 8> mask {};
+	for (uint32_t reg = 0; reg < IR::NumVectorRegs; reg++) {
+		if (live[reg]) mask[reg / 32u] |= 1u << (reg % 32u);
+	}
+	return mask;
+}
+
 } // namespace
 
 
 void AnalyzeTessellationPrograms(std::span<const uint32_t> local, std::span<const uint32_t> control,
-                                 ShaderTessellationInputInfo& info) {
+                                 ShaderTessellationInputInfo& info, bool merged) {
 	const auto       local_program = Decoder::DecodeFrontProgram(local);
 	Decoder::Program control_program;
 	Decoder::DecodeProgram(control, control_program);
@@ -436,6 +523,31 @@ void AnalyzeTessellationPrograms(std::span<const uint32_t> local, std::span<cons
 	                                           info.ls_stride);
 	LOGF("Tessellation interface: input_cp=%u output_cp=%u ls_stride=%u hs_stride=%u\n",
 	     info.input_control_points, info.output_control_points, info.ls_stride, info.hs_stride);
+	info.carried_vgprs = {};
+	if (!merged) return;
+	info.carried_vgprs = MergedHullCarriedVgprs(control_program);
+	std::string list;
+	uint32_t    count = 0;
+	for (uint32_t reg = 0; reg < IR::NumVectorRegs; reg++) {
+		if (((info.carried_vgprs[reg / 32u] >> (reg % 32u)) & 1u) == 0u) continue;
+		list += fmt::format(" v{}", reg);
+		count++;
+	}
+	if (count == 0u) return;
+	// HS thread i of a patch ran the LS part for the patch's vertex i: the same lane only when the counts agree.
+	EXIT_NOT_IMPLEMENTED(info.input_control_points != info.output_control_points);
+	// The carried registers follow the LS outputs in the LS -> HS interface (Vulkan guarantees 64 components per
+	// vertex there, the GPUs this runs on offer 128).
+	const auto components = (info.ls_stride + 15u) / 16u * 4u + (count + 3u) / 4u * 4u;
+	if (components > 128u) {
+		EXIT("merged HS program carries %u VGPRs from its LS part: %u interface components (max 128):%s\n", count,
+		     components, list.c_str());
+	}
+	LOGF("Tessellation interface: the merged program's HS part carries %u VGPRs from its LS part:%s\n", count,
+	     list.c_str());
+	if (std::getenv("KYTY_TRACE_TESS_LOWERING") != nullptr) {
+		std::fprintf(stderr, "TESS_CARRIED count=%u%s\n", count, list.c_str());
+	}
 }
 
 void LowerTessellationMemory(IR::Program& program, const CompileOptions& options) {

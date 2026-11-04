@@ -15,7 +15,7 @@ struct Program;
 }
 
 void AnalyzeTessellationPrograms(std::span<const uint32_t> local, std::span<const uint32_t> control,
-                                 ShaderTessellationInputInfo& info);
+                                 ShaderTessellationInputInfo& info, bool merged = false);
 void LowerTessellationMemory(IR::Program& program, const CompileOptions& options);
 
 } // namespace Libs::Graphics::ShaderRecompiler

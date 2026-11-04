@@ -87,7 +87,8 @@ constexpr size_t   HeaderBytes     = sizeof(JournalMagic) + sizeof(uint32_t) + s
 
 // The graphics journal: magic, version, schema fingerprint, device fingerprint; then stage and pipeline records.
 constexpr char     GraphicsJournalMagic[8] = {'K', 'Y', 'G', 'F', 'J', 'R', 'N', 'L'};
-constexpr uint32_t GraphicsJournalVersion  = 1;
+// 2 (4.11.2026): ShaderTessellationInputInfo::carried_vgprs (the 2.000 merged LS+HS program's carried VGPRs).
+constexpr uint32_t GraphicsJournalVersion  = 2;
 constexpr uint32_t StageRecordMagic        = 0x47545347u; // "GSTG"
 constexpr uint32_t PipelineRecordMagic     = 0x50495047u; // "GPIP"
 constexpr size_t   GraphicsHeaderBytes = sizeof(GraphicsJournalMagic) + sizeof(uint32_t) + 2 * sizeof(uint64_t);
@@ -471,6 +472,7 @@ void WriteVertexInput(Writer& w, const ShaderVertexInputInfo& in) {
 	w.U32(tess.domain);
 	w.U32(tess.partitioning);
 	w.U32(tess.output_topology);
+	for (const auto word: tess.carried_vgprs) w.U32(word);
 	w.U32(in.indirect_draw.enabled ? 1u : 0u);
 	w.U32(in.indirect_draw.base_vertex);
 	w.U32(in.indirect_draw.base_instance);
@@ -537,6 +539,7 @@ bool ReadVertexInput(Reader& r, ShaderVertexInputInfo& in, uint8_t& table_mode) 
 	tess.domain                = r.U32();
 	tess.partitioning          = r.U32();
 	tess.output_topology       = r.U32();
+	for (auto& word: tess.carried_vgprs) word = r.U32();
 	in.indirect_draw.enabled       = r.U32() != 0u;
 	in.indirect_draw.base_vertex   = static_cast<uint8_t>(r.U32());
 	in.indirect_draw.base_instance = static_cast<uint8_t>(r.U32());
