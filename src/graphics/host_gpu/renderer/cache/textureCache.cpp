@@ -382,6 +382,10 @@ void TextureCache::RegisterImage(ImageId id) {
 	m_registered_bytes += image.registered_bytes;
 }
 
+// PROJEKT-OKNO-TEKSTUR step 0 (counters only): the reason the last image at each guest address was unregistered (under
+// g_unregister_mutex), so a texture created over nothing registered says what freed the one before it.
+static std::unordered_map<uint64_t, const char*> g_texwin_freed_by;
+
 void TextureCache::UnregisterImage(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (!image.registered) {
@@ -399,6 +403,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 		std::lock_guard lock(g_unregister_mutex);
 		g_unregister_reasons[why]++;
 		g_unregister_keys[key]++;
+		g_texwin_freed_by[image.info.data.address] = why; // PROJEKT-OKNO-TEKSTUR step 0
 	}
 	if (image.bindless_pinned) {
 		image.bindless_pinned = false;
@@ -3182,6 +3187,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 				std::lock_guard stats_lock(g_unregister_mutex);
 				g_unregister_reasons[kind]++;
 				g_unregister_keys[key]++;
+				if (!same_texture) {
+					const auto freed = g_texwin_freed_by.find(desc.info.data.address);
+					g_unregister_reasons[std::string("texwin_again_after_") +
+					                     (freed != g_texwin_freed_by.end() ? freed->second : "never")]++;
+				}
 			}
 			if (VramBudgetEnabled()) {
 				MakeRoomForImage(desc.info);
