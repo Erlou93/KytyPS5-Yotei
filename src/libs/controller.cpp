@@ -975,11 +975,16 @@ void GameController::GetConnectionInfo(bool* flag, int* count) {
 // 128, LY=0 = left stick fully forward) and a pad is reported connected, so unattended runs can move the character
 // the same way every time. BTN=<hex mask> holds buttons (controller.h PAD_BUTTON_*, e.g. 4000 = Cross) during the
 // segment: separate short segments are separate presses (2.002 starts in the main menu, Cross enters the game).
+// SWIPE=<from>-<to> moves one finger over the touch pad during the segment, at its horizontal centre, from <from> to <to>
+// (per mille of the pad's height, 0 = top): SWIPE=900-100 over ~10 frames is a swipe up (the cutscene after the 2.002 Snake
+// fight waits for one).
 struct PadScriptSegment {
 	uint32_t                                       first = 0;
 	uint32_t                                       last  = 0;
 	std::array<int, static_cast<int>(Axis::AxisMax)> axes {-1, -1, -1, -1, -1, -1};
 	uint32_t                                       buttons = 0; // BTN=<hex mask> (e.g. 4000 = Cross): held during the segment
+	int                                            swipe_from = -1; // SWIPE=<from>-<to>, per mille of the pad's height
+	int                                            swipe_to   = -1;
 };
 
 static const std::vector<PadScriptSegment>& PadScript() {
@@ -1009,6 +1014,10 @@ static const std::vector<PadScriptSegment>& PadScript() {
 				const auto eq    = entry.find('=');
 				if (eq == std::string::npos) continue;
 				if (entry.substr(0, eq) == "BTN") segment.buttons |= static_cast<uint32_t>(std::strtoul(entry.c_str() + eq + 1, nullptr, 16));
+				if (entry.substr(0, eq) == "SWIPE" &&
+				    std::sscanf(entry.c_str() + eq + 1, "%d-%d", &segment.swipe_from, &segment.swipe_to) != 2) {
+					segment.swipe_from = segment.swipe_to = -1;
+				}
 				for (size_t a = 0; a < names.size(); a++) {
 					if (entry.substr(0, eq) == names[a]) {
 						segment.axes[a] = std::clamp(std::atoi(entry.c_str() + eq + 1), 0, 255);
@@ -1034,6 +1043,18 @@ static bool ApplyPadScript(ControllerState& state) {
 			if (segment.axes[a] >= 0) state.axes[a] = segment.axes[a];
 		}
 		state.buttons |= segment.buttons;
+		if (segment.swipe_from >= 0) {
+			const float t = segment.last > segment.first
+			                    ? static_cast<float>(frame - segment.first) / static_cast<float>(segment.last - segment.first)
+			                    : 1.0f;
+			const float y = static_cast<float>(segment.swipe_from) +
+			                t * static_cast<float>(segment.swipe_to - segment.swipe_from);
+			state.touch[0].id   = 100;
+			state.touch[0].down = true;
+			state.touch[0].x    = 960;
+			state.touch[0].y    = static_cast<uint16_t>(std::clamp(y, 0.0f, 1000.0f) * 943.0f / 1000.0f);
+			state.touch[1].down = false;
+		}
 		state.time = LibKernel::KernelGetProcessTime();
 		return true;
 	}
