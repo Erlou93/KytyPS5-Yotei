@@ -784,7 +784,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	sub_timer.emplace(DispatchSub::TailPost); // KYTY_TRACE_DISPATCH_CENSUS: to the binding reset
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelEnd(vk_buffer);
-	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 0);
+	if (gpu_time != ~0u) {
+		// KYTY_TRACE_DISPATCH_WATCH: the watched shader's dispatches are timed per size (GPUTIME_TOP b = groups << 4 | 2).
+		static const uint64_t watch_hash = [] {
+			const char* value = std::getenv("KYTY_TRACE_DISPATCH_WATCH");
+			return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ull;
+		}();
+		const uint64_t b = program.shader_hash == watch_hash
+		                       ? (uint64_t {thread_group_x} * thread_group_y * thread_group_z) << 4u | 2u
+		                       : 0u;
+		GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, b);
+	}
 	{
 		const DispatchSubTimer emitted_timer(DispatchSub::TailEmitted); // KYTY_TRACE_DISPATCH_CENSUS
 		m_context.GetBufferCache().NoteCommandEmitted();
