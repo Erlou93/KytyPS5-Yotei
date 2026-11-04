@@ -40,12 +40,15 @@ of system memory in play; with 16 GB Windows runs out of memory and pages to dis
 1. Unpack the zip into an empty folder (not under `Program Files`; the emulator writes its caches, saves and logs next
    to itself, the launcher its settings, `Kyty.ini`; nothing is written anywhere else).
 2. Start `launcher.exe` (not `kyty_emulator.exe`: only the launcher prepares the shaders), choose your Ghost of Yōtei
-   dump (game versions **1.512** and **2.002**; 1.512 is the one tested most): its folder or its `.zar` archive, and
-   press **Play**.
+   dump (game version **2.002**, the one supported and tested since v0.1.4; 1.512 still starts but is no longer
+   tested and has no shader hints): its folder or its `.zar` archive, and press **Play**.
 3. **First start:** the package ships shader hints for the game (`hints\`, a list of the shaders the game uses, without
    any game code). On the first Play the launcher finds those shaders in your game files and compiles them before the
    game starts; this takes a few minutes and runs only once. The game then starts by itself. Without it the first
-   hours stutter while shaders compile during play.
+   hours stutter while shaders compile during play. The v0.1.4 hints cover the game **from the start to the Snake
+   fight** only (the shader format changed in v0.1.4, so the older, larger hints could not be kept): later areas
+   compile their shaders while you play, with short stutters the first time you reach them. Shaders compiled while
+   playing are saved, so the next visit is smooth.
 4. **Graphics mode:** the game's own *Performance* mode is the one tested. In *Quality* mode the game changes its
    internal resolution all the time, which makes the screen flicker in this build; the **Render at 1080p** mod
    (launcher, Mods page; on by default on 1.512 and 2.002 since v0.1.3, also in cutscenes) keeps it steady. The
@@ -64,10 +67,16 @@ What to expect: on the test PC (Ryzen 7 9800X3D, RTX 5070 Ti) the game runs at r
 fps in the open world with the default settings, more with the mods above. The emulator's GPU work runs on four threads, each on its own
 physical CPU core, chosen automatically for the processor (`KYTY_GPU_THREAD_CPUS=off` turns that off).
 
-Known slow spot: some in-engine cutscenes (for example the Snake cutscene) drop to about 6-7 fps for a minute, with
-a few seconds at 1-2 fps; the game returns to its usual frame rate after them. The game renders them at up to 4K,
-and in the first ~50 s after a save is loaded the emulator still translates the game's shaders in the background
-(again on every start). The **Render at 1080p** mod (on by default) helps a little (about +10% in that cutscene).
+Known slow spots:
+- Some in-engine cutscenes are still slower than play: the cutscene after the Snake fight runs at about 8 fps (5.5 in
+  v0.1.3). The **Render at 1080p** mod (on by default) keeps cutscenes at 1080p instead of up to 4K.
+- Scenes with a lot of fire, such as parts of the Snake fight, can drop to about 10 fps.
+
+**Known issue: graphics memory grows over a long session.** Each change of scene (especially cutscenes) leaves unused
+gaps in the graphics card's memory that the emulator does not reclaim yet. On a 16 GB card the usage goes from about
+12 GB after loading to 13.5-15 GB after 30-60 minutes; near the card's limit the driver moves data to system RAM and
+the frame rate drops. Watch "Vulkan budget" in the performance panel (Shift+F2): if it gets close to the limit and the
+game slows down, save, quit and start again. A fix is the next work item.
 
 ## Building (Windows)
 
