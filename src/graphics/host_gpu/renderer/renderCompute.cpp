@@ -682,6 +682,39 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		                   thread_group_y, thread_group_z);
 	}
 	if (ComputeTrace::CsImageDumpOn()) ComputeTrace::CsImageDumpTrace(m_context, vk_buffer, program, bindings, input_info.stage.resources);
+	// KYTY_TRACE_DISPATCH_WATCH=<hex hash> (diagnostic, 4.11: the 2.002 post-cutscene slowdown): per presented frame, the
+	// listed shader's dispatches, their thread groups, and the V# in its user data s[0:3] (largest record count, distinct
+	// bases); one DISPATCH_WATCH line when the frame changes.
+	{
+		static constinit Common::OnceValue<uint64_t> watch_once;
+		const uint64_t watch = watch_once.Get([] {
+			const char* value = std::getenv("KYTY_TRACE_DISPATCH_WATCH");
+			return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ull;
+		});
+		if (watch != 0 && program.shader_hash == watch) {
+			static uint32_t frame = 0, n = 0, max_records = 0, stride = 0;
+			static uint64_t groups = 0, first = 0;
+			static std::vector<uint64_t> bases;
+			const auto now = DebugPresentCount().load();
+			if (now != frame && n != 0) {
+				std::fprintf(stderr, "DISPATCH_WATCH frame=%u n=%u groups=%llu max_records=%u stride=%u bases=%zu first=0x%llx\n", frame, n,
+				             static_cast<unsigned long long>(groups), max_records, stride, bases.size(),
+				             static_cast<unsigned long long>(first));
+				n = 0, groups = 0, max_records = 0, stride = 0, first = 0;
+				bases.clear();
+			}
+			frame = now;
+			n++;
+			groups += uint64_t {thread_group_x} * thread_group_y * thread_group_z;
+			if (resources.user_data.size() >= 4u) {
+				ShaderBufferResource v {};
+				std::copy_n(resources.user_data.begin(), 4, v.fields);
+				if (v.NumRecords() > max_records) max_records = v.NumRecords(), stride = v.Stride();
+				if (first == 0) first = v.Base48();
+				if (std::ranges::find(bases, v.Base48()) == bases.end() && bases.size() < 4096u) bases.push_back(v.Base48());
+			}
+		}
+	}
 	// KYTY_DIAG_TWIN_DISPATCH: B first, between copies of what the dispatch writes; A below runs on the originals.
 	const bool twin_open =
 	    twin.program != nullptr &&
