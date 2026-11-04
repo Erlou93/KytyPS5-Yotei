@@ -720,7 +720,7 @@ void GraphicContext::TrimRecycledImages() {
 	TrimRecycled(allocator, true);
 }
 
-std::vector<GraphicContext::BlockCensus> GraphicContext::CollectBlocks() const {
+std::vector<GraphicContext::BlockCensus> GraphicContext::CollectBlocks(uint32_t list_pct, bool ranges) const {
 	std::vector<BlockCensus> blocks;
 	if (allocator == nullptr) return blocks;
 	const auto& properties = GetPhysicalDeviceMemoryProperties();
@@ -739,13 +739,32 @@ std::vector<GraphicContext::BlockCensus> GraphicContext::CollectBlocks() const {
 			entry.type                           = type;
 			entry.size                           = metadata->GetSize();
 			entry.free                           = metadata->GetSumFreeSize();
+			entry.count                          = metadata->GetAllocationCount();
+			const bool list = entry.free * 100u >= entry.size * list_pct;
+			if (!list && !ranges) continue;
+			// TLSF walks its allocations from the end of the block to the start; GetNextFreeRegionSize is the free range
+			// physically before each one, and what the walk leaves of the free sum is the free tail of the block.
+			uint64_t listed_free = 0;
 			for (VmaAllocHandle handle = metadata->GetAllocationListBegin(); handle != VK_NULL_HANDLE;
 			     handle                = metadata->GetNextAllocation(handle)) {
-				entry.allocations.push_back(static_cast<VmaAllocation>(metadata->GetAllocationUserData(handle)));
+				if (list) entry.allocations.push_back(static_cast<VmaAllocation>(metadata->GetAllocationUserData(handle)));
+				if (!ranges) continue;
+				if (const uint64_t gap = metadata->GetNextFreeRegionSize(handle); gap != 0) {
+					entry.free_ranges.push_back(gap);
+					listed_free += gap;
+				}
 			}
+			if (ranges && entry.free > listed_free) entry.free_ranges.push_back(entry.free - listed_free);
 		}
 	}
 	return blocks;
+}
+
+std::vector<VmaAllocation> GraphicContext::RecycledAllocations() const {
+	std::vector<VmaAllocation> allocations;
+	std::lock_guard            lock(g_recycle_mutex);
+	for (const auto& parked: g_recycled) allocations.push_back(parked.allocation);
+	return allocations;
 }
 
 std::vector<VmaAllocation> GraphicContext::PlugBlocks(uint32_t type, std::span<const VkDeviceMemory> avoid,

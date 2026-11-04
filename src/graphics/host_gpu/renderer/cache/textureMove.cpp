@@ -18,9 +18,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -366,7 +369,7 @@ void ExpireRetired(GraphicContext& graphics, uint64_t now, bool all) {
 		GraphicContext::DeviceMemoryFrees(frees_after, bytes_after);
 		uint64_t emptied = 0, reused = 0; // reused: a block other allocations took during the retire period
 		std::unordered_map<VkDeviceMemory, size_t> present;
-		for (const auto& block: graphics.CollectBlocks()) present.emplace(block.memory, block.allocations.size());
+		for (const auto& block: graphics.CollectBlocks(101u)) present.emplace(block.memory, block.count);
 		for (const auto memory: batch.drained) {
 			const auto found = present.find(memory);
 			(found == present.end() || found->second == 0 ? emptied : reused)++;
@@ -435,7 +438,10 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		ExpireRetired(m_graphics, now, false);
 	}
 	static uint64_t last = now; // the first batch an interval after the first frame boundary
-	if (now - last < config.interval_ms) return;
+	// Back-off: an attempt that moved nothing and ended exactly like the one before (same candidate blocks, same
+	// allocation counts, same reasons) doubles the wait, up to 60 s; anything else resets it to the interval.
+	static uint64_t wait_ms = config.interval_ms, last_signature = 0;
+	if (now - last < wait_ms) return;
 	uint64_t usage = 0, budget = 0, block_bytes = 0, allocated = 0;
 	m_graphics.GetDeviceLocalMemoryStats(usage, budget, block_bytes, allocated);
 	const uint64_t empty = block_bytes > allocated ? block_bytes - allocated : 0;
@@ -468,7 +474,15 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	std::vector<Drain>      drains;
 	std::unique_ptr<Buffer> check;
 	std::string             ceiling_text; // the ceiling census (measurement only, map §3v 5.11)
+	double                  ms_census = 0;
+	uint64_t                signature = 0xcbf29ce484222325ull; // 0 changes: the attempt never reached the census
 	const auto report = [&] {
+		if (n.images == 0 && signature != 0 && signature == last_signature) {
+			wait_ms = std::min<uint64_t>(wait_ms * 2u, std::max<uint64_t>(config.interval_ms, 60000u));
+		} else {
+			wait_ms = config.interval_ms;
+		}
+		last_signature = signature;
 		auto& totals = GetTexMoveTotals();
 		totals.batches.fetch_add(1);
 		totals.images.fetch_add(n.images);
@@ -484,12 +498,13 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		             "TEXMOVE frame=%llu trigger_empty_MiB=%llu candidate_blocks=%llu skip(foreign=%llu busy=%llu busy_why=%s "
 		             "over_batch=%llu no_room=%llu) dest_in_drain=%llu plugs=%llu/%lluMiB newblock_fallback=%llu drained=%zu "
 		             "images=%llu moved_MiB=%.1f emptied=%llu returned=%llu returned_MiB=%llu slots_rewritten=%llu "
-		             "memo_invalidations=%llu ms_record=%.2f ms_wait=%.2f ms_swap=%.2f ms_total=%.2f%s\n",
+		             "memo_invalidations=%llu ms_record=%.2f ms_wait=%.2f ms_swap=%.2f ms_total=%.2f ms_census=%.2f "
+		             "next_s=%.0f%s\n",
 		             u(m_graphics.presented_frames.load(std::memory_order_relaxed)), u(empty >> 20u), u(n.candidates),
 		             u(n.foreign), u(n.busy), n.busy_why, u(n.over_batch), u(n.no_room), u(n.dest_in_drain), u(n.plugs),
 		             u(n.plug_bytes >> 20u), u(n.newblock), drains.size(), u(n.images), static_cast<double>(n.moved) / 1048576.0,
 		             u(n.emptied), u(n.returned), u(n.returned_bytes >> 20u), u(n.slots), u(n.memos), ms_record, ms_wait,
-		             ms_swap, MsSince(start), ceiling_text.c_str());
+		             ms_swap, MsSince(start), ms_census, static_cast<double>(wait_ms) / 1000.0, ceiling_text.c_str());
 		if (mode >= 2) {
 			std::fprintf(stderr,
 			             "TEXMOVE_CHECK_SUMMARY batch=%llu images=%llu mismatches=%llu stale_slots=%llu "
@@ -503,26 +518,45 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	// 1. Census and destinations, recorded copies (under m_lock).
 	{
 		std::scoped_lock lock {m_lock};
-		// Parked images hold allocations in the blocks too; none may be handed out while blocks are being emptied.
-		m_graphics.TrimRecycledImages();
 		if (table.DrawHeapCount() != 0 || table.DrawTableCount() != 0) { // a prepared draw not committed yet
 			n.busy++;
+			signature = 0; // a prepared draw: no back-off
 			report();
 			return;
 		}
-		auto census = m_graphics.CollectBlocks();
+		// The census, kept cheap (most attempts move nothing): every block's size and fill, the allocations only of the
+		// candidate blocks, and the images only for those allocations. Parked images are not trimmed here any more (a
+		// drain that waits on the GPU): a block holding one is skipped until they go (2 s).
+		const auto candidate = [&](const GraphicContext::BlockCensus& block) {
+			return block.count != 0 && block.free * 100u >= block.size * config.block_pct;
+		};
+		auto census = m_graphics.CollectBlocks(static_cast<uint32_t>(config.block_pct));
 		std::unordered_map<VmaAllocation, ImageId> owners;
-		m_slot_images.ForEach([&](ImageId id, const Image& image) {
-			if (image.backing.allocation != nullptr) owners.emplace(image.backing.allocation, id);
-		});
+		{
+			std::unordered_set<VmaAllocation> wanted;
+			for (const auto& block: census) {
+				if (candidate(block)) wanted.insert(block.allocations.begin(), block.allocations.end());
+			}
+			if (!wanted.empty()) {
+				m_slot_images.ForEach([&](ImageId id, const Image& image) {
+					if (image.backing.allocation != nullptr && wanted.contains(image.backing.allocation))
+						owners.emplace(image.backing.allocation, id);
+				});
+			}
+		}
+		std::unordered_set<VmaAllocation> parked;
+		for (const auto allocation: m_graphics.RecycledAllocations()) parked.insert(allocation);
 		// Emptiest first; whole blocks up to the batch size.
 		std::ranges::sort(census, [](const auto& a, const auto& b) { return a.size - a.free < b.size - b.free; });
+		ms_census = MsSince(start);
 		// The ceiling census (measurement only, map §3v 5.11: most attempts gave up on gpu_written): the candidate blocks
 		// that would empty if GPU-written textures could move (every other check kept), and if their render-target and
 		// storage use did not stop them either; the first reason each other block still keeps; and what the GPU-written
 		// residents of the candidate blocks are (top by bytes: format, extent, layers/levels, how written, usage flags,
-		// frames since last use, GPU writes of any image since its own last one).
-		{
+		// frames since last use, GPU writes of any image since its own last one). KYTY_TEXMOVE_CEIL=1 only (5.11: the
+		// extension is parked; the census costs time on every attempt).
+		static const bool ceiling_on = std::getenv("KYTY_TEXMOVE_CEIL") != nullptr;
+		if (ceiling_on) {
 			struct Top {
 				uint64_t count = 0, bytes = 0, unused = ~uint64_t {0}, writes = ~uint64_t {0};
 			};
@@ -532,7 +566,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				uint64_t                        blocks = 0, block_bytes = 0, resident = 0;
 				std::map<std::string, uint64_t> blockers;
 				for (const auto& block: census) {
-					if (block.allocations.empty() || block.free * 100u < block.size * config.block_pct) continue;
+					if (!candidate(block)) continue;
 					const char* why = nullptr;
 					for (const auto allocation: block.allocations) {
 						const auto owner = owners.find(allocation);
@@ -557,7 +591,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				if (blockers.empty()) ceiling_text += "-";
 			}
 			for (const auto& block: census) {
-				if (block.allocations.empty() || block.free * 100u < block.size * config.block_pct) continue;
+				if (!candidate(block)) continue;
 				for (const auto allocation: block.allocations) {
 					const auto owner = owners.find(allocation);
 					if (owner == owners.end()) continue;
@@ -597,33 +631,90 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 			}
 			std::fprintf(stderr, "%s\n", line.c_str());
 		}
-		uint64_t batch_used = 0;
+		// Which candidate blocks could empty (every allocation a movable texture); the outcome of each goes into the
+		// attempt's signature (back-off: the same blocks failing the same way do not need a census every interval).
+		const auto mix = [&](uint64_t value) { signature = (signature ^ value) * 0x100000001b3ull; };
+		std::vector<Drain> eligible;
 		for (const auto& block: census) {
-			if (block.allocations.empty() || block.free * 100u < block.size * config.block_pct) continue;
+			if (!candidate(block)) continue;
 			n.candidates++;
-			Drain drain {block.memory, block.type, block.size - block.free, {}, true};
+			Drain       drain {block.memory, block.type, block.size - block.free, {}, true};
+			const char* why = nullptr;
 			for (const auto allocation: block.allocations) {
 				const auto owner = owners.find(allocation);
-				if (owner == owners.end()) { // a buffer, a placeholder, an image the cache does not hold
+				if (parked.contains(allocation)) {
+					why = "parked";
+				} else if (owner == owners.end()) { // a buffer, a placeholder, an image the cache does not hold
+					why = "foreign";
 					n.foreign++;
-					drain.ok = false;
-					break;
-				}
-				const auto& image = m_slot_images[owner->second];
-				if (const char* why = Unmovable(image, now); why != nullptr) {
+				} else if (why = Unmovable(m_slot_images[owner->second], now); why != nullptr) {
 					if (n.busy++ == 0) n.busy_why = why;
-					drain.ok = false;
-					break;
 				}
+				if (why != nullptr) break;
+				const auto& image = m_slot_images[owner->second];
 				drain.moves.push_back({owner->second, image.serial, allocation, image.backing.state, nullptr, {}, {}});
 			}
-			if (!drain.ok) continue;
-			if (batch_used + drain.used > config.batch_bytes) {
-				n.over_batch++;
-				continue;
+			mix(reinterpret_cast<uint64_t>(block.memory));
+			mix(block.count);
+			mix(reinterpret_cast<uint64_t>(why));
+			if (why == nullptr) eligible.push_back(std::move(drain));
+		}
+		// Room before any allocation (5.11: attempts that ended with no_room still allocated plugs every interval): the
+		// moves of each eligible block, largest first, must fit the free ranges of the other blocks of its memory type that
+		// stay (not empty, not being emptied), best fit, with the allocation's alignment as slack; the one new block a batch
+		// of two or more may take counts as a free range of the largest block size.
+		if (!eligible.empty()) {
+			const auto                                  ranges = m_graphics.CollectBlocks(101u, true); // no lists, ranges
+			std::unordered_map<uint32_t, std::multiset<uint64_t>> room;
+			std::unordered_map<uint32_t, uint64_t>                largest;
+			for (const auto& block: ranges) {
+				largest[block.type] = std::max(largest[block.type], block.size);
+				if (block.count == 0 ||
+				    std::ranges::any_of(eligible, [&](const Drain& drain) { return drain.memory == block.memory; }))
+					continue;
+				room[block.type].insert(block.free_ranges.begin(), block.free_ranges.end());
 			}
-			batch_used += drain.used;
-			drains.push_back(std::move(drain));
+			uint64_t batch_used = 0;
+			bool     new_block  = false;
+			for (auto& drain: eligible) {
+				if (batch_used + drain.used > config.batch_bytes) {
+					n.over_batch++;
+					mix(1);
+					continue;
+				}
+				std::vector<uint64_t> needs;
+				for (const auto& move: drain.moves) {
+					const uint64_t size  = m_graphics.GetAllocationSize(move.old_allocation);
+					const uint64_t align = size >= (64ull << 10u) ? (64ull << 10u) : 4096u;
+					needs.push_back(Common::AlignUp(size, align) + align - 1u);
+				}
+				std::ranges::sort(needs, std::greater<>());
+				const auto fits = [&](std::multiset<uint64_t> pool) {
+					for (const auto need: needs) {
+						const auto range = pool.lower_bound(need);
+						if (range == pool.end()) return std::optional<std::multiset<uint64_t>> {};
+						const uint64_t rest = *range - need;
+						pool.erase(range);
+						if (rest != 0) pool.insert(rest);
+					}
+					return std::optional<std::multiset<uint64_t>> {std::move(pool)};
+				};
+				auto& pool  = room[drain.type];
+				auto  after = fits(pool);
+				if (!after && !new_block && !drains.empty()) { // the batch empties two or more: one new block allowed
+					auto with_block = pool;
+					with_block.insert(largest[drain.type]);
+					if ((after = fits(std::move(with_block)))) new_block = true;
+				}
+				if (!after) {
+					n.no_room++;
+					mix(2);
+					continue;
+				}
+				pool = std::move(*after);
+				batch_used += drain.used;
+				drains.push_back(std::move(drain));
+			}
 		}
 		// The blocks no destination may take: those being emptied, and the empty block VMA keeps (a texture moved into it
 		// only moves the hole: VMA frees an emptied block only while another empty one exists; the first run's batches
@@ -640,7 +731,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		for (const auto& block: census) {
 			if (!avoid.contains(block.type)) continue;
 			auto& list = avoid[block.type];
-			if (block.allocations.empty()) list.push_back(block.memory);
+			if (block.count == 0) list.push_back(block.memory);
 			if (std::ranges::find(list, block.memory) != list.end())
 				plug_sizes[block.type].first = std::max(plug_sizes[block.type].first, block.free);
 		}
@@ -947,7 +1038,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 	n.returned_bytes += bytes_after - bytes_before;
 	// The drained blocks: gone, or left empty (VMA keeps one empty block per memory type), or still holding allocations.
 	std::unordered_map<VkDeviceMemory, size_t> present;
-	for (const auto& block: m_graphics.CollectBlocks()) present.emplace(block.memory, block.allocations.size());
+	for (const auto& block: m_graphics.CollectBlocks(101u)) present.emplace(block.memory, block.count);
 	for (const auto& drain: drains) {
 		if (!drain.ok) continue;
 		const auto found = present.find(drain.memory);

@@ -211,9 +211,15 @@ struct GraphicContext {
 		uint32_t                   type   = 0;
 		uint64_t                   size   = 0;
 		uint64_t                   free   = 0;
+		uint64_t                   count  = 0; // allocations in the block
 		std::vector<VmaAllocation> allocations;
+		std::vector<uint64_t>      free_ranges; // with `ranges`: the sizes of its free ranges
 	};
-	[[nodiscard]] std::vector<BlockCensus> CollectBlocks() const;
+	// list_pct: only blocks at least that empty (percent) list their allocations (the walk over every allocation is
+	// most of the census); ranges: every block lists its free ranges (the room check before a move).
+	[[nodiscard]] std::vector<BlockCensus> CollectBlocks(uint32_t list_pct = 0, bool ranges = false) const;
+	// KYTY_TEXMOVE: the allocations of parked images (they go within 2 s, or at TrimRecycledImages).
+	[[nodiscard]] std::vector<VmaAllocation> RecycledAllocations() const;
 	// KYTY_TEXMOVE: VMA places a new allocation in the first block (fullest first) with a free range it fits, which for a
 	// large texture is often the emptiest block - the one being emptied, or the empty block VMA keeps. Plugs fill the free
 	// ranges of those blocks (memory type `type`, `avoid`) with raw allocations, largest first by halving sizes down to
