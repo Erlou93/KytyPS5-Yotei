@@ -1107,6 +1107,20 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 					return;
 				}
 			}
+			// KYTY_DIAG_CEILING_WRITE_NO_DOWNLOAD (measurement only, APPROXIMATION, map §3c; KYTY_LIVE_AB toggles it): a CPU
+			// write into a GPU-modified page drops the page's GPU bytes instead of downloading them first.
+			if (is_write) {
+				static const bool listed = Common::LiveAb::Listed(Common::LiveAb::Switch::DiagCeilingWriteNoDownload);
+				static const uint32_t fixed = [] {
+					const char* value = std::getenv("KYTY_DIAG_CEILING_WRITE_NO_DOWNLOAD");
+					return value != nullptr && value[0] == '1' ? 1u : 0u;
+				}();
+				if ((fixed != 0u || listed) &&
+				    Common::LiveAb::Gate(Common::LiveAb::Switch::DiagCeilingWriteNoDownload, fixed) != 0u) {
+					release_gpu_to_cpu();
+					return;
+				}
+			}
 			PerfCount(PerfKind::SyncRead);
 
 			if (timed_download(buffer, vaddr, size)) {
