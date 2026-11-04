@@ -2286,13 +2286,15 @@ void ReadOrdinaryMemory(uint64_t vaddr, void* data, uint64_t size) {
 	if (const auto hook = g_ordinary_read_hook.load(std::memory_order_relaxed); hook == nullptr || !hook(vaddr, data, size)) {
 		// KYTY_DIAG_SRT_GUARDED_READ (diagnostic, 4.11): a read that faults is logged and reads zero.
 		static const bool guarded = std::getenv("KYTY_DIAG_SRT_GUARDED_READ") != nullptr;
-		if (guarded) {
+		if (guarded && !Libs::LibKernel::Memory::HostRangeReadable(vaddr, size)) {
 			static std::atomic_uint odd {0};
-			if (odd.fetch_add(1) < 200000u) {
-				std::fprintf(stderr, "DIAG_SRT_GUARDED_READ odd address=0x%llx size=%llu\n", static_cast<unsigned long long>(vaddr),
-				             static_cast<unsigned long long>(size));
+			if (odd.fetch_add(1) < 64u) {
+				std::fprintf(stderr, "DIAG_SRT_GUARDED_READ unmapped address=0x%llx size=%llu\n",
+				             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size));
 				std::fflush(stderr);
 			}
+			std::memset(data, 0, size);
+			return;
 		}
 		if (guarded && !Libs::LibKernel::Memory::GuardedGuestCopy(data, reinterpret_cast<const void*>(vaddr), size)) {
 			static std::atomic_uint logged {0};

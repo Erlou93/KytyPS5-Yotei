@@ -1772,6 +1772,24 @@ bool GuardedGuestCopy(void* dst, const void* src, size_t size) {
 #endif
 }
 
+bool HostRangeReadable(uint64_t vaddr, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	for (uint64_t address = vaddr; address < vaddr + size;) {
+		MEMORY_BASIC_INFORMATION info {};
+		if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT ||
+		    (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+			return false;
+		}
+		address = reinterpret_cast<uint64_t>(info.BaseAddress) + info.RegionSize;
+	}
+	return true;
+#else
+	(void)vaddr;
+	(void)size;
+	return true;
+#endif
+}
+
 struct PrtAperture {
 	uint64_t address = 0;
 	uint64_t size    = 0;
