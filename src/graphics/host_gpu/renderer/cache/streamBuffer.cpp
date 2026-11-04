@@ -96,7 +96,15 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	VmaAllocationInfo allocation_result {};
 	VkBuffer          native_buffer = VK_NULL_HANDLE;
 	vk::Result        result        = vk::Result::eErrorOutOfDeviceMemory;
-	if (usage == MemoryUsage::DeviceLocal && cpu_address != 0) {
+	// KYTY_DIAG_BIG_NO_BAR=<MiB> (diagnostic, 4.11: the 2.002 post-cutscene slowdown): guest buffers of at least that size
+	// get plain device-local memory instead of resizable-BAR memory (their CPU reads then download).
+	static const uint64_t big_no_bar = [] {
+		const char* value = std::getenv("KYTY_DIAG_BIG_NO_BAR");
+		if (value == nullptr) return uint64_t {0};
+		std::fprintf(stderr, "DIAG_BIG_NO_BAR from %s MiB\n", value);
+		return std::strtoull(value, nullptr, 10) << 20u;
+	}();
+	if (usage == MemoryUsage::DeviceLocal && cpu_address != 0 && (big_no_bar == 0 || size < big_no_bar)) {
 		// Device-local and host-visible (resizable BAR), persistently mapped; falls back to plain
 		// device-local memory when none is left.
 		auto bar           = allocation_info;
