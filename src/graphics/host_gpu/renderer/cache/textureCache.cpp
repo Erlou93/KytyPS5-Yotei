@@ -3113,23 +3113,6 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		int32_t view_mip   = -1;
 		int32_t view_layer = -1;
 		if (!result) {
-			// PROJEKT-OKNO-TEKSTUR step 0 (counters only, PERF image_unregister): a texture lookup with no same-backing
-			// image while an image of the same texture (same start address, guest format and tile mode, one layer) is
-			// registered - what rules R1/R3/R5 would serve from that image instead of a new one.
-			if (desc.type == BindingType::Texture && desc.info.resources.layers <= 1u) {
-				bool same_texture = false;
-				for (const auto id: candidates) {
-					const auto* other = m_slot_images.try_get(id);
-					same_texture = same_texture ||
-					               (other != nullptr && other->registered &&
-					                other->info.data.address == desc.info.data.address &&
-					                other->info.guest_format == desc.info.guest_format &&
-					                other->info.tile_mode == desc.info.tile_mode && other->info.resources.layers <= 1u &&
-					                !other->usage.render_target && !other->usage.storage);
-				}
-				std::lock_guard stats_lock(g_unregister_mutex);
-				g_unregister_reasons[same_texture ? "texwin_lookup_same_texture" : "texwin_lookup_new"]++;
-			}
 			for (const auto candidate: candidates) {
 				view_mip                = -1;
 				view_layer              = -1;
@@ -3164,6 +3147,23 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		}
 		bool inserted_new = false;
 		if (!result) {
+			// PROJEKT-OKNO-TEKSTUR step 0 (counters only, PERF image_unregister): a texture image created while an image of
+			// the same texture (same start address, guest format and tile mode, one layer) is registered - what rules
+			// R1/R3/R5 would serve from that image instead of a new one.
+			if (desc.type == BindingType::Texture && desc.info.resources.layers <= 1u) {
+				bool same_texture = false;
+				for (const auto id: candidates) {
+					const auto* other = m_slot_images.try_get(id);
+					same_texture = same_texture ||
+					               (other != nullptr && other->registered &&
+					                other->info.data.address == desc.info.data.address &&
+					                other->info.guest_format == desc.info.guest_format &&
+					                other->info.tile_mode == desc.info.tile_mode && other->info.resources.layers <= 1u &&
+					                !other->usage.render_target && !other->usage.storage);
+				}
+				std::lock_guard stats_lock(g_unregister_mutex);
+				g_unregister_reasons[same_texture ? "texwin_create_same_texture" : "texwin_create_other"]++;
+			}
 			if (VramBudgetEnabled()) {
 				MakeRoomForImage(desc.info);
 			}
