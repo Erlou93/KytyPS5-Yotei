@@ -30,6 +30,7 @@
 namespace Libs::Graphics {
 
 struct GraphicContext;
+class BindlessTable;
 class Buffer;
 class BufferCache;
 class CommandBuffer;
@@ -236,6 +237,10 @@ public:
 
 	void UnmapMemory(uint64_t address, uint64_t size);
 	void RunGarbageCollector();
+	// KYTY_TEXMOVE (textureMove.cpp): at a frame boundary, after the collector, the clean textures that keep nearly empty
+	// VMA blocks alive move into fuller blocks (same ImageId, backing and views swapped, the bindless slots rewritten), so
+	// whole blocks go back to the driver. GPU thread, m_lock not held (the batch waits for the GPU once).
+	void RunTextureMove(BindlessTable& table);
 	// Image read coherence (see the .cpp). A guest thread's read fault on an image-read-watched page: BeginCpuRead runs on the
 	// GPU thread (it records the copies and submits them, it never waits for them), the faulting thread waits for serve.tick
 	// and calls FinishCpuRead. Both take m_lock.

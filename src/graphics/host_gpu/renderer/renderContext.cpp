@@ -369,6 +369,7 @@ void RenderContext::RunGarbageCollector() {
 	SpirvLive::Update(m_command_scheduler, *m_buffer_cache.GetFaultBuffer(),
 	                  BufferCache::FAULT_DIAG_BASE + BufferCache::FAULT_DIAG_WORDS);
 	m_texture_cache.RunGarbageCollector();
+	if (TexMoveMode() != 0) m_texture_cache.RunTextureMove(m_bindless_table); // KYTY_TEXMOVE
 	m_texture_cache.ReportImageReadServe(); // KYTY_TRACE_READBACK
 	m_buffer_cache.RunGarbageCollector();
 	m_pipeline_cache.EvictIdlePipelines(m_command_scheduler);

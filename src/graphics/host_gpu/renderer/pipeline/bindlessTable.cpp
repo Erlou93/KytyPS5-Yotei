@@ -934,6 +934,33 @@ void BindlessTable::WriteSlot(uint32_t binding, uint32_t slot, vk::ImageView vie
 	write.descriptorType  = vk::DescriptorType::eSampledImage;
 	write.pImageInfo      = &info;
 	UpdateSetDescriptors(m_graphics.device, 1, &write);
+	if (m_slot_views_on && binding < ImageArrays) { // KYTY_TEXMOVE
+		auto& views = m_slot_views[binding];
+		if (slot >= views.size()) views.resize(slot + 1u);
+		views[slot] = {view, layout};
+	}
+}
+
+uint32_t BindlessTable::RewriteViews(const std::unordered_map<VkImageView, vk::ImageView>& views) {
+	uint32_t rewritten = 0;
+	for (uint32_t binding = 0; binding < ImageArrays; binding++) {
+		for (uint32_t slot = 0; slot < m_slot_views[binding].size(); slot++) {
+			const auto [view, layout] = m_slot_views[binding][slot];
+			const auto found          = views.find(static_cast<VkImageView>(view));
+			if (found == views.end()) continue;
+			WriteSlot(binding, slot, found->second, layout);
+			rewritten++;
+		}
+	}
+	return rewritten;
+}
+
+uint32_t BindlessTable::CountSlotViews(const std::unordered_set<VkImageView>& views) const {
+	uint32_t count = 0;
+	for (const auto& array: m_slot_views) {
+		for (const auto& [view, layout]: array) count += views.contains(static_cast<VkImageView>(view)) ? 1u : 0u;
+	}
+	return count;
 }
 
 void BindlessTable::SetTranslation(const Heap& heap, uint32_t key, uint32_t slot) {

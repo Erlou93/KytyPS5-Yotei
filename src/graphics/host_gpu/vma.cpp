@@ -71,6 +71,22 @@ bool VmaMapNamesEnabled() {
 	return on;
 }
 
+uint32_t TexMoveMode() {
+	static const uint32_t mode = [] {
+		const char*    value = std::getenv("KYTY_TEXMOVE");
+		const uint32_t m     = value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+		if (m != 0) std::fprintf(stderr, "TEXMOVE mode=%u (texture relocation out of nearly empty VMA blocks%s)\n", m,
+		                         m >= 2 ? ", check mode" : "");
+		return m;
+	}();
+	return mode;
+}
+
+TexMoveTotals& GetTexMoveTotals() {
+	static TexMoveTotals totals;
+	return totals;
+}
+
 namespace {
 // MEM_CENSUS imgsz (map §3v): images created and destroyed by allocation size (<64 KiB, <1 MiB, <16 MiB, <128 MiB, more).
 struct SizeHist {
@@ -124,6 +140,11 @@ thread_local uint64_t  t_allocs        = 0; // this thread's vkAllocateMemory ca
 std::mutex                                g_image_alloc_mutex;
 std::unordered_map<std::string, uint64_t> g_image_allocs;
 std::atomic<uint64_t>                     g_image_alloc_calls {0}, g_image_creates {0}, g_image_deletes {0};
+// KYTY_TEXMOVE: the size of every live VkDeviceMemory (vkFreeMemory is not given it) and the frees since start, so a
+// batch counts the blocks and bytes it gave back from the driver calls themselves.
+std::mutex                                g_memory_size_mutex;
+std::unordered_map<VkDeviceMemory, uint64_t> g_memory_sizes;
+uint64_t                                  g_memory_frees = 0, g_memory_freed_bytes = 0;
 
 uint64_t NanosSince(std::chrono::steady_clock::time_point start) {
 	return static_cast<uint64_t>(
@@ -144,6 +165,10 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device, const VkMemo
 	uint64_t max = c.alloc_max_ns.load(std::memory_order_relaxed);
 	while (ns > max && !c.alloc_max_ns.compare_exchange_weak(max, ns, std::memory_order_relaxed)) {
 	}
+	if (result == VK_SUCCESS && TexMoveMode() != 0) {
+		std::lock_guard lock(g_memory_size_mutex);
+		g_memory_sizes[*memory] = info->allocationSize;
+	}
 	return result;
 }
 
@@ -153,6 +178,14 @@ VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memor
 	auto& c = g_memory_calls;
 	c.frees.fetch_add(1, std::memory_order_relaxed);
 	c.free_ns.fetch_add(NanosSince(start), std::memory_order_relaxed);
+	if (TexMoveMode() != 0) {
+		std::lock_guard lock(g_memory_size_mutex);
+		g_memory_frees++;
+		if (const auto found = g_memory_sizes.find(memory); found != g_memory_sizes.end()) {
+			g_memory_freed_bytes += found->second;
+			g_memory_sizes.erase(found);
+		}
+	}
 }
 } // namespace
 
@@ -409,6 +442,20 @@ std::string GraphicContext::DeviceMemoryTypeCensus() const {
 	}
 	// imgsz: images created / destroyed since the last line by allocation size, "count/MiB" for <64K,<1M,<16M,<128M,more.
 	line += " | imgsz created=" + TakeSizeHist(g_image_created_sizes) + " freed=" + TakeSizeHist(g_image_freed_sizes);
+	if (TexMoveMode() != 0) { // KYTY_TEXMOVE totals since start
+		const auto& t = GetTexMoveTotals();
+		char        part[256];
+		std::snprintf(part, sizeof(part),
+		              " | texmove batches=%llu images=%llu moved_MiB=%llu emptied=%llu returned=%llu returned_MiB=%llu "
+		              "mismatches=%llu stale_slots=%llu still_present=%llu",
+		              static_cast<unsigned long long>(t.batches.load()), static_cast<unsigned long long>(t.images.load()),
+		              mib(t.moved_bytes.load()), static_cast<unsigned long long>(t.emptied.load()),
+		              static_cast<unsigned long long>(t.returned.load()), mib(t.returned_bytes.load()),
+		              static_cast<unsigned long long>(t.mismatches.load()),
+		              static_cast<unsigned long long>(t.stale_slots.load()),
+		              static_cast<unsigned long long>(t.still_present.load()));
+		line += part;
+	}
 	return line;
 }
 
@@ -524,20 +571,29 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
 }
 
-bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
+bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image,
+                                 const ImageRelocation* relocation) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
 
 	VmaAllocationCreateInfo alloc_info {};
 	alloc_info.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
 	alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	if (relocation != nullptr) {
+		// KYTY_TEXMOVE: the old image's memory type (AUTO_PREFER_DEVICE may pick the BAR type), the fullest block with room
+		// (VMA walks its blocks fullest first), no new block unless the batch allows one, and never a parked image (its
+		// allocation may sit in a block being emptied).
+		alloc_info.flags |= VMA_ALLOCATION_CREATE_STRATEGY_MIN_MEMORY_BIT;
+		if (!relocation->allow_new_block) alloc_info.flags |= VMA_ALLOCATION_CREATE_NEVER_ALLOCATE_BIT;
+		alloc_info.memoryTypeBits = 1u << relocation->memory_type;
+	}
 
 	vk::Image::CType native_image = VK_NULL_HANDLE;
 	const uint64_t    allocs_before = t_allocs; // KYTY_TRACE_PERF: PERF device_memory
 	RecycleKey        key {};
 	const bool        recyclable = RecycleKeyOf(image_info, key);
 	bool              reused     = false;
-	if (recyclable) {
+	if (recyclable && relocation == nullptr) {
 		std::lock_guard lock(g_recycle_mutex);
 		TrimRecycled(allocator, false);
 		for (size_t i = g_recycled.size(); i-- > 0;) {
@@ -558,7 +614,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		                   &native_image, &image.allocation, nullptr));
 		if (result != vk::Result::eSuccess) {
 			image.image = native_image;
-			LogMemoryBudget();
+			if (relocation == nullptr) LogMemoryBudget(); // a relocation without room is expected (counted no_room)
 			return false;
 		}
 	}
@@ -638,6 +694,71 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	vmaDestroyImage(allocator, image.image, image.allocation);
 	image.image      = nullptr;
 	image.allocation = nullptr;
+}
+
+void GraphicContext::DestroyImageNow(VulkanImage& image) {
+	EXIT_IF(allocator == nullptr || image.image == nullptr || image.allocation == nullptr);
+	g_image_deletes.fetch_add(1, std::memory_order_relaxed);
+	{
+		std::lock_guard lock(g_recycle_mutex);
+		g_recyclable.erase(static_cast<VkImage>(image.image));
+	}
+	CommandRecorder::DrainBeforeDestroy(); // as DeleteImage: VMA does not go through the dispatcher
+	VmaAllocationInfo freed {};            // MEM_CENSUS imgsz
+	vmaGetAllocationInfo(allocator, image.allocation, &freed);
+	NoteImageSize(g_image_freed_sizes, freed.size);
+	vmaDestroyImage(allocator, image.image, image.allocation);
+	image.image      = nullptr;
+	image.allocation = nullptr;
+}
+
+void GraphicContext::TrimRecycledImages() {
+	if (allocator == nullptr) return;
+	std::lock_guard lock(g_recycle_mutex);
+	TrimRecycled(allocator, true);
+}
+
+std::vector<GraphicContext::BlockCensus> GraphicContext::CollectBlocks() const {
+	std::vector<BlockCensus> blocks;
+	if (allocator == nullptr) return blocks;
+	const auto& properties = GetPhysicalDeviceMemoryProperties();
+	for (uint32_t type = 0; type < properties.memoryTypeCount; type++) {
+		const auto flags = properties.memoryTypes[type].propertyFlags;
+		if (!(flags & vk::MemoryPropertyFlagBits::eDeviceLocal) || (flags & vk::MemoryPropertyFlagBits::eHostVisible)) continue;
+		VmaBlockVector* vector = allocator->m_pBlockVectors[type];
+		if (vector == nullptr) continue;
+		// The default pool's block list (VMA has no public API for it; the defragmentation code walks it the same way).
+		VmaMutexLockRead lock(vector->GetMutex(), allocator->m_UseMutex);
+		for (size_t i = 0; i < vector->GetBlockCount(); i++) {
+			const VmaDeviceMemoryBlock* block    = vector->GetBlock(i);
+			const VmaBlockMetadata*     metadata = block->m_pMetadata;
+			auto&                       entry    = blocks.emplace_back();
+			entry.memory                         = block->GetDeviceMemory();
+			entry.type                           = type;
+			entry.size                           = metadata->GetSize();
+			entry.free                           = metadata->GetSumFreeSize();
+			for (VmaAllocHandle handle = metadata->GetAllocationListBegin(); handle != VK_NULL_HANDLE;
+			     handle                = metadata->GetNextAllocation(handle)) {
+				entry.allocations.push_back(static_cast<VmaAllocation>(metadata->GetAllocationUserData(handle)));
+			}
+		}
+	}
+	return blocks;
+}
+
+bool GraphicContext::AllocationPlace(VmaAllocation allocation, VkDeviceMemory& memory, uint32_t& type) const {
+	if (allocator == nullptr || allocation == nullptr) return false;
+	VmaAllocationInfo info {};
+	vmaGetAllocationInfo(allocator, allocation, &info);
+	memory = info.deviceMemory;
+	type   = info.memoryType;
+	return true;
+}
+
+void GraphicContext::DeviceMemoryFrees(uint64_t& count, uint64_t& bytes) {
+	std::lock_guard lock(g_memory_size_mutex);
+	count = g_memory_frees;
+	bytes = g_memory_freed_bytes;
 }
 
 } // namespace Libs::Graphics

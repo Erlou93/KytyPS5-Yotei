@@ -167,6 +167,12 @@ public:
 	// available to AllocateSlot again.
 	void FreeSlot(uint32_t binding, uint32_t slot, vk::ImageView view = nullptr);
 	void WriteSlot(uint32_t binding, uint32_t slot, vk::ImageView view, vk::ImageLayout layout);
+	// KYTY_TEXMOVE: a moved texture keeps its ImageId, so the table and heap paths keep its slots and never write them
+	// again (RefreshTableSlot returns for the same image): every slot that shows an old view gets the new one here, from
+	// the view each slot was last written with (kept by WriteSlot only with the switch on). Returns the slots rewritten.
+	uint32_t RewriteViews(const std::unordered_map<VkImageView, vk::ImageView>& views);
+	// KYTY_TEXMOVE=2: slots that still show one of these views.
+	[[nodiscard]] uint32_t CountSlotViews(const std::unordered_set<VkImageView>& views) const;
 	// Resolve a key to a slot (0 = placeholder), or back to pending.
 	void SetTranslation(const Heap& heap, uint32_t key, uint32_t slot);
 	// The host reads the feedback flags from a copy in host-cached memory. The feedback buffer
@@ -705,6 +711,9 @@ private:
 	uint32_t                                    m_reserved_slots  = PlaceholderColors;
 	uint32_t                                    m_table_int_slots = 0;
 	ClassStats                                  m_class_stats;
+	// KYTY_TEXMOVE: per array, per slot, the view and layout of its last WriteSlot (RewriteViews).
+	bool m_slot_views_on = TexMoveMode() != 0;
+	std::array<std::vector<std::pair<vk::ImageView, vk::ImageLayout>>, ImageArrays> m_slot_views;
 };
 
 } // namespace Libs::Graphics
