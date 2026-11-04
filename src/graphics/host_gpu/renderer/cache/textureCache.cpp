@@ -3161,8 +3161,27 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 					                other->info.tile_mode == desc.info.tile_mode && other->info.resources.layers <= 1u &&
 					                !other->usage.render_target && !other->usage.storage);
 				}
+				// The others by what lies under them: nothing registered (fresh range), a GPU-written image or render target
+				// (a texture read of what the GPU drew), or only other textures (another description of the bytes).
+				const char* kind = "texwin_create_same_texture";
+				if (!same_texture) {
+					bool any = false, gpu = false;
+					for (const auto id: candidates) {
+						const auto* other = m_slot_images.try_get(id);
+						if (other == nullptr || !other->registered) continue;
+						any = true;
+						gpu = gpu || other->IsGpuModified() || other->usage.render_target || other->usage.storage ||
+						      other->usage.depth_target;
+					}
+					kind = !any ? "texwin_create_fresh" : gpu ? "texwin_create_over_gpu" : "texwin_create_over_texture";
+				}
+				char key[128];
+				std::snprintf(key, sizeof(key), "%s/%s/%ux%u/l%u/m%u", kind + 14, vk::to_string(desc.info.pixel_format).c_str(),
+				              desc.info.extent.width, desc.info.extent.height, desc.info.resources.layers,
+				              desc.info.resources.levels);
 				std::lock_guard stats_lock(g_unregister_mutex);
-				g_unregister_reasons[same_texture ? "texwin_create_same_texture" : "texwin_create_other"]++;
+				g_unregister_reasons[kind]++;
+				g_unregister_keys[key]++;
 			}
 			if (VramBudgetEnabled()) {
 				MakeRoomForImage(desc.info);
