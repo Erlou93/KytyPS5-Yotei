@@ -864,24 +864,6 @@ namespace {
 // thread for ~16 MB/5 s of bytes the game needs.
 constexpr uint64_t ReadWindowBytes = uint64_t {4096} << 10u;
 
-// KYTY_FIX_WRITE_FAULT_WINDOW (map §3c; 0 off, 1 on, 2 the check; KYTY_LIVE_AB toggles 0/1): a guest CPU write into a
-// GPU-modified page downloads the GPU-dirty bytes of the read window around it (ReadRange) in one synchronization and
-// publishes the neighbour pages, as a CPU read does, instead of only its own page. Since 9919560e7 the game's 523 MiB
-// buffer is device-local, so each page download is a flush, a wait and a copy (~85 us, 4.5 us from the BAR mapping
-// before); in the cutscene after the Snake fight the game writes ~2000 consecutive pages a frame (5.5 fps; 8.1 with the
-// buffer in BAR, 10.9 with no download at all). Same bytes: a published neighbour holds the GPU bytes a later fault
-// would download (a GPU write recorded later marks it again), and a CPU-dirty page is never GPU-modified, so the window
-// does not touch it. =2 keeps the page download and checks that claim (WriteWindowCheckBefore/After).
-uint32_t WriteFaultWindowMode() {
-	static const uint32_t fixed = [] {
-		const char* value = std::getenv("KYTY_FIX_WRITE_FAULT_WINDOW");
-		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
-	}();
-	static const bool listed = Common::LiveAb::Listed(Common::LiveAb::Switch::WriteFaultWindow);
-	if (fixed == 0u && !listed) return 0u;
-	return Common::LiveAb::Gate(Common::LiveAb::Switch::WriteFaultWindow, fixed);
-}
-
 // A CPU write into a GPU-modified page whose GPU bytes the write request (ReadMemory with is_write) published (download)
 // or dropped (DropDeadRingBytes) unmarks the page and marks it CPU-dirty under one hold of the region's lock, and the
 // two protection updates, which only open the page, run as one page-manager pass (MemoryTracker::ReleaseGpuToCpu): one
@@ -1112,57 +1094,36 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			}
 			auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
-			// A CPU read of a GPU-modified page downloads every GPU-modified range of the same buffer within +-4 MiB in one
-			// synchronization, so neighbouring reads do not each wait for the GPU again (an approximation of timing only).
-			if (!is_write) {
-				const auto [lo, hi] = ReadRange(buffer, vaddr, size);
-				if (lo < hi && lo <= vaddr && vaddr + size <= hi) {
-					PerfCount(PerfKind::SyncRead);
+			// A CPU access of a GPU-modified page downloads every GPU-modified range of the same buffer within +-4 MiB in one
+			// synchronization, so neighbouring accesses do not each wait for the GPU again (an approximation of timing only).
+			// A write publishes the pages around its own and releases its page to the CPU (map 3c, 4.11: since 9919560e7 the
+			// game's 523 MiB buffer is device-local, so each page download is a flush, a wait and a copy, ~85 us; the cutscene
+			// after the Snake fight writes ~2000 consecutive pages a frame: 5.5 -> 8.4 fps with the window, live A/B; checked
+			// against the page download: 0 different bytes in 4.1 GB). A published neighbour holds the GPU bytes a later
+			// fault would download (a GPU write recorded later marks it again), and a CPU-dirty page is never GPU-modified.
+			const auto [lo, hi] = ReadRange(buffer, vaddr, size);
+			if (lo < hi && lo <= vaddr && vaddr + size <= hi) {
+				PerfCount(PerfKind::SyncRead);
 
-					if (timed_download(buffer, lo, hi - lo)) {
+				if (timed_download(buffer, lo, hi - lo)) {
+					if (!is_write) {
 						UnmarkWindow(lo, hi);
+						return;
 					}
-					return;
-				}
-			}
-			// KYTY_DIAG_CEILING_WRITE_NO_DOWNLOAD (measurement only, APPROXIMATION, map §3c; KYTY_LIVE_AB toggles it): a CPU
-			// write into a GPU-modified page drops the page's GPU bytes instead of downloading them first.
-			if (is_write) {
-				static const bool listed = Common::LiveAb::Listed(Common::LiveAb::Switch::DiagCeilingWriteNoDownload);
-				static const uint32_t fixed = [] {
-					const char* value = std::getenv("KYTY_DIAG_CEILING_WRITE_NO_DOWNLOAD");
-					return value != nullptr && value[0] == '1' ? 1u : 0u;
-				}();
-				if ((fixed != 0u || listed) &&
-				    Common::LiveAb::Gate(Common::LiveAb::Switch::DiagCeilingWriteNoDownload, fixed) != 0u) {
+					const uint64_t page_lo = std::max(lo, vaddr & ~(TRACKER_PAGE_SIZE - 1));
+					const uint64_t page_hi = std::min(hi, (vaddr + size + TRACKER_PAGE_SIZE - 1) & ~(TRACKER_PAGE_SIZE - 1));
+					UnmarkWindow(lo, page_lo);
+					UnmarkWindow(page_hi, hi);
 					release_gpu_to_cpu();
 					return;
 				}
+				if (is_write) mark_cpu_written();
+				return;
 			}
 			PerfCount(PerfKind::SyncRead);
 
-			// KYTY_FIX_WRITE_FAULT_WINDOW: the write downloads the read window and publishes the pages around its own.
-			const uint32_t window_mode = is_write ? WriteFaultWindowMode() : 0u;
-			if (window_mode == 1u) {
-				const auto [lo, hi] = ReadRange(buffer, vaddr, size);
-				if (lo < hi && lo <= vaddr && vaddr + size <= hi) {
-					if (timed_download(buffer, lo, hi - lo)) {
-						const uint64_t page_lo = std::max(lo, vaddr & ~(TRACKER_PAGE_SIZE - 1));
-						const uint64_t page_hi = std::min(hi, (vaddr + size + TRACKER_PAGE_SIZE - 1) & ~(TRACKER_PAGE_SIZE - 1));
-						UnmarkWindow(lo, page_lo);
-						UnmarkWindow(page_hi, hi);
-						release_gpu_to_cpu();
-						return;
-					}
-					mark_cpu_written();
-					return;
-				}
-			}
-			const RangeSet compare = window_mode == 2u ? WriteWindowCheckBefore(buffer, vaddr, size) : RangeSet {};
-
 			if (timed_download(buffer, vaddr, size)) {
 				if (is_write) {
-					if (window_mode == 2u) WriteWindowCheckAfter(compare);
 					release_gpu_to_cpu();
 					return;
 				}
@@ -1217,7 +1178,7 @@ BufferCache::CallerPlan BufferCache::PlanCallerWait(uint64_t vaddr, uint64_t siz
 	// pages of the access.
 	uint64_t lo = vaddr;
 	uint64_t hi = vaddr + size;
-	if (!is_write || WriteFaultWindowMode() == 1u) { // KYTY_FIX_WRITE_FAULT_WINDOW: a write downloads the window too
+	{
 		const auto [w_lo, w_hi] = ReadRange(buffer, vaddr, size);
 		if (w_lo < w_hi && w_lo <= vaddr && vaddr + size <= w_hi) {
 			lo = w_lo;
@@ -3043,139 +3004,6 @@ void BufferCache::GpuDirtyAdd(uint64_t vaddr, uint64_t size) {
 		std::unique_lock lock(m_gpu_dirty_mutex);
 		m_gpu_modified_ranges.Add(vaddr, size);
 	}
-	if (m_write_window_check_on.load(std::memory_order_relaxed)) { // KYTY_FIX_WRITE_FAULT_WINDOW=2
-		std::scoped_lock lock(m_write_window_check_mutex);
-		m_write_window_check.valid.Subtract(vaddr, size);
-	}
-}
-
-RangeSet BufferCache::WriteWindowCheckBefore(Buffer& buffer, uint64_t vaddr, uint64_t size) {
-	m_write_window_check_on.store(true, std::memory_order_relaxed);
-	const uint64_t page_lo = vaddr & ~(TRACKER_PAGE_SIZE - 1);
-	const uint64_t page_hi = (vaddr + size + TRACKER_PAGE_SIZE - 1) & ~(TRACKER_PAGE_SIZE - 1);
-	auto&          check   = m_write_window_check;
-	bool           inside  = false;
-	{
-		std::scoped_lock lock(m_write_window_check_mutex);
-		inside = check.lo <= page_lo && page_hi <= check.hi;
-	}
-	if (!inside) {
-		// The bytes =1 publishes at this fault: the GPU-dirty bytes of the window outside the page, copied at this point of
-		// the command stream (after every GPU write recorded so far).
-		const auto [lo, hi] = ReadRange(buffer, vaddr, size);
-		const uint64_t                  base = buffer.CpuAddress();
-		std::vector<vk::BufferCopy>     copies;
-		std::map<uint64_t, std::pair<uint64_t, size_t>> pieces;
-		uint64_t                        total = 0;
-		{
-			std::shared_lock lock(m_gpu_dirty_mutex);
-			m_gpu_modified_ranges.ForEachInRange(lo, hi - lo, [&](uint64_t start, uint64_t end) {
-				const auto add = [&](uint64_t a, uint64_t b) {
-					if (a >= b) return;
-					copies.emplace_back(a - base, total, b - a);
-					pieces.emplace(a, std::pair {b, static_cast<size_t>(total)});
-					total += b - a;
-				};
-				add(start, std::min(end, page_lo));
-				add(std::max(start, page_hi), end);
-			});
-		}
-		std::vector<uint8_t> bytes(total);
-		if (total != 0) {
-			Buffer staging(m_graphics, m_scheduler, MemoryUsage::Download, 0, vk::BufferUsageFlagBits::eTransferDst, total);
-			auto& command = m_scheduler.Current();
-			command.EndRendering();
-			const auto              native = command.Handle();
-			vk::BufferMemoryBarrier before {};
-			before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
-			before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
-			before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			before.buffer              = buffer.Handle();
-			before.offset              = 0;
-			before.size                = buffer.Size();
-			native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, 0,
-			                       nullptr, 1, &before, 0, nullptr);
-			native.copyBuffer(buffer.Handle(), staging.Handle(), static_cast<uint32_t>(copies.size()), copies.data());
-			auto after          = before;
-			after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-			after.dstAccessMask = vk::AccessFlagBits::eHostRead;
-			after.buffer        = staging.Handle();
-			after.size          = total;
-			native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1,
-			                       &after, 0, nullptr);
-			const auto tick = m_scheduler.CurrentTick();
-			m_scheduler.Wait(tick);
-			staging.Invalidate(0, total);
-			std::memcpy(bytes.data(), staging.Mapped().data(), total);
-		}
-		std::scoped_lock lock(m_write_window_check_mutex);
-		check.lo     = lo;
-		check.hi     = hi;
-		check.pieces = std::move(pieces);
-		check.bytes  = std::move(bytes);
-		check.valid.Clear();
-		for (const auto& [start, piece]: check.pieces) check.valid.Add(start, piece.first - start);
-		check.snapshots++;
-	}
-	// The page's bytes to compare: in the snapshot, no GPU write recorded since, and GPU-dirty now (so the old path
-	// downloads them at this fault).
-	RangeSet compare;
-	std::scoped_lock lock(m_write_window_check_mutex);
-	std::shared_lock dirty_lock(m_gpu_dirty_mutex);
-	check.valid.ForEachInRange(page_lo, page_hi - page_lo, [&](uint64_t a, uint64_t b) {
-		m_gpu_modified_ranges.ForEachInRange(a, b - a, [&](uint64_t c, uint64_t d) { compare.Add(c, d - c); });
-	});
-	check.valid.Subtract(page_lo, page_hi - page_lo);
-	return compare;
-}
-
-void BufferCache::WriteWindowCheckAfter(const RangeSet& compare) {
-	auto&            check = m_write_window_check;
-	std::scoped_lock lock(m_write_window_check_mutex);
-	bool             any = false;
-	compare.ForEach([&](uint64_t a, uint64_t b) {
-		any = true;
-		auto it = check.pieces.upper_bound(a);
-		if (it == check.pieces.begin()) return;
-		--it;
-		if (b > it->second.first) return; // a snapshot piece holds every compared range (both are GPU-dirty ranges)
-		const auto* expected = check.bytes.data() + it->second.second + (a - it->first);
-		check.compared += b - a;
-		int same = LibKernel::Memory::CompareBacking(a, expected, b - a);
-		if (same == 2) {
-			std::vector<uint8_t> actual(b - a);
-			same = LibKernel::Memory::TryReadBacking(a, actual.data(), b - a) && std::memcmp(actual.data(), expected, b - a) == 0
-			           ? 0
-			           : 1;
-		}
-		if (same != 0) {
-			if (check.mismatches++ < 50) {
-				std::fprintf(stderr, "WRITE_WINDOW_CHECK_MISMATCH addr=0x%llx size=0x%llx window=0x%llx-0x%llx frame=%u\n",
-				             static_cast<unsigned long long>(a), static_cast<unsigned long long>(b - a),
-				             static_cast<unsigned long long>(check.lo), static_cast<unsigned long long>(check.hi),
-				             DebugPresentCount().load());
-			}
-			check.mismatch_bytes += b - a;
-		}
-	});
-	if (any) check.pages++;
-	const auto now = std::chrono::steady_clock::now();
-	if (now - check.report >= std::chrono::seconds(5)) {
-		check.report = now;
-		std::fprintf(stderr,
-		             "PERF write_window_check snapshots=%llu pages=%llu compared_kb=%llu mismatches=%llu mismatch_bytes=%llu "
-		             "frame=%u (totals)\n",
-		             static_cast<unsigned long long>(check.snapshots), static_cast<unsigned long long>(check.pages),
-		             static_cast<unsigned long long>(check.compared >> 10u), static_cast<unsigned long long>(check.mismatches),
-		             static_cast<unsigned long long>(check.mismatch_bytes), DebugPresentCount().load());
-	}
-}
-
-void BufferCache::GpuDirtySubtract(uint64_t vaddr, uint64_t size) {
-	NoteGpuCleanRange(vaddr, size); // the write memo
-	std::unique_lock lock(m_gpu_dirty_mutex);
-	m_gpu_modified_ranges.Subtract(vaddr, size);
 }
 
 bool BufferCache::HasPendingReadback(uint64_t vaddr, uint64_t size) const {

@@ -703,25 +703,6 @@ private:
 	// read the set while the GPU thread changes it).
 	void                                              GpuDirtyAdd(uint64_t vaddr, uint64_t size);
 	void                                              GpuDirtySubtract(uint64_t vaddr, uint64_t size);
-	// KYTY_FIX_WRITE_FAULT_WINDOW=2 (the check, map §3c): a snapshot of the GPU-dirty bytes of a write fault's window,
-	// taken at the fault (the bytes =1 publishes there), compared with the bytes a later write fault of a page in it
-	// downloads (the bytes the old path publishes). `valid`: snapshot bytes no GPU write was recorded for since.
-	struct WriteWindowCheck {
-		uint64_t                                        lo = 0, hi = 0;
-		RangeSet                                        valid;
-		std::map<uint64_t, std::pair<uint64_t, size_t>> pieces; // start -> (end, offset in bytes)
-		std::vector<uint8_t>                            bytes;
-		uint64_t snapshots = 0, pages = 0, compared = 0, mismatches = 0, mismatch_bytes = 0;
-		std::chrono::steady_clock::time_point report {};
-	};
-	std::mutex        m_write_window_check_mutex;
-	WriteWindowCheck  m_write_window_check;
-	std::atomic<bool> m_write_window_check_on {false};
-	// The check's two steps (GPU thread, inside a write-fault request): before the page download, a snapshot of the
-	// window when the page is outside the current one; the pieces of the page that are GPU-dirty and still valid then
-	// (returned) are compared after the download.
-	[[nodiscard]] RangeSet WriteWindowCheckBefore(Buffer& buffer, uint64_t vaddr, uint64_t size);
-	void                   WriteWindowCheckAfter(const RangeSet& compare);
 	std::shared_mutex                                 m_gpu_dirty_mutex;
 	// Guards m_page_table and m_slot_buffers' insertions/erasures against the resolve thread's LookupBuffer; taken by the GPU thread
 	// only for those changes.
