@@ -987,21 +987,13 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 		// KYTY_DIAG_MERGED_HS_USER_BASE0 (diagnostic, 3.11 night: the 2.002 particles): the merged program's two parts run
 		// in one wave and see the user SGPRs at the same place. =1: both from s0 (the HS part as the LS part); =8: both from
 		// s8 (the LS part as the HS part, the RDNA2 merged-stage layout with s0:s7 reserved).
-		// =8:<hash>[,<hash>...]: base 8 only for the listed merged programs (their hash before the split); any mode prints
-		// each merged program's user data once (=p: print only).
-		static const std::string spec = [] {
+		static const char mode = [] {
 			const char* value = Common::ShaderEnv::Read("KYTY_DIAG_MERGED_HS_USER_BASE0");
-			if (value != nullptr && value[0] != '\0') std::fprintf(stderr, "DIAG_MERGED_HS_USER_BASE0 mode=%s\n", value);
-			return std::string(value != nullptr ? value : "");
+			const char  m     = value != nullptr ? value[0] : '\0';
+			if (m == '1' || m == '8') std::fprintf(stderr, "DIAG_MERGED_HS_USER_BASE0 mode=%c\n", m);
+			return m;
 		}();
-		char       mode = spec.empty() ? '\0' : spec[0];
-		const auto only = spec.size() > 2u && spec[1] == ':' ? spec.substr(2) : std::string();
-		if (mode == '8' && !only.empty()) {
-			char text[17];
-			std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(local_hash));
-			if (only.find(text) == std::string::npos) mode = '\0';
-		}
-		if (!spec.empty()) {
+		if (mode == 'p') { // =p: print the merged program's user data once per program (no change)
 			static std::mutex                  print_mutex;
 			static std::unordered_set<uint64_t> printed;
 			std::scoped_lock                   lock(print_mutex);
@@ -1012,16 +1004,11 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 					std::snprintf(word, sizeof(word), " %08x", v);
 					text += word;
 				}
-				std::fprintf(stderr,
-				             "MERGED_HS_USER hash=0x%016llx front=0x%016llx back=0x%016llx applied=%c ls_user_sgpr=%u "
-				             "hs_user_data_addr=0x%llx users:%s\n",
-				             static_cast<unsigned long long>(local_hash), static_cast<unsigned long long>(merged->front_hash),
-				             static_cast<unsigned long long>(merged->back_hash), mode == '\0' ? '-' : mode,
-				             static_cast<unsigned>(local_users.size()),
+				std::fprintf(stderr, "MERGED_HS_USER hash=0x%016llx ls_user_sgpr=%u hs_user_data_addr=0x%llx users:%s\n",
+				             static_cast<unsigned long long>(local_hash), static_cast<unsigned>(local_users.size()),
 				             static_cast<unsigned long long>(regs.hs_regs.user_data_addr), text.c_str());
 			}
-		}
-		if (mode == '1') {
+		} else if (mode == '1') {
 			const auto hash = params[1].hash;
 			params[1]       = GetShaderParams(regs.ls_regs.data_addr, control_hash, local_users, local);
 			params[1].code  = merged->back;
