@@ -4,7 +4,6 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "common/shaderEnv.h"
-#include "kernel/memory.h"
 
 #include <algorithm>
 #include <atomic>
@@ -820,22 +819,7 @@ bool SrtTapeWalker::ReadRaw(const SrtNode& node, uint64_t& result) {
 	} else {
 		if (vector) return false;
 		// The null page is never guest memory; an evaluation that reaches it reads zero.
-		// KYTY_DIAG_SRT_GUARDED_READ (diagnostic, 4.11: the 2.002 particle TES): a read that faults is logged and reads
-		// zero instead of stopping the emulator.
-		static const bool guarded = std::getenv("KYTY_DIAG_SRT_GUARDED_READ") != nullptr;
-		if (address >= 0x10000u && guarded) {
-			if (!Libs::LibKernel::Memory::GuardedGuestCopy(&word, reinterpret_cast<const void*>(address), sizeof(word))) {
-				static std::atomic_uint logged {0};
-				if (logged.fetch_add(1) < 32u) {
-					std::fprintf(stderr, "DIAG_SRT_GUARDED_READ fault address=0x%llx node=%zu\n",
-					             static_cast<unsigned long long>(address),
-					             static_cast<size_t>(&node - m_tape.nodes.data()));
-				}
-				word = 0;
-			}
-		} else if (address >= 0x10000u) {
-			ReadOrdinaryMemory(address, &word, sizeof(word));
-		}
+		if (address >= 0x10000u) ReadOrdinaryMemory(address, &word, sizeof(word));
 	}
 	result = word;
 	return true;
