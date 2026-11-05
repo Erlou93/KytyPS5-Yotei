@@ -613,10 +613,33 @@ bool BufferCache::PlanDownloadToBacking(uint64_t buffer_address, const std::vect
 	return true;
 }
 
+// KYTY_DIAG_SKIP_READBACK=1 (ceiling test only, map 5.11 "ruch przez miasto": the read-back of GPU-written bytes for the
+// guest was ~20% of the GPU thread in the town): a synchronous download changes the states as after the copy but copies
+// nothing and waits for nothing - the game reads stale guest memory (the image and what it draws may change; compare the
+// draws per frame). Read once.
+static bool SkipReadbackCeiling() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_SKIP_READBACK");
+		const bool  set   = value != nullptr && value[0] == '1';
+		if (set) std::fprintf(stderr, "DIAG_SKIP_READBACK ceiling: synchronous downloads copy nothing
+");
+		return set;
+	}();
+	return on;
+}
+
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	KYTY_PROFILER_BLOCK("BufferCache::DownloadBufferMemory");
 	if constexpr (!async) {
+		if (SkipReadbackCeiling()) {
+			bool any = false;
+			m_memory_tracker.ForEachDownloadRange<false>(vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+				m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t, uint64_t) { any = true; });
+				GpuDirtySubtract(address, bytes);
+			});
+			return any;
+		}
 		if (!buffer.Mapped().empty()) {
 			DownloadWaitTrace::g_last_bar_reason = -1;
 			if (TryBarDownload(buffer, vaddr, size) == 1) return true;
