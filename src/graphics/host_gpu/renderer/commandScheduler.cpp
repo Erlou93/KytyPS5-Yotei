@@ -23,6 +23,7 @@
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/syncTimeline.h"
 #include "graphics/host_gpu/renderer/virtualGpuClock.h"
+#include "graphics/host_gpu/renderer/waitSites.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/recordPackets.h"
@@ -222,7 +223,7 @@ void CommandScheduler::Shutdown() {
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
-	{ PerfScope perf_wait(PerfKind::FenceWait); m_master.Wait(CurrentTick() - 1); }
+	{ PerfScope perf_wait(PerfKind::FenceWait); WaitSites::Scope wait_site; m_master.Wait(CurrentTick() - 1); }
 	// The last buffer was ended and submitted above; the recording thread has
 	// nothing left and is stopped.
 	if (CommandRecorder::Enabled() && &m_context.GetCommandScheduler() == this) {
@@ -283,7 +284,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 
 void CommandScheduler::FlushAndWait() {
 	const auto tick = Submit();
-	{ PerfScope perf_wait(PerfKind::FenceWait); m_master.Wait(tick); }
+	{ PerfScope perf_wait(PerfKind::FenceWait); WaitSites::Scope wait_site; m_master.Wait(tick); }
 	BeginNext();
 }
 
@@ -293,7 +294,7 @@ void CommandScheduler::Finish() {
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
-	{ PerfScope perf_wait(PerfKind::FenceWait); m_master.Wait(CurrentTick() - 1); }
+	{ PerfScope perf_wait(PerfKind::FenceWait); WaitSites::Scope wait_site; m_master.Wait(CurrentTick() - 1); }
 	BeginNext();
 	PopPendingOperations();
 }
@@ -314,7 +315,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
 		if (timeline) SyncTimeline::NoteOpenFlush();
-		{ PerfScope perf_wait(PerfKind::FenceWait); m_master.Wait(tick); }
+		{ PerfScope perf_wait(PerfKind::FenceWait); WaitSites::Scope wait_site; m_master.Wait(tick); }
 		BeginNext();
 	} else {
 		// Waiting for the newest submitted work, not known finished, drains the GPU while the open buffer holds more; that
@@ -322,7 +323,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		if (PerfIsGpuThread() && tick + 1u == CurrentTick() && !m_master.IsFree(tick)) {
 			m_batch_idle_armed = true;
 		}
-		{ PerfScope perf_wait(PerfKind::FenceWait); m_master.Wait(tick); }
+		{ PerfScope perf_wait(PerfKind::FenceWait); WaitSites::Scope wait_site; m_master.Wait(tick); }
 	}
 	if (timeline) SyncTimeline::NoteCaller(0);
 }
@@ -396,7 +397,7 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_active      = true;
 			m_priority_active_tick = operation.tick;
 		}
-		{ PerfScope perf_wait(PerfKind::FenceWait); m_master.Wait(operation.tick); }
+		{ PerfScope perf_wait(PerfKind::FenceWait); WaitSites::Scope wait_site; m_master.Wait(operation.tick); }
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
 		}
