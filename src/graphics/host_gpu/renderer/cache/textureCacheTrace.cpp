@@ -3,7 +3,6 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
-#include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
@@ -314,35 +313,6 @@ void SliceStatsTick() {
 		             static_cast<unsigned long long>(now[4]), static_cast<unsigned long long>(s.checked.load()),
 		             static_cast<unsigned long long>(now[5]), static_cast<unsigned long long>(s.guard_inside.load()));
 	}
-}
-
-void TextureCache::NameAllocationsForMap() {
-	std::scoped_lock lock {m_lock};
-	const uint64_t   now = m_scheduler.CurrentTick();
-	m_slot_images.ForEach([&](ImageId id, const Image& image) {
-		(void)id;
-		if (image.backing.allocation == nullptr) return;
-		const char* kind = image.usage.depth_target ? "ds" : image.usage.render_target ? "rt" : image.usage.storage ? "st" : "tex";
-		char        label[160];
-		std::snprintf(label, sizeof(label), "img %s %s %ux%u l%u m%u flags=%s%s%s age=%llu", kind,
-		              vk::to_string(image.info.pixel_format).c_str(), image.info.extent.width, image.info.extent.height,
-		              image.info.resources.layers, image.info.resources.levels, image.bindless_pinned ? "P" : "",
-		              image.IsGpuModified() ? "G" : "", image.registered ? "R" : "",
-		              static_cast<unsigned long long>(now > image.tick_accessed_last ? now - image.tick_accessed_last : 0));
-		vmaSetAllocationName(m_graphics.allocator, image.backing.allocation, label);
-	});
-}
-
-void TextureCache::TraceGrowthState(uint64_t& evict_bytes, uint64_t& old_count, uint64_t& old_bytes) {
-	std::scoped_lock lock {m_lock};
-	evict_bytes = PendingEvictionBytes();
-	old_count = old_bytes = 0;
-	m_slot_images.ForEach([&](ImageId id, const Image& image) {
-		(void)id;
-		if (!image.registered || m_gc_tick < 32u || m_lru_cache.GetTick(image.lru_id) + 32u > m_gc_tick) return;
-		old_count++;
-		old_bytes += m_graphics.GetAllocationSize(image.backing.allocation);
-	});
 }
 
 void TextureCache::TakeCensus(Census& census) {

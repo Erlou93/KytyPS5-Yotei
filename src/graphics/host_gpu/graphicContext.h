@@ -8,7 +8,6 @@
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
 #include <atomic>
-#include <functional>
 #include <map>
 #include <mutex>
 #include <span>
@@ -26,28 +25,18 @@ inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 // instead of stopping at them, and downloads GPU-written color images to guest memory before it frees them
 // (TextureCache::CollectGarbageFixed).
 [[nodiscard]] bool VramGcFixEnabled();
-// KYTY_TRACE_VMA_MAP (measurement): image and buffer allocations carry names for the allocator map dumps.
-[[nodiscard]] bool VmaMapNamesEnabled();
 // KYTY_VRAM_BUDGET=1 (default off, logged once): the caches keep the device-local memory they hold under a target
 // re-read at every collector run (GraphicContext::GetVramBudgetState), evicting old images before new ones are
 // created over it; implies the KYTY_VRAM_GC_FIX collector.
 [[nodiscard]] bool VramBudgetEnabled();
 // KYTY_TRACE_PERF: the allocator's vkAllocateMemory / vkFreeMemory calls since the last call (counts, MiB, ms).
 [[nodiscard]] std::string TakeDeviceMemoryCallStats();
-// KYTY_TRACE_BLOCK_GROWTH=1 (measurement, map §3v 5.11: what is in flight when a scene change adds blocks): a
-// BLOCK_GROWTH_ALLOC line at every new VMA block (and dedicated allocation >= 32 MiB) of the image memory types with the
-// empty space before it, parked and deferred image bytes, pending evictions/retired buffers and the image asking; a
-// BLOCK_GROWTH_FRAME line every 10 frames (GraphicContext::TraceBlockGrowthFrame).
-[[nodiscard]] bool BlockGrowthTraceEnabled();
-inline std::atomic<int64_t>  g_trace_deferred_image_bytes {0}; // image allocations whose deletion waits for its tick
-inline std::atomic<uint64_t> g_trace_pending_bytes {0};        // pending evictions + retired buffers (last frame line)
-inline std::atomic<uint64_t> g_trace_frame {0};                // presented frame (frame boundary)
 // KYTY_TEXMOVE (map §3v, PROJEKT-PRZENOSZENIE-TEKSTUR, read once): 0 off (default); 1 the clean textures that keep nearly
 // empty VMA blocks alive are moved into fuller blocks at frame boundaries, so whole blocks go back to the driver
 // (TextureCache::RunTextureMove); 2 the same with the check mode (bytes compared before the swap, slots scanned, blocks
 // counted after the batch).
 [[nodiscard]] uint32_t TexMoveMode();
-// KYTY_TEXMOVE: totals since start, appended to the MEM_CENSUS line (GraphicContext::DeviceMemoryTypeCensus).
+// KYTY_TEXMOVE: totals since start (the check summary).
 struct TexMoveTotals {
 	std::atomic<uint64_t> batches {0}, images {0}, moved_bytes {0}, emptied {0}, returned {0}, returned_bytes {0};
 	std::atomic<uint64_t> mismatches {0}, stale_slots {0}, still_present {0}, stale_uses {0};
@@ -186,11 +175,6 @@ struct GraphicContext {
 	// now (the driver budget moves with other processes; 0 when it reports none), and effective = the driver-reported
 	// usage minus the free space inside VMA blocks (what eviction can lower).
 	void GetVramBudgetState(uint64_t& target, uint64_t& effective) const;
-	// MEM_CENSUS (map §3v): per device-local memory type, VMA blocks / allocations / empty space (MiB), block and
-	// allocation counts, free ranges and the largest one - which kind of memory holds the empty space.
-	[[nodiscard]] std::string DeviceMemoryTypeCensus() const;
-	// KYTY_TRACE_VMA_MAP=<frame>,... (measurement): the allocator's full map to vma_map_<frame>.json at the listed frames.
-	void DumpVmaMapIfDue(uint32_t frame, const std::function<void()>& before = {}) const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
 
 	struct HeapUsage {
@@ -240,9 +224,6 @@ struct GraphicContext {
 	[[nodiscard]] bool AllocationPlace(VmaAllocation allocation, VkDeviceMemory& memory, uint32_t& type) const;
 	// KYTY_TEXMOVE: vkFreeMemory calls of the allocator since start and the bytes they freed (counted only with the switch).
 	static void DeviceMemoryFrees(uint64_t& count, uint64_t& bytes);
-	// KYTY_TRACE_BLOCK_GROWTH: the BLOCK_GROWTH_FRAME line (the caches' pending bytes and old images from the caller).
-	void TraceBlockGrowthFrame(uint64_t frame, uint64_t evict_bytes, uint64_t buffer_retired_bytes, uint64_t old_count,
-	                           uint64_t old_bytes);
 
 	uint32_t screen_width  = 0;
 	uint32_t screen_height = 0;

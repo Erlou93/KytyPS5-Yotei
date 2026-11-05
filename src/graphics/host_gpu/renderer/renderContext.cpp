@@ -3,7 +3,6 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/syncTimeline.h"
-#include "graphics/host_gpu/renderer/cache/textureCacheTrace.h"
 
 #include "common/assert.h"
 #include "common/envRead.h"
@@ -220,18 +219,6 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	const auto unmap = [this, vaddr, size] {
 		// Check cache ownership on the GPU thread. Guest-memory callbacks can still
 		// access a range with no cached data, so they must finish before it is unmapped.
-		// PROJEKT-OKNO-TEKSTUR step 0 (counters only, PERF image_unregister): which clause makes the unmap drain.
-		if (m_command_scheduler.Active()) {
-			const bool  buffer   = m_buffer_cache.IsRegionRegistered(vaddr, size);
-			const bool  image    = m_texture_cache.IsRegionRegistered(vaddr, size);
-			const bool  priority = m_command_scheduler.HasPendingPriorityOperations();
-			const char* clause   = buffer     ? (image ? "drain_buffer_image" : "drain_buffer")
-			                       : image    ? (priority ? "drain_image_prio" : "drain_image")
-			                       : priority ? "drain_prio"
-			                                  : "drain_none";
-			std::lock_guard stats_lock(g_unregister_mutex);
-			g_unregister_reasons[clause]++;
-		}
 		if (m_command_scheduler.Active() &&
 		    (m_buffer_cache.IsRegionRegistered(vaddr, size) ||
 		     m_texture_cache.IsRegionRegistered(vaddr, size) ||
@@ -373,18 +360,6 @@ void RenderContext::RunGarbageCollector() {
 	m_texture_cache.ReportImageReadServe(); // KYTY_TRACE_READBACK
 	m_buffer_cache.RunGarbageCollector();
 	m_pipeline_cache.EvictIdlePipelines(m_command_scheduler);
-	if (BlockGrowthTraceEnabled()) { // KYTY_TRACE_BLOCK_GROWTH: the frame line every 10 frame boundaries
-		const uint64_t frame = m_graphics.presented_frames.load(std::memory_order_relaxed);
-		g_trace_frame.store(frame, std::memory_order_relaxed);
-		static uint64_t calls = 0;
-		uint64_t        evict = 0, old_count = 0, old_bytes = 0;
-		if (calls++ % 10u == 0u) {
-			m_texture_cache.TraceGrowthState(evict, old_count, old_bytes);
-			const uint64_t retired = m_buffer_cache.PendingReleaseBytes();
-			g_trace_pending_bytes.store(evict + retired, std::memory_order_relaxed);
-			m_graphics.TraceBlockGrowthFrame(frame, evict, retired, old_count, old_bytes);
-		}
-	}
 }
 
 void RenderContext::AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id) {

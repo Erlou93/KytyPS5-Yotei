@@ -382,10 +382,6 @@ void TextureCache::RegisterImage(ImageId id) {
 	m_registered_bytes += image.registered_bytes;
 }
 
-// PROJEKT-OKNO-TEKSTUR step 0 (counters only): the reason the last image at each guest address was unregistered (under
-// g_unregister_mutex), so a texture created over nothing registered says what freed the one before it.
-static std::unordered_map<uint64_t, const char*> g_texwin_freed_by;
-
 void TextureCache::UnregisterImage(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (!image.registered) {
@@ -403,7 +399,6 @@ void TextureCache::UnregisterImage(ImageId id) {
 		std::lock_guard lock(g_unregister_mutex);
 		g_unregister_reasons[why]++;
 		g_unregister_keys[key]++;
-		g_texwin_freed_by[image.info.data.address] = why; // PROJEKT-OKNO-TEKSTUR step 0
 	}
 	if (image.bindless_pinned) {
 		image.bindless_pinned = false;
@@ -448,19 +443,6 @@ void TextureCache::DeleteImage(ImageId id) {
 	if (image == nullptr || !image->registered) {
 		return;
 	}
-	if (m_shadow_watch_count.load(std::memory_order_relaxed) != 0u) {
-		std::scoped_lock watch_lock {m_shadow_watch_mutex};
-		if (const auto found = std::ranges::find(m_shadow_watch, id); found != m_shadow_watch.end()) {
-			m_shadow_watch.erase(found);
-			m_shadow_watch_count.store(static_cast<uint32_t>(m_shadow_watch.size()), std::memory_order_relaxed);
-			static std::atomic_uint logged {0};
-			if (logged.fetch_add(1) < 32u)
-				std::fprintf(stderr, "STENCIL_SHADOW_DEPTH_DELETED addr=0x%llx %ux%u reason=%s\n",
-				             static_cast<unsigned long long>(image->info.data.address), image->backing.extent.width,
-				             image->backing.extent.height,
-				             m_unregister_reason != nullptr ? m_unregister_reason : "other");
-		}
-	}
 	if (image->depth_id) {
 		std::erase(m_slot_images[image->depth_id].stencil_ids, id);
 	} else {
@@ -484,14 +466,7 @@ void TextureCache::DeleteImage(ImageId id) {
 		}
 	}
 	UnregisterImage(id);
-	if (m_scheduler.Active() && BlockGrowthTraceEnabled()) { // KYTY_TRACE_BLOCK_GROWTH: bytes waiting for the tick
-		const auto bytes = static_cast<int64_t>(m_graphics.GetAllocationSize(image->backing.allocation));
-		g_trace_deferred_image_bytes += bytes;
-		m_scheduler.DeferOperation([this, id, bytes] {
-			m_slot_images.erase(id);
-			g_trace_deferred_image_bytes -= bytes;
-		});
-	} else if (m_scheduler.Active()) {
+	if (m_scheduler.Active()) {
 		m_scheduler.DeferOperation([this, id] { m_slot_images.erase(id); });
 	} else {
 		m_slot_images.erase(id);
@@ -1360,18 +1335,6 @@ ImageId TextureCache::GetStencilShadowImage(uint32_t width, uint32_t height) {
 	const auto id        = InsertImage(info);
 	m_stencil_shadow_images.emplace(key, id);
 	return id;
-}
-
-void TextureCache::WatchShadowDepth(ImageId depth_id) {
-	std::scoped_lock watch_lock {m_shadow_watch_mutex};
-	if (std::ranges::find(m_shadow_watch, depth_id) == m_shadow_watch.end()) m_shadow_watch.push_back(depth_id);
-	m_shadow_watch_count.store(static_cast<uint32_t>(m_shadow_watch.size()), std::memory_order_relaxed);
-}
-
-void TextureCache::ClearShadowDepthWatch() {
-	std::scoped_lock watch_lock {m_shadow_watch_mutex};
-	m_shadow_watch.clear();
-	m_shadow_watch_count.store(0u, std::memory_order_relaxed);
 }
 
 ImageId TextureCache::GetNullImage(const ImageDesc& desc) {
@@ -3184,47 +3147,6 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		}
 		bool inserted_new = false;
 		if (!result) {
-			// PROJEKT-OKNO-TEKSTUR step 0 (counters only, PERF image_unregister): a texture image created while an image of
-			// the same texture (same start address, guest format and tile mode, one layer) is registered - what rules
-			// R1/R3/R5 would serve from that image instead of a new one.
-			if (desc.type == BindingType::Texture && desc.info.resources.layers <= 1u) {
-				bool same_texture = false;
-				for (const auto id: candidates) {
-					const auto* other = m_slot_images.try_get(id);
-					same_texture = same_texture ||
-					               (other != nullptr && other->registered &&
-					                other->info.data.address == desc.info.data.address &&
-					                other->info.guest_format == desc.info.guest_format &&
-					                other->info.tile_mode == desc.info.tile_mode && other->info.resources.layers <= 1u &&
-					                !other->usage.render_target && !other->usage.storage);
-				}
-				// The others by what lies under them: nothing registered (fresh range), a GPU-written image or render target
-				// (a texture read of what the GPU drew), or only other textures (another description of the bytes).
-				const char* kind = "texwin_create_same_texture";
-				if (!same_texture) {
-					bool any = false, gpu = false;
-					for (const auto id: candidates) {
-						const auto* other = m_slot_images.try_get(id);
-						if (other == nullptr || !other->registered) continue;
-						any = true;
-						gpu = gpu || other->IsGpuModified() || other->usage.render_target || other->usage.storage ||
-						      other->usage.depth_target;
-					}
-					kind = !any ? "texwin_create_fresh" : gpu ? "texwin_create_over_gpu" : "texwin_create_over_texture";
-				}
-				char key[128];
-				std::snprintf(key, sizeof(key), "%s/%s/%ux%u/l%u/m%u", kind + 14, vk::to_string(desc.info.pixel_format).c_str(),
-				              desc.info.extent.width, desc.info.extent.height, desc.info.resources.layers,
-				              desc.info.resources.levels);
-				std::lock_guard stats_lock(g_unregister_mutex);
-				g_unregister_reasons[kind]++;
-				g_unregister_keys[key]++;
-				if (!same_texture) {
-					const auto freed = g_texwin_freed_by.find(desc.info.data.address);
-					g_unregister_reasons[std::string("texwin_again_after_") +
-					                     (freed != g_texwin_freed_by.end() ? freed->second : "never")]++;
-				}
-			}
 			if (VramBudgetEnabled()) {
 				MakeRoomForImage(desc.info);
 			}
@@ -4739,44 +4661,6 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 		if (owner == nullptr) {
 			continue;
 		}
-		// PROJEKT-OKNO-TEKSTUR step 0 (counters only, KYTY_TRACE_PERF: PERF image_unregister): why the unmap frees the image
-		// and what rule R6 (trim by GPU copy) would do instead. unmap_trim: a single-layer tiled colour image whose
-		// coarser levels k..L-1 (they lie first, the chain runs backwards) all end below the unmapped range; unmap_whole:
-		// the range reaches the coarsest levels; the others are kinds R6 leaves out.
-		const auto& info = owner->info;
-		const char* why  = "unmap_trim";
-		uint64_t    keep = 0;
-		if (info.resources.layers > 1u) {
-			why = "unmap_array";
-		} else if (info.type == Prospero::ImageType::kColor3D) {
-			why = "unmap_3d";
-		} else if (owner->IsGpuModified() || owner->usage.render_target || owner->usage.storage) {
-			why = "unmap_gpu";
-		} else if (info.metadata.kind != ImageMetadataKind::None) {
-			why = "unmap_meta";
-		} else if (info.IsDepth()) {
-			why = "unmap_depth";
-		} else if (!info.IsTiled()) {
-			why = "unmap_linear";
-		} else {
-			const uint32_t levels = std::min<uint32_t>(info.resources.levels, static_cast<uint32_t>(info.mip_layout.size()));
-			uint32_t       k      = 0;
-			for (uint32_t level = 1; level < levels && address > info.data.address; ++level) {
-				const auto& mip = info.mip_layout[level];
-				if (info.data.address + mip.offset + mip.size <= address) {
-					k    = level;
-					keep = mip.offset + mip.size;
-					break;
-				}
-			}
-			if (k == 0) why = "unmap_whole";
-		}
-		if (keep != 0) {
-			std::lock_guard stats_lock(g_unregister_mutex);
-			g_unregister_reasons["unmap_trim_keep_kb"] += keep >> 10u;
-			g_unregister_reasons["unmap_trim_full_kb"] += info.data.size >> 10u;
-		}
-		UnregisterReason image_reason(m_unregister_reason, why);
 		FreeImage(id);
 	}
 	// The detached copies under the range landed (RenderContext::UnmapMemory waited for the priority operations) or
