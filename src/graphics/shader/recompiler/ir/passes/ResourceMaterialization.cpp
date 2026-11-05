@@ -2884,8 +2884,22 @@ static bool EntryUnchangedViaReaders(const ReadLog& log, const ReadLog::Entry& e
 // exactly once, in log order: runs the verifier proves are compared in place, the rest one by one through the
 // readers (which download GPU-dirty bytes and wait for pending readbacks as a real call does). The result is true
 // exactly when reading every entry through the readers would say true for the same memory.
+// KYTY_DIAG_READS_ASSUME_UNCHANGED=1 (ceiling test only, map 5.11 "ruch przez miasto": the check was ~16% of the GPU
+// thread in the town): every check says "unchanged" without reading - a stale program or resource set may be used (the
+// image may break; the game's own work, the draws per frame, stays). Read once.
+static bool AssumeReadsUnchanged() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_READS_ASSUME_UNCHANGED");
+		const bool  set   = value != nullptr && value[0] == '1';
+		if (set) std::fprintf(stderr, "DIAG_READS_ASSUME_UNCHANGED ceiling: read checks skipped\n");
+		return set;
+	}();
+	return on;
+}
+
 bool ReadsUnchangedFast(const ReadLog& log, const SrtRuntime& runtime, FastAdoptStats* stats) {
 	if (t_ahead.log != nullptr) return false;
+	if (AssumeReadsUnchanged()) return true;
 	t_srt_changed_entry = SIZE_MAX; // KYTY_TRACE_SRT_CLASSES
 	FastAdoptStats  local;
 	FastAdoptStats& counted = stats != nullptr ? *stats : local;
