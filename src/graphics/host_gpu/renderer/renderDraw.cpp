@@ -1963,6 +1963,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	                                     bool primitive_restart_enable,
                                          const DrawIndirectSource* indirect) {
 	auto& ucfg = buffer.GetUserConfig();
+	// KYTY_DIAG_GPU_BURN_AT=draw (measurement only, map 6.11): the per-draw sensitivity - every draw's preparation.
+	if (GpuBurnSelected() == GpuBurnSite::Draw) GpuBurnAt(GpuBurnSite::Draw);
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
 		return;
 	}
@@ -2990,6 +2992,7 @@ RenderExecutor::GpuBurnSite RenderExecutor::GpuBurnSelected() {
 		                    : std::strcmp(value, "pm4") == 0            ? GpuBurnSite::Pm4
 		                    : std::strcmp(value, "invalidate_caller") == 0 ? GpuBurnSite::InvalidateCaller
 		                    : std::strcmp(value, "direct_wait") == 0       ? GpuBurnSite::DirectWait
+		                    : std::strcmp(value, "draw") == 0              ? GpuBurnSite::Draw
 		                                                        : GpuBurnSite::None;
 		if (value != nullptr) std::fprintf(stderr, "DIAG_GPU_BURN_AT %u\n", static_cast<uint32_t>(s));
 		return s;

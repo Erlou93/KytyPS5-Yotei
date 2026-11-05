@@ -308,7 +308,7 @@ public:
 	// KYTY_DIAG_GPU_BURN_NS / KYTY_DIAG_GPU_BURN_AT (measurement only): GPU-thread spin at one of these places.
 	// InvalidateCaller: the guest thread whose write fault reads GPU-modified bytes back, not the GPU thread.
 	// Readback and Pm4 (measurement only): a GPU-thread guest read of GPU-written data, a PM4 packet of the GPU thread.
-	enum class GpuBurnSite : uint32_t { None, Indirect, Dispatch, DispatchAsync, DispatchGfx, Readback, Pm4, InvalidateCaller, DirectWait };
+	enum class GpuBurnSite : uint32_t { None, Indirect, Dispatch, DispatchAsync, DispatchGfx, Readback, Pm4, InvalidateCaller, DirectWait, Draw };
 	static void GpuBurnAt(GpuBurnSite site);
 	// The site KYTY_DIAG_GPU_BURN_AT selects (read once): lets a hot loop decide once whether to call GpuBurnAt at all.
 	[[nodiscard]] static GpuBurnSite GpuBurnSelected();
