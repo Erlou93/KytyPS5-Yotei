@@ -448,6 +448,19 @@ void TextureCache::DeleteImage(ImageId id) {
 	if (image == nullptr || !image->registered) {
 		return;
 	}
+	if (m_shadow_watch_count.load(std::memory_order_relaxed) != 0u) {
+		std::scoped_lock watch_lock {m_shadow_watch_mutex};
+		if (const auto found = std::ranges::find(m_shadow_watch, id); found != m_shadow_watch.end()) {
+			m_shadow_watch.erase(found);
+			m_shadow_watch_count.store(static_cast<uint32_t>(m_shadow_watch.size()), std::memory_order_relaxed);
+			static std::atomic_uint logged {0};
+			if (logged.fetch_add(1) < 32u)
+				std::fprintf(stderr, "STENCIL_SHADOW_DEPTH_DELETED addr=0x%llx %ux%u reason=%s\n",
+				             static_cast<unsigned long long>(image->info.data.address), image->backing.extent.width,
+				             image->backing.extent.height,
+				             m_unregister_reason != nullptr ? m_unregister_reason : "other");
+		}
+	}
 	if (image->depth_id) {
 		std::erase(m_slot_images[image->depth_id].stencil_ids, id);
 	} else {
@@ -1347,6 +1360,18 @@ ImageId TextureCache::GetStencilShadowImage(uint32_t width, uint32_t height) {
 	const auto id        = InsertImage(info);
 	m_stencil_shadow_images.emplace(key, id);
 	return id;
+}
+
+void TextureCache::WatchShadowDepth(ImageId depth_id) {
+	std::scoped_lock watch_lock {m_shadow_watch_mutex};
+	if (std::ranges::find(m_shadow_watch, depth_id) == m_shadow_watch.end()) m_shadow_watch.push_back(depth_id);
+	m_shadow_watch_count.store(static_cast<uint32_t>(m_shadow_watch.size()), std::memory_order_relaxed);
+}
+
+void TextureCache::ClearShadowDepthWatch() {
+	std::scoped_lock watch_lock {m_shadow_watch_mutex};
+	m_shadow_watch.clear();
+	m_shadow_watch_count.store(0u, std::memory_order_relaxed);
 }
 
 ImageId TextureCache::GetNullImage(const ImageDesc& desc) {

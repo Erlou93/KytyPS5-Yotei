@@ -1548,6 +1548,7 @@ TextureBinding RenderExecutor::FindResolvedTexture(const ShaderRecompiler::IR::I
 				    return known.shadow == pair.shadow && known.depth == pair.depth;
 			    })) {
 				m_stencil_shadows.push_back(pair);
+				texture_cache.WatchShadowDepth(pair.depth);
 				CopyStencilShadow(m_context.GetCommandScheduler().Current().Handle(), pair, false);
 			}
 			auto shadow_desc                 = NullTextureDesc(resource, TextureCache::BindingType::Storage);
@@ -1688,7 +1689,17 @@ void RenderExecutor::CopyStencilShadow(vk::CommandBuffer command, const StencilS
 
 void RenderExecutor::FlushStencilShadows(vk::CommandBuffer command) {
 	static std::atomic_uint sampled {0};
+	auto& texture_cache = m_context.GetTextureCache();
 	for (const auto& pair: m_stencil_shadows) {
+		// A depth image deleted since the pair was made (logged by DeleteImage as STENCIL_SHADOW_DEPTH_DELETED) has no
+		// stencil left to take the shadow: there is nothing to copy back.
+		if (const auto* depth = texture_cache.m_slot_images.try_get(pair.depth); depth == nullptr || !depth->registered) {
+			static std::atomic_uint skipped {0};
+			if (skipped.fetch_add(1) < 32u)
+				std::fprintf(stderr, "STENCIL_SHADOW_SKIPPED depth image deleted before the copy back (alive=%d)\n",
+				             depth != nullptr ? 1 : 0);
+			continue;
+		}
 		if (DebugPresentCount().load() > 300u && sampled.fetch_add(1) < 6u) {
 			auto& depth = m_context.GetTextureCache().GetImage(pair.depth);
 			DebugQueueSample(m_context.GetGraphics(), command, m_context.GetTextureCache().GetImage(pair.shadow),
@@ -1710,6 +1721,7 @@ void RenderExecutor::FlushStencilShadows(vk::CommandBuffer command) {
 		             m_stencil_shadows.size());
 	}
 	m_stencil_shadows.clear();
+	texture_cache.ClearShadowDepthWatch();
 }
 
 static vk::Sampler NativeSampler(RenderContext&                       context,

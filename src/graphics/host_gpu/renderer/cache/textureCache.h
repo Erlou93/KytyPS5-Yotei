@@ -83,6 +83,10 @@ public:
 	[[nodiscard]] std::vector<Image*> DebugImagesAt(uint64_t address);
 	// KYTY_WORKAROUND_STENCIL_STORAGE_SHADOW: a GPU-only R8_UINT image standing in for a stencil plane.
 	[[nodiscard]] ImageId GetStencilShadowImage(uint32_t width, uint32_t height);
+	// The depth images of the stencil shadow pairs waiting for their copy back (RenderExecutor::FlushStencilShadows):
+	// DeleteImage logs one of them deleted before the flush (STENCIL_SHADOW_DEPTH_DELETED, with the reason).
+	void WatchShadowDepth(ImageId depth_id);
+	void ClearShadowDepthWatch();
 	// descriptors.cpp NullCompareBinding: the null image of a depth-compare binding, a 1x1 D16_UNORM image holding
 	// 0.0 or (one) 1.0, created once each. Takes m_lock.
 	[[nodiscard]] ImageId GetNullDepthImage(bool one);
@@ -558,6 +562,9 @@ private:
 	std::unordered_map<vk::Format, ImageId>           m_null_images;
 	std::array<ImageId, 2>                            m_null_depth_images {}; // GetNullDepthImage: 0.0, 1.0
 	std::unordered_map<uint64_t, ImageId>             m_stencil_shadow_images;
+	std::mutex                                        m_shadow_watch_mutex; // WatchShadowDepth
+	std::vector<ImageId>                              m_shadow_watch;
+	std::atomic_uint32_t                              m_shadow_watch_count {0};
 	// KYTY_WORKAROUND_PRESERVE_STENCIL: stencil of a depth image replaced by a color view (storage write
 	// to the depth plane), restored when the depth image is recreated.
 	std::unique_ptr<Buffer> m_saved_stencil;
