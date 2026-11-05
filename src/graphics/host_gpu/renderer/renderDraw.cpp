@@ -3063,7 +3063,6 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		NoteUpstreamIndirectRecords();
 		return false;
 	}
-	if (SkipDirectDrawsCeiling()) return true;
 	const DrawCensusScope           draw_census; // KYTY_TRACE_DRAW_CENSUS
 	std::optional<DispatchSubTimer> census_pre(std::in_place, DispatchSub::DrawPre); // KYTY_TRACE_DRAW_CENSUS
 	DrawEntryStart(buffer);
@@ -3072,6 +3071,10 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
+	if (SkipDirectDrawsCeiling()) { // after the entry's scheduler work, before any state of the draw
+		ResetBindings();
+		return true;
+	}
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -3204,7 +3207,6 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		NoteUpstreamIndirectRecords();
 		return false;
 	}
-	if (SkipDirectDrawsCeiling()) return true;
 	const DrawCensusScope       draw_census; // KYTY_TRACE_DRAW_CENSUS
 	DrawEntryStart(buffer);
 	KYTY_PROFILER_FUNCTION();
@@ -3212,6 +3214,10 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
+	if (SkipDirectDrawsCeiling()) { // after the entry's scheduler work, before any state of the draw
+		ResetBindings();
+		return true;
+	}
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
 
