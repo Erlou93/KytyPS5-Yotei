@@ -154,7 +154,8 @@ void NoteGpuIndirectFallback(const char* reason, bool indexed, uint32_t max_coun
 
 } // namespace
 
-// KYTY_TRACE_MEM_CENSUS=1, or KYTY_TRACE_PERF=1 (after its PERF lines): every ~5 s one MEM_CENSUS line with what
+// KYTY_TRACE_MEM_CENSUS=1 only (5.11: with KYTY_TRACE_PERF it cost 7-11% fps and most 250+ ms hitches, so PERF no
+// longer runs it): every ~5 s one MEM_CENSUS line with what
 // holds memory, by kind, and the collectors' work since the previous line. Sizes in MiB; "a/b" = count/MiB.
 static bool MemCensusRequested() {
 	static const bool on = [] {
@@ -395,7 +396,7 @@ static void PerfReport(RenderContext& renderer) {
 	}
 	std::fprintf(stderr, "\n");
 	ReportGpuStageCheck();
-	MemCensusLine(renderer);
+	if (MemCensusRequested()) MemCensusLine(renderer);
 }
 
 static thread_local CommandProcessor* g_current_processor = nullptr;
