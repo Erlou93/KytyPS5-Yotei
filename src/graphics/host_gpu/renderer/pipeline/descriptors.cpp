@@ -2649,8 +2649,19 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	const bool slots_dead = stale && !slots_alive(table);
 	if (stale && !slots_dead) table.generation = bindless.TableGeneration();
 	const bool retranslate = slots_dead && table.translated_tick != tick;
-	const bool check_due = table.checked_tick != tick || covered != table.covered || fields_changed ||
-	                       retranslate || table.region == 0;
+	// KYTY_DIAG_TABLES_ASSUME_UNCHANGED=1 (ceiling test only, map 5.11 "ruch przez miasto": the bindless tables were ~20%
+	// of the GPU thread in the town): a table with a translation of the same size and fields is taken as unchanged - no
+	// read, hash, translation or slot refresh (stale textures may show; the draws per frame must stay). Read once.
+	static const bool assume_unchanged = [] {
+		const char* value = std::getenv("KYTY_DIAG_TABLES_ASSUME_UNCHANGED");
+		const bool  set   = value != nullptr && value[0] == '1';
+		if (set) std::fprintf(stderr, "DIAG_TABLES_ASSUME_UNCHANGED ceiling: table checks skipped""\n");
+		return set;
+	}();
+	const bool skip_check = assume_unchanged && table.region != 0 && covered == table.covered && !fields_changed &&
+	                        !retranslate;
+	const bool check_due = !skip_check && (table.checked_tick != tick || covered != table.covered || fields_changed ||
+	                                       retranslate || table.region == 0);
 	// Tables over 1 MiB: guest bytes equal in place to those of the last check (whose hash is the translation's) need no
 	// copy and hash: the hash would be the same.
 	const bool in_place_check = check_due && large;
@@ -2729,7 +2740,7 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	{
 		const bool parts = LongPrepPartsOn(); // KYTY_TRACE_LONG_PREP
 		const auto start = parts || large ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-		RefreshTableSlots(table, frame);
+		if (!skip_check) RefreshTableSlots(table, frame);
 		if (parts || large) {
 			const auto ns = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
