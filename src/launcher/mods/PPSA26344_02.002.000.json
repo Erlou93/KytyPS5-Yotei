@@ -17,25 +17,6 @@
      "on": "b90f00000090"
     }
    ]
-  },
-  {
-   "key": "speed8",
-   "name": "Game speed: real time down to 8 fps (game clock step cap 1/15 s -> 1/8 s)",
-   "title": "Real game speed down to 8 fps",
-   "gain": "no fps gain; the game no longer slows down between 8 and 15 fps",
-   "description": "Below 15 fps the game runs in slow motion (at 10 fps two thirds of real speed). With this it keeps real speed down to 8 fps; motion jumps in bigger steps, physics may misbehave.",
-   "memory": [
-    {
-     "offset": "0x00bec56a",
-     "off": "c5fa100df2abfb00",
-     "on": "c5fa100d12a6fa00"
-    },
-    {
-     "offset": "0x00bec574",
-     "off": "c5fa100d14b2fb00",
-     "on": "c5fa100d08a6fa00"
-    }
-   ]
   }
  ]
 }
