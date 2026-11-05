@@ -3804,8 +3804,125 @@ struct BindSplit {
 };
 } // namespace
 
+// KYTY_DIAG_BIND_REPLAY=1 (ceiling test only, map 5.11 "ruch przez miasto", option A: the short draw path). A stage whose
+// program and resolved descriptors (the snapshot's buffers, images, samplers, user data and bindless heap uses) equal those
+// of an earlier stage takes that stage's PrepareBindings result instead of resolving its textures and buffers again; only
+// its bindless heaps and image binding flags are prepared as today. The draw is still recorded (the image and the game's
+// decisions stay), RebindImages/RebindBuffers still check and upload. A cached image that is gone or whose view is gone
+// is a miss. Read once; BIND_REPLAY lines every ~5 s (stages, hits, stores).
+namespace BindReplay {
+struct Entry {
+	PreparedBindings bindings;
+};
+struct Stats {
+	uint64_t stages = 0, hits = 0, stores = 0, refused = 0, skipped = 0;
+	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+bool On() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_BIND_REPLAY");
+		const bool  set   = value != nullptr && value[0] == '1';
+		if (set) std::fprintf(stderr, "DIAG_BIND_REPLAY ceiling: stage bindings replayed by descriptor key" "\n");
+		return set;
+	}();
+	return on;
+}
+std::unordered_map<uint64_t, Entry>& Map() { // GPU thread
+	static std::unordered_map<uint64_t, Entry> map;
+	return map;
+}
+Stats& GetStats() {
+	static Stats stats;
+	return stats;
+}
+template <typename T>
+uint64_t Mix(uint64_t hash, const std::vector<T>& values) {
+	const uint64_t words[] = {hash, values.empty() ? 0u : XXH3_64bits(values.data(), values.size() * sizeof(T)),
+	                          static_cast<uint64_t>(values.size())};
+	return XXH3_64bits(words, sizeof(words));
+}
+uint64_t Key(const ShaderStageRuntime& runtime) {
+	const auto& snapshot = *runtime.resources;
+	uint64_t    hash     = reinterpret_cast<uint64_t>(runtime.program);
+	hash = Mix(hash, snapshot.buffers);
+	hash = Mix(hash, snapshot.images);
+	hash = Mix(hash, snapshot.samplers);
+	hash = Mix(hash, snapshot.user_data);
+	hash = Mix(hash, snapshot.bindless_heaps);
+	return hash;
+}
+void Report() {
+	auto& s = GetStats();
+	if (std::chrono::steady_clock::now() - s.window < std::chrono::seconds(5)) return;
+	s.window = std::chrono::steady_clock::now();
+	std::fprintf(stderr, "BIND_REPLAY stages=%llu hits=%llu stores=%llu refused=%llu skipped=%llu entries=%zu" "\n",
+	             static_cast<unsigned long long>(s.stages), static_cast<unsigned long long>(s.hits),
+	             static_cast<unsigned long long>(s.stores), static_cast<unsigned long long>(s.refused),
+	             static_cast<unsigned long long>(s.skipped), Map().size());
+	s.stages = s.hits = s.stores = s.refused = s.skipped = 0;
+}
+} // namespace BindReplay
+
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
+	if (!BindReplay::On() || !GuestGpu::IsGpuThread() || !runtime.resources->indirect_ranges.empty()) {
+		if (BindReplay::On()) BindReplay::GetStats().skipped++;
+		PrepareBindingsToday(runtime, prepared);
+		return;
+	}
+	auto&      stats = BindReplay::GetStats();
+	const auto key   = BindReplay::Key(runtime);
+	stats.stages++;
+	auto& map   = BindReplay::Map();
+	auto  found = map.find(key);
+	if (found != map.end()) {
+		auto& cache = m_context.GetTextureCache();
+		bool  alive = true;
+		for (const auto& binding: found->second.bindings.images) {
+			if (!binding.image_id) continue;
+			const auto* image = cache.m_slot_images.try_get(binding.image_id);
+			if (image == nullptr || !image->registered || !binding.mip_views.empty() ||
+			    (binding.image_view &&
+			     std::ranges::none_of(image->views, [&](const CachedImageView& v) { return v.view == binding.image_view; }))) {
+				alive = false;
+				break;
+			}
+		}
+		if (alive) {
+			stats.hits++;
+			prepared              = found->second.bindings;
+			prepared.runtime      = &runtime;
+			prepared.table_hit    = nullptr;
+			prepared.table_store  = nullptr;
+			std::fill(prepared.image_source.begin(), prepared.image_source.end(), 0u);
+			for (const auto& binding: prepared.images) {
+				if (binding.image_id) BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
+			}
+			const auto& snapshot = *runtime.resources;
+			if (snapshot.bindless_heaps.empty() || !m_context.GetBindlessTable().Enabled()) {
+				PrepareBindlessHeaps(runtime, prepared);
+			} else {
+				auto&           bindless_table = m_context.GetBindlessTable();
+				std::lock_guard binder_lock(bindless_table.BinderMutex());
+				PrepareBindlessHeaps(runtime, prepared);
+			}
+			BindReplay::Report();
+			return;
+		}
+		stats.refused++;
+		map.erase(found);
+	}
+	PrepareBindingsToday(runtime, prepared);
+	if (map.size() >= 200000u) map.clear();
+	BindReplay::Entry entry;
+	entry.bindings = prepared;
+	map.emplace(key, std::move(entry));
+	stats.stores++;
+	BindReplay::Report();
+}
+
+void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
+                                          PreparedBindings& prepared) {
 	BindSplit bind_split; // KYTY_TRACE_LONG_PREP
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);

@@ -320,6 +320,7 @@ public:
 	                      uint32_t mode, bool async_compute);
 
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
+	void PrepareBindingsToday(const ShaderStageRuntime& runtime, PreparedBindings& prepared); // KYTY_DIAG_BIND_REPLAY
 	void                           FindBuffers(std::span<PreparedBindings* const> stages);
 	void                           RebindBuffers(PreparedBindings& bindings);
 	void                           RebindImages(PreparedBindings& bindings);
