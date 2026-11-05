@@ -241,6 +241,9 @@ public:
 	// VMA blocks alive move into fuller blocks (same ImageId, backing and views swapped, the bindless slots rewritten), so
 	// whole blocks go back to the driver. GPU thread, m_lock not held (the batch waits for the GPU once).
 	void RunTextureMove(BindlessTable& table);
+	// KYTY_TRACE_BLOCK_GROWTH (textureCacheTrace.cpp): bytes of pending evictions, and registered images unused for 32+
+	// collector ticks (count, allocation bytes). Takes m_lock.
+	void TraceGrowthState(uint64_t& evict_bytes, uint64_t& old_count, uint64_t& old_bytes);
 	// Image read coherence (see the .cpp). A guest thread's read fault on an image-read-watched page: BeginCpuRead runs on the
 	// GPU thread (it records the copies and submits them, it never waits for them), the faulting thread waits for serve.tick
 	// and calls FinishCpuRead. Both take m_lock.

@@ -34,6 +34,14 @@ inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 [[nodiscard]] bool VramBudgetEnabled();
 // KYTY_TRACE_PERF: the allocator's vkAllocateMemory / vkFreeMemory calls since the last call (counts, MiB, ms).
 [[nodiscard]] std::string TakeDeviceMemoryCallStats();
+// KYTY_TRACE_BLOCK_GROWTH=1 (measurement, map §3v 5.11: what is in flight when a scene change adds blocks): a
+// BLOCK_GROWTH_ALLOC line at every new VMA block (and dedicated allocation >= 32 MiB) of the image memory types with the
+// empty space before it, parked and deferred image bytes, pending evictions/retired buffers and the image asking; a
+// BLOCK_GROWTH_FRAME line every 10 frames (GraphicContext::TraceBlockGrowthFrame).
+[[nodiscard]] bool BlockGrowthTraceEnabled();
+inline std::atomic<int64_t>  g_trace_deferred_image_bytes {0}; // image allocations whose deletion waits for its tick
+inline std::atomic<uint64_t> g_trace_pending_bytes {0};        // pending evictions + retired buffers (last frame line)
+inline std::atomic<uint64_t> g_trace_frame {0};                // presented frame (frame boundary)
 // KYTY_TEXMOVE (map §3v, PROJEKT-PRZENOSZENIE-TEKSTUR, read once): 0 off (default); 1 the clean textures that keep nearly
 // empty VMA blocks alive are moved into fuller blocks at frame boundaries, so whole blocks go back to the driver
 // (TextureCache::RunTextureMove); 2 the same with the check mode (bytes compared before the swap, slots scanned, blocks
@@ -232,6 +240,9 @@ struct GraphicContext {
 	[[nodiscard]] bool AllocationPlace(VmaAllocation allocation, VkDeviceMemory& memory, uint32_t& type) const;
 	// KYTY_TEXMOVE: vkFreeMemory calls of the allocator since start and the bytes they freed (counted only with the switch).
 	static void DeviceMemoryFrees(uint64_t& count, uint64_t& bytes);
+	// KYTY_TRACE_BLOCK_GROWTH: the BLOCK_GROWTH_FRAME line (the caches' pending bytes and old images from the caller).
+	void TraceBlockGrowthFrame(uint64_t frame, uint64_t evict_bytes, uint64_t buffer_retired_bytes, uint64_t old_count,
+	                           uint64_t old_bytes);
 
 	uint32_t screen_width  = 0;
 	uint32_t screen_height = 0;

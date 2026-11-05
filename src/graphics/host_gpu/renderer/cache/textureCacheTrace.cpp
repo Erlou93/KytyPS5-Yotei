@@ -333,6 +333,18 @@ void TextureCache::NameAllocationsForMap() {
 	});
 }
 
+void TextureCache::TraceGrowthState(uint64_t& evict_bytes, uint64_t& old_count, uint64_t& old_bytes) {
+	std::scoped_lock lock {m_lock};
+	evict_bytes = PendingEvictionBytes();
+	old_count = old_bytes = 0;
+	m_slot_images.ForEach([&](ImageId id, const Image& image) {
+		(void)id;
+		if (!image.registered || m_gc_tick < 32u || m_lru_cache.GetTick(image.lru_id) + 32u > m_gc_tick) return;
+		old_count++;
+		old_bytes += m_graphics.GetAllocationSize(image.backing.allocation);
+	});
+}
+
 void TextureCache::TakeCensus(Census& census) {
 	std::scoped_lock lock {m_lock};
 	census = {};

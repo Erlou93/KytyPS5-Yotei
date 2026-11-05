@@ -373,6 +373,18 @@ void RenderContext::RunGarbageCollector() {
 	m_texture_cache.ReportImageReadServe(); // KYTY_TRACE_READBACK
 	m_buffer_cache.RunGarbageCollector();
 	m_pipeline_cache.EvictIdlePipelines(m_command_scheduler);
+	if (BlockGrowthTraceEnabled()) { // KYTY_TRACE_BLOCK_GROWTH: the frame line every 10 frame boundaries
+		const uint64_t frame = m_graphics.presented_frames.load(std::memory_order_relaxed);
+		g_trace_frame.store(frame, std::memory_order_relaxed);
+		static uint64_t calls = 0;
+		uint64_t        evict = 0, old_count = 0, old_bytes = 0;
+		if (calls++ % 10u == 0u) {
+			m_texture_cache.TraceGrowthState(evict, old_count, old_bytes);
+			const uint64_t retired = m_buffer_cache.PendingReleaseBytes();
+			g_trace_pending_bytes.store(evict + retired, std::memory_order_relaxed);
+			m_graphics.TraceBlockGrowthFrame(frame, evict, retired, old_count, old_bytes);
+		}
+	}
 }
 
 void RenderContext::AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id) {

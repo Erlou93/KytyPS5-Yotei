@@ -471,7 +471,14 @@ void TextureCache::DeleteImage(ImageId id) {
 		}
 	}
 	UnregisterImage(id);
-	if (m_scheduler.Active()) {
+	if (m_scheduler.Active() && BlockGrowthTraceEnabled()) { // KYTY_TRACE_BLOCK_GROWTH: bytes waiting for the tick
+		const auto bytes = static_cast<int64_t>(m_graphics.GetAllocationSize(image->backing.allocation));
+		g_trace_deferred_image_bytes += bytes;
+		m_scheduler.DeferOperation([this, id, bytes] {
+			m_slot_images.erase(id);
+			g_trace_deferred_image_bytes -= bytes;
+		});
+	} else if (m_scheduler.Active()) {
 		m_scheduler.DeferOperation([this, id] { m_slot_images.erase(id); });
 	} else {
 		m_slot_images.erase(id);

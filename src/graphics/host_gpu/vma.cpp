@@ -72,6 +72,14 @@ bool VmaMapNamesEnabled() {
 	return on;
 }
 
+bool BlockGrowthTraceEnabled() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_TRACE_BLOCK_GROWTH");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+
 uint32_t TexMoveMode() {
 	static const uint32_t mode = [] {
 		const char*    value = std::getenv("KYTY_TEXMOVE");
@@ -95,7 +103,14 @@ struct SizeHist {
 	std::array<std::atomic<uint64_t>, 5> bytes {};
 };
 SizeHist g_image_created_sizes, g_image_freed_sizes;
+// KYTY_TRACE_BLOCK_GROWTH: since the last BLOCK_GROWTH_FRAME line (device memory of the types that hold images).
+struct GrowthCounters {
+	std::atomic<uint64_t> blocks {0}, block_bytes {0}, dedicated {0}, dedicated_bytes {0}, frees {0}, freed_bytes {0};
+	std::atomic<uint64_t> img_created {0}, img_destroyed {0}, img_parked {0};
+};
+GrowthCounters g_growth;
 void NoteImageSize(SizeHist& hist, uint64_t bytes) {
+	if (BlockGrowthTraceEnabled()) (&hist == &g_image_freed_sizes ? g_growth.img_destroyed : g_growth.img_created) += bytes;
 	const uint32_t bucket = bytes < (64ull << 10u) ? 0u : bytes < (1ull << 20u) ? 1u : bytes < (16ull << 20u) ? 2u
 	                      : bytes < (128ull << 20u) ? 3u : 4u;
 	hist.count[bucket].fetch_add(1, std::memory_order_relaxed);
@@ -144,8 +159,11 @@ std::atomic<uint64_t>                     g_image_alloc_calls {0}, g_image_creat
 // KYTY_TEXMOVE: the size of every live VkDeviceMemory (vkFreeMemory is not given it) and the frees since start, so a
 // batch counts the blocks and bytes it gave back from the driver calls themselves.
 std::mutex                                g_memory_size_mutex;
-std::unordered_map<VkDeviceMemory, uint64_t> g_memory_sizes;
+std::unordered_map<VkDeviceMemory, std::pair<uint64_t, uint32_t>> g_memory_sizes; // size, memory type
 uint64_t                                  g_memory_frees = 0, g_memory_freed_bytes = 0;
+// KYTY_TRACE_BLOCK_GROWTH: what was in flight at each new device-memory allocation (defined after the recycle list).
+void TraceAllocate(const VkMemoryAllocateInfo* info);
+void TraceFree(uint64_t bytes, uint32_t type);
 
 uint64_t NanosSince(std::chrono::steady_clock::time_point start) {
 	return static_cast<uint64_t>(
@@ -166,10 +184,11 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device, const VkMemo
 	uint64_t max = c.alloc_max_ns.load(std::memory_order_relaxed);
 	while (ns > max && !c.alloc_max_ns.compare_exchange_weak(max, ns, std::memory_order_relaxed)) {
 	}
-	if (result == VK_SUCCESS && TexMoveMode() != 0) {
+	if (result == VK_SUCCESS && (TexMoveMode() != 0 || BlockGrowthTraceEnabled())) {
 		std::lock_guard lock(g_memory_size_mutex);
-		g_memory_sizes[*memory] = info->allocationSize;
+		g_memory_sizes[*memory] = {info->allocationSize, info->memoryTypeIndex};
 	}
+	if (result == VK_SUCCESS && BlockGrowthTraceEnabled()) TraceAllocate(info);
 	return result;
 }
 
@@ -179,11 +198,12 @@ VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memor
 	auto& c = g_memory_calls;
 	c.frees.fetch_add(1, std::memory_order_relaxed);
 	c.free_ns.fetch_add(NanosSince(start), std::memory_order_relaxed);
-	if (TexMoveMode() != 0) {
+	if (TexMoveMode() != 0 || BlockGrowthTraceEnabled()) {
 		std::lock_guard lock(g_memory_size_mutex);
 		g_memory_frees++;
 		if (const auto found = g_memory_sizes.find(memory); found != g_memory_sizes.end()) {
-			g_memory_freed_bytes += found->second;
+			g_memory_freed_bytes += found->second.first;
+			if (BlockGrowthTraceEnabled()) TraceFree(found->second.first, found->second.second);
 			g_memory_sizes.erase(found);
 		}
 	}
@@ -265,7 +285,93 @@ void TrimRecycled(VmaAllocator allocator, bool all) {
 	g_recycled.erase(g_recycled.begin(), g_recycled.begin() + static_cast<std::ptrdiff_t>(drop));
 	g_recycled_bytes = bytes;
 }
+
+// KYTY_TRACE_BLOCK_GROWTH (measurement, map §3v 5.11): the image this thread is creating (CreateImage) - what asked for
+// the memory; the allocator and the memory types that hold images (device-local, not host-visible), set at
+// CreateAllocator.
+struct GrowthRequest {
+	char     label[96] {};
+	uint64_t bytes = 0;
+};
+thread_local GrowthRequest t_growth_request;
+VmaAllocator g_growth_allocator = nullptr;
+uint32_t     g_growth_types     = 0;
+
+// Inside vkAllocateMemory, under the allocating block vector's lock: no VMA call (it would lock again), only VMA's budget
+// atomics (they already count the new allocation) and our own counters; the recycle list only if its lock is free (its
+// holder may be freeing into the vector we hold).
+void TraceAllocate(const VkMemoryAllocateInfo* info) {
+	if (g_growth_allocator == nullptr || (g_growth_types & (1u << info->memoryTypeIndex)) == 0) return;
+	bool dedicated = false;
+	for (const auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
+		dedicated |= next->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+	}
+	(dedicated ? g_growth.dedicated : g_growth.blocks)++;
+	(dedicated ? g_growth.dedicated_bytes : g_growth.block_bytes) += info->allocationSize;
+	if (dedicated && info->allocationSize < (32ull << 20u)) return; // counted on the frame line only
+	const uint32_t heap         = g_growth_allocator->MemoryTypeIndexToHeapIndex(info->memoryTypeIndex);
+	const uint64_t block_bytes  = g_growth_allocator->m_Budget.m_BlockBytes[heap];
+	const uint64_t alloc_bytes  = g_growth_allocator->m_Budget.m_AllocationBytes[heap];
+	const uint64_t before       = block_bytes > info->allocationSize ? block_bytes - info->allocationSize : 0;
+	const int64_t  empty_before = static_cast<int64_t>(before) - static_cast<int64_t>(alloc_bytes);
+	int64_t        recycled     = -1;
+	if (g_recycle_mutex.try_lock()) {
+		recycled = static_cast<int64_t>(g_recycled_bytes);
+		g_recycle_mutex.unlock();
+	}
+	const auto& request = t_growth_request;
+	std::fprintf(stderr,
+	             "BLOCK_GROWTH_ALLOC frame=%llu kind=%s size_MiB=%llu type=%u heap_empty_before_MiB=%lld recycled_MiB=%lld "
+	             "deferred_img_MiB=%lld pending_MiB=%llu request=%s request_KiB=%llu\n",
+	             static_cast<unsigned long long>(g_trace_frame.load()), dedicated ? "dedicated" : "block",
+	             static_cast<unsigned long long>(info->allocationSize >> 20u), info->memoryTypeIndex,
+	             static_cast<long long>(empty_before / (1 << 20)), static_cast<long long>(recycled < 0 ? -1 : recycled >> 20),
+	             static_cast<long long>(g_trace_deferred_image_bytes.load() >> 20),
+	             static_cast<unsigned long long>(g_trace_pending_bytes.load() >> 20u),
+	             request.label[0] != '\0' ? request.label : "buffer/other", static_cast<unsigned long long>(request.bytes >> 10u));
+}
+
+void TraceFree(uint64_t bytes, uint32_t type) {
+	if ((g_growth_types & (1u << type)) == 0) return;
+	g_growth.frees++;
+	g_growth.freed_bytes += bytes;
+}
 } // namespace
+
+void GraphicContext::TraceBlockGrowthFrame(uint64_t frame, uint64_t evict_bytes, uint64_t buffer_retired_bytes,
+                                           uint64_t old_count, uint64_t old_bytes) {
+	if (allocator == nullptr) return;
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
+	vmaGetHeapBudgets(allocator, budgets);
+	const auto& properties = GetPhysicalDeviceMemoryProperties();
+	uint64_t    blocks = 0, block_bytes = 0, alloc_bytes = 0;
+	for (uint32_t i = 0; i < properties.memoryHeapCount; i++) {
+		if (!(properties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal)) continue;
+		blocks += budgets[i].statistics.blockCount;
+		block_bytes += budgets[i].statistics.blockBytes;
+		alloc_bytes += budgets[i].statistics.allocationBytes;
+	}
+	uint64_t recycled = 0;
+	{
+		std::lock_guard lock(g_recycle_mutex);
+		recycled = g_recycled_bytes;
+	}
+	const auto mib  = [](uint64_t bytes) { return static_cast<unsigned long long>(bytes >> 20u); };
+	const auto take = [](std::atomic<uint64_t>& value) { return value.exchange(0); };
+	const auto nb = take(g_growth.blocks), nbb = take(g_growth.block_bytes), nd = take(g_growth.dedicated);
+	const auto ndb = take(g_growth.dedicated_bytes), nf = take(g_growth.frees), nfb = take(g_growth.freed_bytes);
+	std::fprintf(stderr,
+	             "BLOCK_GROWTH_FRAME frame=%llu dev_blocks=%llu/%llu dev_alloc_MiB=%llu empty_MiB=%llu new_blocks=%llu/%llu "
+	             "dedicated=%llu/%llu frees=%llu/%llu img_created_MiB=%llu img_destroyed_MiB=%llu img_parked_MiB=%llu "
+	             "recycled_MiB=%llu deferred_img_MiB=%lld evict_pending_MiB=%llu buf_retired_MiB=%llu old32=%llu/%llu\n",
+	             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(blocks), mib(block_bytes),
+	             mib(alloc_bytes), mib(block_bytes > alloc_bytes ? block_bytes - alloc_bytes : 0),
+	             static_cast<unsigned long long>(nb), mib(nbb), static_cast<unsigned long long>(nd), mib(ndb),
+	             static_cast<unsigned long long>(nf), mib(nfb), mib(take(g_growth.img_created)),
+	             mib(take(g_growth.img_destroyed)), mib(take(g_growth.img_parked)), mib(recycled),
+	             static_cast<long long>(g_trace_deferred_image_bytes.load() >> 20), mib(evict_bytes),
+	             mib(buffer_retired_bytes), static_cast<unsigned long long>(old_count), mib(old_bytes));
+}
 
 std::string TakeDeviceMemoryCallStats() {
 	auto& c = g_memory_calls;
@@ -336,6 +442,15 @@ bool GraphicContext::CreateAllocator() {
 	if (result != vk::Result::eSuccess) {
 		LOGF("vmaCreateAllocator failed: %s\n", vk::to_string(result).c_str());
 		return false;
+	}
+	if (BlockGrowthTraceEnabled()) { // KYTY_TRACE_BLOCK_GROWTH
+		for (uint32_t i = 0; i < physical_device_memory_properties.memoryTypeCount; i++) {
+			const auto flags = physical_device_memory_properties.memoryTypes[i].propertyFlags;
+			if ((flags & vk::MemoryPropertyFlagBits::eDeviceLocal) && !(flags & vk::MemoryPropertyFlagBits::eHostVisible))
+				g_growth_types |= 1u << i;
+		}
+		g_growth_allocator = allocator;
+		std::fprintf(stderr, "BLOCK_GROWTH trace on (types 0x%x)\n", g_growth_types);
 	}
 	return true;
 }
@@ -611,9 +726,26 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		}
 	}
 	if (!reused) {
+		if (BlockGrowthTraceEnabled()) { // KYTY_TRACE_BLOCK_GROWTH: what a new block would be allocated for
+			auto& request = t_growth_request;
+			std::snprintf(request.label, sizeof(request.label), "img_%s_%ux%ux%u_l%u_m%u_u%x",
+			              vk::to_string(image_info.format).c_str(), image_info.extent.width, image_info.extent.height,
+			              image_info.extent.depth, image_info.arrayLayers, image_info.mipLevels,
+			              static_cast<uint32_t>(image_info.usage));
+			request.bytes = 0;
+			if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceImageMemoryRequirements != nullptr) {
+				const VkDeviceImageMemoryRequirements query {VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS, nullptr,
+				                                             &static_cast<const VkImageCreateInfo&>(image_info),
+				                                             VkImageAspectFlagBits {}};
+				VkMemoryRequirements2 requirements {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+				VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceImageMemoryRequirements(device, &query, &requirements);
+				request.bytes = requirements.memoryRequirements.size;
+			}
+		}
 		const auto result = static_cast<vk::Result>(
 		    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &alloc_info,
 		                   &native_image, &image.allocation, nullptr));
+		if (BlockGrowthTraceEnabled()) t_growth_request = {};
 		if (result != vk::Result::eSuccess) {
 			image.image = native_image;
 			if (relocation == nullptr) LogMemoryBudget(); // a relocation without room is expected (counted no_room)
@@ -677,6 +809,7 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 			g_recycled.push_back({found->second, static_cast<VkImage>(image.image), image.allocation, info.size,
 			                      std::chrono::steady_clock::now()});
 			g_recycled_bytes += info.size;
+			if (BlockGrowthTraceEnabled()) g_growth.img_parked += info.size;
 			g_recyclable.erase(found);
 			g_recycle_parks.fetch_add(1, std::memory_order_relaxed);
 			TrimRecycled(allocator, false);
