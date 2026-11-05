@@ -3042,6 +3042,19 @@ bool RenderExecutor::ColorOperationInstead(CommandBuffer& buffer, uint32_t rende
 	return true;
 }
 
+// KYTY_DIAG_SKIP_DIRECT_DRAWS=1 (ceiling test only, map 5.11 "ruch przez miasto"): every direct draw (not GPU indirect) is
+// dropped at its entry - no state, program, pipeline or binding work and no recording; the most the per-draw CPU cost
+// can give. The image breaks; the game's own work (draw packets, dispatches per frame) must stay. Read once.
+static bool SkipDirectDrawsCeiling() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_SKIP_DIRECT_DRAWS");
+		const bool  set   = value != nullptr && value[0] == '1';
+		if (set) std::fprintf(stderr, "DIAG_SKIP_DIRECT_DRAWS ceiling: direct draws dropped""\n");
+		return set;
+	}();
+	return on;
+}
+
 bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
 	if (args.indirect.address != 0) {
@@ -3050,6 +3063,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		NoteUpstreamIndirectRecords();
 		return false;
 	}
+	if (SkipDirectDrawsCeiling()) return true;
 	const DrawCensusScope           draw_census; // KYTY_TRACE_DRAW_CENSUS
 	std::optional<DispatchSubTimer> census_pre(std::in_place, DispatchSub::DrawPre); // KYTY_TRACE_DRAW_CENSUS
 	DrawEntryStart(buffer);
@@ -3190,6 +3204,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		NoteUpstreamIndirectRecords();
 		return false;
 	}
+	if (SkipDirectDrawsCeiling()) return true;
 	const DrawCensusScope       draw_census; // KYTY_TRACE_DRAW_CENSUS
 	DrawEntryStart(buffer);
 	KYTY_PROFILER_FUNCTION();
