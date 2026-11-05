@@ -3071,7 +3071,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
-	if (SkipDirectDrawsCeiling()) { // after the entry's scheduler work, before any state of the draw
+	if (SkipDirectDrawsCeiling() && DebugPresentCount().load() >= 2600u) { // in the scene only (from frame 2600)
 		ResetBindings();
 		return true;
 	}
@@ -3214,7 +3214,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
-	if (SkipDirectDrawsCeiling()) { // after the entry's scheduler work, before any state of the draw
+	if (SkipDirectDrawsCeiling() && DebugPresentCount().load() >= 2600u) { // in the scene only (from frame 2600)
 		ResetBindings();
 		return true;
 	}
