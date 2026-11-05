@@ -220,7 +220,7 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 				}
 				if (why != nullptr) break;
 				const auto& image = m_slot_images[owner->second];
-				drain.moves.push_back({owner->second, image.serial, allocation, image.backing.state, nullptr, {}, {}});
+				drain.moves.push_back({owner->second, image.serial, allocation, image.backing.state, nullptr});
 			}
 			mix(reinterpret_cast<uint64_t>(block.memory));
 			mix(block.count);
