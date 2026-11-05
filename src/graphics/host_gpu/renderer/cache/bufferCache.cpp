@@ -621,8 +621,7 @@ static bool SkipReadbackCeiling() {
 	static const bool on = [] {
 		const char* value = std::getenv("KYTY_DIAG_SKIP_READBACK");
 		const bool  set   = value != nullptr && value[0] == '1';
-		if (set) std::fprintf(stderr, "DIAG_SKIP_READBACK ceiling: synchronous downloads copy nothing
-");
+		if (set) std::fprintf(stderr, "DIAG_SKIP_READBACK ceiling: synchronous downloads copy nothing\n");
 		return set;
 	}();
 	return on;
