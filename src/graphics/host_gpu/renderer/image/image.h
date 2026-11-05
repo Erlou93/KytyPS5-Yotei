@@ -258,7 +258,7 @@ public:
 	uint16_t         plan_uses          = 0;
 	// Resident image heap elements that select this image.
 	std::atomic<uint32_t> heap_refs {0};
-	// KYTY_TEXMOVE: steady-clock ms of its last move to another VMA block (0: never), so a texture is not moved back and
+	// Texture relocation: steady-clock ms of its last move to another VMA block (0: never), so a texture is not moved back and
 	// forth between blocks.
 	uint64_t         texmove_ms         = 0;
 

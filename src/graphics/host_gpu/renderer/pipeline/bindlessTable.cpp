@@ -934,8 +934,7 @@ void BindlessTable::WriteSlot(uint32_t binding, uint32_t slot, vk::ImageView vie
 	write.descriptorType  = vk::DescriptorType::eSampledImage;
 	write.pImageInfo      = &info;
 	UpdateSetDescriptors(m_graphics.device, 1, &write);
-	if (m_slot_views_on && binding < ImageArrays) { // KYTY_TEXMOVE
-		TexMoveCheck(static_cast<VkImageView>(view), "bindless_WriteSlot"); // =2: an old view of a moved texture
+	if (binding < ImageArrays) { // texture relocation (RewriteViews)
 		auto& views = m_slot_views[binding];
 		if (slot >= views.size()) views.resize(slot + 1u);
 		views[slot] = {view, layout};
@@ -954,14 +953,6 @@ uint32_t BindlessTable::RewriteViews(const std::unordered_map<VkImageView, vk::I
 		}
 	}
 	return rewritten;
-}
-
-uint32_t BindlessTable::CountSlotViews(const std::unordered_set<VkImageView>& views) const {
-	uint32_t count = 0;
-	for (const auto& array: m_slot_views) {
-		for (const auto& [view, layout]: array) count += views.contains(static_cast<VkImageView>(view)) ? 1u : 0u;
-	}
-	return count;
 }
 
 void BindlessTable::SetTranslation(const Heap& heap, uint32_t key, uint32_t slot) {

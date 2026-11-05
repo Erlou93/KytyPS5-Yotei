@@ -63,22 +63,6 @@ bool VramBudgetEnabled() {
 	return on;
 }
 
-uint32_t TexMoveMode() {
-	static const uint32_t mode = [] {
-		const char*    value = std::getenv("KYTY_TEXMOVE");
-		const uint32_t m     = value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
-		if (m != 0) std::fprintf(stderr, "TEXMOVE mode=%u (texture relocation out of nearly empty VMA blocks%s)\n", m,
-		                         m >= 2 ? ", check mode" : "");
-		return m;
-	}();
-	return mode;
-}
-
-TexMoveTotals& GetTexMoveTotals() {
-	static TexMoveTotals totals;
-	return totals;
-}
-
 // KYTY_VRAM_BUDGET_MB=<n>: the caches size their garbage-collection thresholds for at most n MiB.
 static uint64_t VramBudgetCap() {
 	static const uint64_t cap = [] {
@@ -106,7 +90,7 @@ thread_local uint64_t  t_allocs        = 0; // this thread's vkAllocateMemory ca
 std::mutex                                g_image_alloc_mutex;
 std::unordered_map<std::string, uint64_t> g_image_allocs;
 std::atomic<uint64_t>                     g_image_alloc_calls {0}, g_image_creates {0}, g_image_deletes {0};
-// KYTY_TEXMOVE: the size of every live VkDeviceMemory (vkFreeMemory is not given it) and the frees since start, so a
+// Texture relocation: the size of every live VkDeviceMemory (vkFreeMemory is not given it) and the frees since start, so a
 // batch counts the blocks and bytes it gave back from the driver calls themselves.
 std::mutex                                g_memory_size_mutex;
 std::unordered_map<VkDeviceMemory, uint64_t> g_memory_sizes;
@@ -131,7 +115,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device, const VkMemo
 	uint64_t max = c.alloc_max_ns.load(std::memory_order_relaxed);
 	while (ns > max && !c.alloc_max_ns.compare_exchange_weak(max, ns, std::memory_order_relaxed)) {
 	}
-	if (result == VK_SUCCESS && TexMoveMode() != 0) {
+	if (result == VK_SUCCESS) {
 		std::lock_guard lock(g_memory_size_mutex);
 		g_memory_sizes[*memory] = info->allocationSize;
 	}
@@ -144,7 +128,7 @@ VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memor
 	auto& c = g_memory_calls;
 	c.frees.fetch_add(1, std::memory_order_relaxed);
 	c.free_ns.fetch_add(NanosSince(start), std::memory_order_relaxed);
-	if (TexMoveMode() != 0) {
+	{
 		std::lock_guard lock(g_memory_size_mutex);
 		g_memory_frees++;
 		if (const auto found = g_memory_sizes.find(memory); found != g_memory_sizes.end()) {
@@ -474,7 +458,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	alloc_info.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
 	alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 	if (relocation != nullptr) {
-		// KYTY_TEXMOVE: the old image's memory type (AUTO_PREFER_DEVICE may pick the BAR type), the fullest block with room
+		// Texture relocation: the old image's memory type (AUTO_PREFER_DEVICE may pick the BAR type), the fullest block with room
 		// (VMA walks its blocks fullest first), no new block unless the batch allows one, and never a parked image (its
 		// allocation may sit in a block being emptied).
 		alloc_info.flags |= VMA_ALLOCATION_CREATE_STRATEGY_MIN_MEMORY_BIT;

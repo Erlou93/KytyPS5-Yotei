@@ -31,31 +31,6 @@ inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 [[nodiscard]] bool VramBudgetEnabled();
 // KYTY_TRACE_PERF: the allocator's vkAllocateMemory / vkFreeMemory calls since the last call (counts, MiB, ms).
 [[nodiscard]] std::string TakeDeviceMemoryCallStats();
-// KYTY_TEXMOVE (map §3v, PROJEKT-PRZENOSZENIE-TEKSTUR, read once): 0 off (default); 1 the clean textures that keep nearly
-// empty VMA blocks alive are moved into fuller blocks at frame boundaries, so whole blocks go back to the driver
-// (TextureCache::RunTextureMove); 2 the same with the check mode (bytes compared before the swap, slots scanned, blocks
-// counted after the batch).
-[[nodiscard]] uint32_t TexMoveMode();
-// KYTY_TEXMOVE: totals since start (the check summary).
-struct TexMoveTotals {
-	std::atomic<uint64_t> batches {0}, images {0}, moved_bytes {0}, emptied {0}, returned {0}, returned_bytes {0};
-	std::atomic<uint64_t> mismatches {0}, stale_slots {0}, still_present {0}, stale_uses {0};
-};
-[[nodiscard]] TexMoveTotals& GetTexMoveTotals();
-// KYTY_TEXMOVE=2, the stale-use detector (textureMove.cpp): a moved texture's old views and image stay alive for
-// KYTY_TEXMOVE_RETIRE_S (10) after the swap, and every point where a view or image enters GPU work (the dispatcher's
-// descriptor writes, push descriptors, update templates, barriers, rendering attachments, copies, clears, view
-// creation, plus the bindless slot and commit packet writers) reports a use of one of them (TEXMOVE_STALE_USE). True
-// only while such views exist.
-inline std::atomic<bool> g_texmove_watch {false};
-void TexMoveStaleCheck(uint64_t handle, const char* path);
-template <typename Handle>
-inline void TexMoveCheck(Handle handle, const char* path) {
-	if (g_texmove_watch.load(std::memory_order_relaxed) && handle != VK_NULL_HANDLE)
-		TexMoveStaleCheck(reinterpret_cast<uint64_t>(handle), path);
-}
-// Wraps the dispatcher functions above (after CommandRecorder::Install, so the wrappers call its hooks); KYTY_TEXMOVE=2.
-void TexMoveInstallDetector();
 
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;
@@ -184,7 +159,7 @@ struct GraphicContext {
 		bool     device_local = false;
 	};
 	[[nodiscard]] uint32_t GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> heaps) const;
-	// KYTY_TEXMOVE: the destination of a moved texture (CreateImage): the memory type of the old one, and whether the
+	// Texture relocation: the destination of a moved texture (CreateImage): the memory type of the old one, and whether the
 	// allocation may add a block (else it only takes room in existing blocks).
 	struct ImageRelocation {
 		uint32_t memory_type     = 0;
@@ -193,11 +168,11 @@ struct GraphicContext {
 	[[nodiscard]] bool CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image,
 	                               const ImageRelocation* relocation = nullptr);
 	void               DeleteImage(VulkanImage& image);
-	// KYTY_TEXMOVE: destroys the image and frees its allocation now (never parked for reuse: its block must empty).
+	// Texture relocation: destroys the image and frees its allocation now (never parked for reuse: its block must empty).
 	void DestroyImageNow(VulkanImage& image);
-	// KYTY_TEXMOVE: destroys every parked image (they hold allocations in the blocks being emptied).
+	// Texture relocation: destroys every parked image (they hold allocations in the blocks being emptied).
 	void TrimRecycledImages();
-	// KYTY_TEXMOVE: one VMA block of a device-local, not host-visible memory type, read from VMA's block lists.
+	// Texture relocation: one VMA block of a device-local, not host-visible memory type, read from VMA's block lists.
 	struct BlockCensus {
 		VkDeviceMemory             memory = VK_NULL_HANDLE;
 		uint32_t                   type   = 0;
@@ -210,9 +185,9 @@ struct GraphicContext {
 	// list_pct: only blocks at least that empty (percent) list their allocations (the walk over every allocation is
 	// most of the census); ranges: every block lists its free ranges (the room check before a move).
 	[[nodiscard]] std::vector<BlockCensus> CollectBlocks(uint32_t list_pct = 0, bool ranges = false) const;
-	// KYTY_TEXMOVE: the allocations of parked images (they go within 2 s, or at TrimRecycledImages).
+	// Texture relocation: the allocations of parked images (they go within 2 s, or at TrimRecycledImages).
 	[[nodiscard]] std::vector<VmaAllocation> RecycledAllocations() const;
-	// KYTY_TEXMOVE: VMA places a new allocation in the first block (fullest first) with a free range it fits, which for a
+	// Texture relocation: VMA places a new allocation in the first block (fullest first) with a free range it fits, which for a
 	// large texture is often the emptiest block - the one being emptied, or the empty block VMA keeps. Plugs fill the free
 	// ranges of those blocks (memory type `type`, `avoid`) with raw allocations, largest first by halving sizes down to
 	// `min_size`, so the destinations go elsewhere; a plug that lands in another block is freed at once. FreePlugs after
@@ -222,7 +197,7 @@ struct GraphicContext {
 	void FreePlugs(std::vector<VmaAllocation>& plugs);
 	// The device memory and memory type an allocation lives in (false without one).
 	[[nodiscard]] bool AllocationPlace(VmaAllocation allocation, VkDeviceMemory& memory, uint32_t& type) const;
-	// KYTY_TEXMOVE: vkFreeMemory calls of the allocator since start and the bytes they freed (counted only with the switch).
+	// Texture relocation: vkFreeMemory calls of the allocator since start and the bytes they freed (counted only with the switch).
 	static void DeviceMemoryFrees(uint64_t& count, uint64_t& bytes);
 
 	uint32_t screen_width  = 0;
