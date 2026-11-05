@@ -363,14 +363,17 @@ void GraphicContext::TraceBlockGrowthFrame(uint64_t frame, uint64_t evict_bytes,
 	std::fprintf(stderr,
 	             "BLOCK_GROWTH_FRAME frame=%llu dev_blocks=%llu/%llu dev_alloc_MiB=%llu empty_MiB=%llu new_blocks=%llu/%llu "
 	             "dedicated=%llu/%llu frees=%llu/%llu img_created_MiB=%llu img_destroyed_MiB=%llu img_parked_MiB=%llu "
-	             "recycled_MiB=%llu deferred_img_MiB=%lld evict_pending_MiB=%llu buf_retired_MiB=%llu old32=%llu/%llu\n",
+	             "recycled_MiB=%llu deferred_img_MiB=%lld evict_pending_MiB=%llu buf_retired_MiB=%llu old32=%llu/%llu "
+	             "calls_total alloc=%llu/%.1fms free=%llu/%.1fms\n",
 	             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(blocks), mib(block_bytes),
 	             mib(alloc_bytes), mib(block_bytes > alloc_bytes ? block_bytes - alloc_bytes : 0),
 	             static_cast<unsigned long long>(nb), mib(nbb), static_cast<unsigned long long>(nd), mib(ndb),
 	             static_cast<unsigned long long>(nf), mib(nfb), mib(take(g_growth.img_created)),
 	             mib(take(g_growth.img_destroyed)), mib(take(g_growth.img_parked)), mib(recycled),
 	             static_cast<long long>(g_trace_deferred_image_bytes.load() >> 20), mib(evict_bytes),
-	             mib(buffer_retired_bytes), static_cast<unsigned long long>(old_count), mib(old_bytes));
+	             mib(buffer_retired_bytes), static_cast<unsigned long long>(old_count), mib(old_bytes),
+	             static_cast<unsigned long long>(g_memory_calls.allocs.load()), static_cast<double>(g_memory_calls.alloc_ns.load()) / 1e6,
+	             static_cast<unsigned long long>(g_memory_calls.frees.load()), static_cast<double>(g_memory_calls.free_ns.load()) / 1e6);
 }
 
 std::string TakeDeviceMemoryCallStats() {
@@ -434,6 +437,13 @@ bool GraphicContext::CreateAllocator() {
 	info.pVulkanFunctions = &functions;
 	info.vulkanApiVersion = VULKAN_TARGET_API_VERSION;
 	info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+	// KYTY_VMA_BLOCK_MB=<n> (measurement, map §3v 5.11 ceiling): VMA's block size for large heaps (unset or 0: VMA's own,
+	// 256 MiB). Smaller blocks: a nearly empty block empties on its own more often after a scene change.
+	if (const char* value = std::getenv("KYTY_VMA_BLOCK_MB"); value != nullptr && std::strtoull(value, nullptr, 10) != 0) {
+		info.preferredLargeHeapBlockSize = std::strtoull(value, nullptr, 10) << 20u;
+		std::fprintf(stderr, "VMA block size %llu MiB (KYTY_VMA_BLOCK_MB)\n",
+		             static_cast<unsigned long long>(info.preferredLargeHeapBlockSize >> 20u));
+	}
 	if (memory_budget_ext_enabled) {
 		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 	}
