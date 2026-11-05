@@ -15,6 +15,7 @@
 #pragma clang diagnostic pop
 #endif
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/envDefaults.h"
 #include "common/logging/log.h"
