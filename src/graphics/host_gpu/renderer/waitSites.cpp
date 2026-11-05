@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -20,6 +21,8 @@ namespace {
 
 constexpr uint32_t Depth = 8; // return addresses kept above the scheduler
 
+void MaybeReport();
+
 struct Site {
 	uint64_t                     count = 0;
 	uint64_t                     nanos = 0;
@@ -29,8 +32,8 @@ struct Site {
 
 std::mutex                              g_mutex;
 std::unordered_map<uint64_t, Site>      g_sites;
-std::array<uint64_t, 2>                 g_count {}; // [0] GPU thread, [1] other threads
-std::array<uint64_t, 2>                 g_nanos {};
+std::array<std::atomic<uint64_t>, 2>    g_count_all {}; // every wait: [0] GPU thread, [1] other threads
+std::array<std::atomic<uint64_t>, 2>    g_nanos_all {};
 std::chrono::steady_clock::time_point   g_window = std::chrono::steady_clock::now();
 
 void Report() { // under g_mutex
@@ -38,9 +41,10 @@ void Report() { // under g_mutex
 	const auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_window).count();
 	g_window       = now;
 	std::fprintf(stderr, "WAIT_SITES window_ms=%lld gpu_thread=%llu/%llums other=%llu/%llums sites=%zu\n",
-	             static_cast<long long>(ms), static_cast<unsigned long long>(g_count[0]),
-	             static_cast<unsigned long long>(g_nanos[0] / 1000000u), static_cast<unsigned long long>(g_count[1]),
-	             static_cast<unsigned long long>(g_nanos[1] / 1000000u), g_sites.size());
+	             static_cast<long long>(ms), static_cast<unsigned long long>(g_count_all[0].exchange(0)),
+	             static_cast<unsigned long long>(g_nanos_all[0].exchange(0) / 1000000u),
+	             static_cast<unsigned long long>(g_count_all[1].exchange(0)),
+	             static_cast<unsigned long long>(g_nanos_all[1].exchange(0) / 1000000u), g_sites.size());
 	std::vector<std::pair<uint64_t, Site>> sorted(g_sites.begin(), g_sites.end());
 	std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second.nanos > b.second.nanos; });
 	for (size_t i = 0; i < sorted.size() && i < 24u; i++) {
@@ -54,8 +58,17 @@ void Report() { // under g_mutex
 		std::fprintf(stderr, "\n");
 	}
 	g_sites.clear();
-	g_count = {};
-	g_nanos = {};
+}
+
+void MaybeReport() {
+	static std::atomic<int64_t> next {0};
+	const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+	int64_t       due = next.load(std::memory_order_relaxed);
+	if (now < due) return;
+	if (!next.compare_exchange_strong(due, now + std::chrono::nanoseconds(std::chrono::seconds(5)).count())) return;
+	if (due == 0) return; // the first call only arms the window
+	std::lock_guard lock(g_mutex);
+	Report();
 }
 
 } // namespace
@@ -71,29 +84,38 @@ bool Enabled() {
 }
 
 void Record(uint64_t nanos) {
+	// Totals per thread kind for every wait (atomics); the call stack only for every 16th wait of each thread (sampled:
+	// the first version captured every stack and cost ~19% fps standing at the gate), its count and time scaled by 16.
 	static const uint64_t base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+	const bool            gpu  = PerfIsGpuThread();
+	g_count_all[gpu ? 0 : 1].fetch_add(1, std::memory_order_relaxed);
+	g_nanos_all[gpu ? 0 : 1].fetch_add(nanos, std::memory_order_relaxed);
+	static thread_local uint32_t tick = 0;
+	if ((tick++ & 15u) != 0u) {
+		MaybeReport();
+		return;
+	}
 	std::array<void*, Depth> frames {};
 	// Skip Record; the first frames are the scheduler function (the Scope is inlined there) and its callers.
-	const auto     captured = RtlCaptureStackBackTrace(1, Depth, frames.data(), nullptr);
-	const bool     gpu      = PerfIsGpuThread();
-	Site           site;
-	uint64_t       key = gpu ? 1u : 2u;
+	const auto captured = RtlCaptureStackBackTrace(1, Depth, frames.data(), nullptr);
+	Site       site;
+	uint64_t   key = gpu ? 1u : 2u;
 	for (uint32_t i = 0; i < captured; i++) {
 		const auto address = reinterpret_cast<uint64_t>(frames[i]);
 		site.rva[i]        = address >= base ? address - base : address;
 		key                = (key ^ site.rva[i]) * 0x100000001b3ull;
 	}
-	std::lock_guard lock(g_mutex);
-	auto& entry = g_sites[key];
-	if (entry.count == 0) {
-		entry.rva = site.rva;
-		entry.gpu = gpu;
+	{
+		std::lock_guard lock(g_mutex);
+		auto& entry = g_sites[key];
+		if (entry.count == 0) {
+			entry.rva = site.rva;
+			entry.gpu = gpu;
+		}
+		entry.count += 16u;
+		entry.nanos += nanos * 16u;
 	}
-	entry.count++;
-	entry.nanos += nanos;
-	g_count[gpu ? 0 : 1]++;
-	g_nanos[gpu ? 0 : 1] += nanos;
-	if (std::chrono::steady_clock::now() - g_window >= std::chrono::seconds(5)) Report();
+	MaybeReport();
 }
 
 } // namespace Libs::Graphics::WaitSites
