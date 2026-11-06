@@ -1066,7 +1066,7 @@ static void SignalApcHandler(void* arg1, void* arg2, void* /*arg3*/, PCONTEXT co
 
 void KernelDispatchPendingSignalForCurrentThread() {
 	Pthread current = PthreadSelfOrNull();
-	if (current == nullptr) {
+	if (!PthreadHasAnyPendingSignal(current)) {
 		return;
 	}
 
