@@ -45,8 +45,8 @@ of system memory in play; with 16 GB Windows runs out of memory and pages to dis
 3. **First start:** the package ships shader hints for the game (`hints\`, a list of the shaders the game uses, without
    any game code). On the first Play the launcher finds those shaders in your game files and compiles them before the
    game starts; this takes a few minutes and runs only once. The game then starts by itself. Without it the first
-   hours stutter while shaders compile during play. The v0.1.4 hints cover the game **from the start to the Snake
-   fight** only (the shader format changed in v0.1.4, so the older hints could not be kept): later areas
+   hours stutter while shaders compile during play. The v0.1.5 hints (6,880 shaders, 8,001 pipelines) cover the
+   game **from the start to the Snake fight and the open world** around it: other areas
    compile their shaders while you play, with short stutters the first time you reach them. Shaders compiled while
    playing are saved, so the next visit is smooth.
 4. **Graphics mode:** the game's own *Performance* mode is the one tested. In *Quality* mode the game changes its
@@ -73,10 +73,13 @@ Known slow spots:
 - Scenes with a lot of fire, such as parts of the Snake fight, can drop to about 10 fps.
 
 **Known issue: graphics memory grows over a long session.** Each change of scene (especially cutscenes) leaves unused
-gaps in the graphics card's memory that the emulator does not reclaim yet. On a 16 GB card the usage goes from about
+gaps in the graphics card's memory. Since v0.1.5 the emulator moves textures out of nearly empty memory blocks so
+whole blocks can be released (texture relocation); this reclaims part of it, not all. **Texture relocation is new:
+if you see textures, trees or other objects disappearing, flickering or turning black, please open an issue** with a
+screenshot, the place and how long you had been playing. On a 16 GB card the usage goes from about
 12 GB after loading to 13.5-15 GB after 30-60 minutes; near the card's limit the driver moves data to system RAM and
 the frame rate drops. Watch "Vulkan budget" in the performance panel (Shift+F2): if it gets close to the limit and the
-game slows down, save, quit and start again. A fix is the next work item.
+game slows down, save, quit and start again.
 
 ## Building (Windows)
 
