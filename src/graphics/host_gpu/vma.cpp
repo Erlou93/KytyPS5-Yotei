@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/commandRecorder.h"
+#include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #if defined(__clang__)
@@ -503,6 +504,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	}
 
 	g_image_creates.fetch_add(1, std::memory_order_relaxed);
+	ChunkCensus::t_image_creates++; // KYTY_TRACE_CHUNK_CENSUS (hole)
 	if (t_allocs != allocs_before) {
 		g_image_alloc_calls.fetch_add(1, std::memory_order_relaxed);
 		char key[128];

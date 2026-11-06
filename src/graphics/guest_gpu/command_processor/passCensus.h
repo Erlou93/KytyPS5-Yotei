@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_PASSCENSUS_H_
 
 #include <cstdint>
+#include <string>
 
 // Parallel-translation project, step S0 (diagnostic only,
 // default off, removed with the project's decision):
@@ -28,6 +29,8 @@ void NoteShader(uint64_t hash);
 // at emission) and the execution time of an operation of that pass (execution thread; kind 1 draw, 2 dispatch,
 // 0 other), less its card wait.
 [[nodiscard]] uint16_t CurrentPassId(const void* cp);
+// The name of an interned pass id ("-" when unknown).
+[[nodiscard]] std::string PassName(uint16_t id);
 void NoteExecute(uint16_t pass, int kind, uint64_t ns, uint64_t wait_ns);
 
 } // namespace Libs::Graphics::PassCensus

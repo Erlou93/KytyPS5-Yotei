@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/dispatchCensus.h"
+#include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "common/envRead.h"
 #include "common/shaderEnv.h"
@@ -785,6 +786,7 @@ void BarReadsProbe(uint64_t bytes, uint64_t ns) {
 
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	ChunkCensus::t_downloads++; // KYTY_TRACE_CHUNK_CENSUS (hole)
 	KYTY_PROFILER_BLOCK("BufferCache::DownloadBufferMemory");
 	if constexpr (!async) {
 		if (SkipReadbackCeiling()) {

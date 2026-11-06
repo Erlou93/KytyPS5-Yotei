@@ -1,5 +1,6 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/stallWatch.h"
+#include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/guest_gpu/drawStateObserver.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cleanDraws.h"
@@ -921,11 +922,28 @@ void GuestGpu::ExecutionThread() {
 			                       : (kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect) ? 2 : 0;
 			const auto pass  = operation->pass_id;
 			const auto wait0 = PassCensus::t_wait_ns;
+			const bool processor_is_gfx = operation->processor == m_gfx_cp.get();
+			const auto dl0 = ChunkCensus::t_downloads, im0 = ChunkCensus::t_image_creates;
+			const auto pi0 = ChunkCensus::t_pipelines, sh0 = ChunkCensus::t_shaders;
 			const auto t0    = std::chrono::steady_clock::now();
 			operation->processor->Execute(*operation);
 			const auto ns = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
 			PassCensus::NoteExecute(pass, k, ns, PassCensus::t_wait_ns - wait0);
+			if (ChunkCensus::Enabled()) {
+				// KYTY_TRACE_CHUNK_CENSUS (S1a): how the parallel translation would group this operation.
+				ChunkCensus::OpInfo info;
+				info.gfx_queue      = processor_is_gfx;
+				info.pass           = pass;
+				info.kind           = kind == GpuOperationKind::DrawIndirect ? 3 : k;
+				info.ns             = ns > PassCensus::t_wait_ns - wait0 ? ns - (PassCensus::t_wait_ns - wait0) : 0u;
+				info.gpu_waits      = PassCensus::t_wait_ns - wait0;
+				info.download_bytes = ChunkCensus::t_downloads - dl0;
+				info.image_creates  = ChunkCensus::t_image_creates - im0;
+				info.pipelines      = ChunkCensus::t_pipelines - pi0;
+				info.shaders        = ChunkCensus::t_shaders - sh0;
+				ChunkCensus::Note(info);
+			}
 		} else {
 			operation->processor->Execute(*operation);
 		}

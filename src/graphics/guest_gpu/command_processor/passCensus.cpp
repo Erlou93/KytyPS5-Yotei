@@ -203,6 +203,11 @@ void Marker(const void* cp, const char* push_name) {
 	Switch(cp, state.key);
 }
 
+std::string PassName(uint16_t id) {
+	std::scoped_lock lock(g_names_mutex);
+	return id < g_names.size() ? g_names[id] : std::string("-");
+}
+
 uint16_t CurrentPassId(const void* cp) {
 	if (!Enabled()) return 0;
 	auto it = t_processors.find(cp);

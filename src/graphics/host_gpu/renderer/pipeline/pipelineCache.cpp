@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
+#include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheTrace.h"
 
@@ -497,6 +498,7 @@ struct PipelineCache::ProgramCache {
 	                               uint32_t push_data_start_dword,
 	                               std::span<const uint32_t> function_code,
 	                               PrecompileReused* reused) {
+		ChunkCensus::t_shaders++; // KYTY_TRACE_CHUNK_CENSUS (hole)
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
 		                                         Common::DebugCounters::Counter::ShaderCompileNs,
 		                                         Common::DebugCounters::Peak::ShaderCompileNs);
@@ -2294,6 +2296,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	}
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
 	{
+		ChunkCensus::t_pipelines++; // KYTY_TRACE_CHUNK_CENSUS (hole)
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
@@ -2500,6 +2503,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 
 	auto cached = std::make_unique<Pipeline>();
 	{
+		ChunkCensus::t_pipelines++; // KYTY_TRACE_CHUNK_CENSUS (hole)
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
