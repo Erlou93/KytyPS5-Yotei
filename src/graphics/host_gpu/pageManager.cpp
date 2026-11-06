@@ -87,7 +87,7 @@ public:
 			// After ~25 us of spinning the waiter yields, after ~1 ms it sleeps 1 ms per round. The holder may be inside
 			// VirtualProtect (UpdateRegionWatchers / UpdateImageRead protect under this lock); with ~10 game threads spinning
 			// here at once in the fault handler it got no core until Windows boosted it: ~2.5 s hitches while walking
-			// (stall watchdog 6.11). Live A/B on replays of Rafal's walk: 0 stalls instead of 1-8, +13-18% median fps.
+			// (found with a stall watchdog). Live A/B on replays of a recorded town walk: 0 stalls instead of 1-8, +13-18% median fps.
 			uint32_t spins  = 0;
 			uint32_t yields = 0;
 			while (m_lock.test_and_set(std::memory_order_acquire)) {

@@ -1,4 +1,4 @@
-// Texture relocation (map §3v, notes\PROJEKT-PRZENOSZENIE-TEKSTUR-2026-11-04.md): moving the clean textures that keep nearly
+// Texture relocation: moving the clean textures that keep nearly
 // empty VMA blocks alive. After the game streams textures in and out, device-local blocks stay allocated for a few
 // bindless-pinned textures each (4.11: 9 blocks >= 50% empty held 1.98 GB of holes for 326 MiB of residents). VMA frees
 // a block only when its last allocation goes, so the residents of the emptiest blocks get a new VkImage in a fuller block,
