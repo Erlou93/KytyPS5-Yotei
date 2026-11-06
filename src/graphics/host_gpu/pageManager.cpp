@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "kernel/memory.h"
 
+#include <thread>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -83,8 +84,24 @@ public:
 	explicit SpinGuard(std::atomic_flag& lock): m_lock(lock) {
 		if (m_lock.test_and_set(std::memory_order_acquire)) {
 			KYTY_PROFILER_BLOCK("PageLock::Wait");
+			// After ~25 us of spinning the waiter yields, after ~1 ms it sleeps 1 ms per round. The holder may be inside
+			// VirtualProtect (UpdateRegionWatchers / UpdateImageRead protect under this lock); with ~10 game threads spinning
+			// here at once in the fault handler it got no core until Windows boosted it: ~2.5 s hitches while walking
+			// (stall watchdog 6.11). Live A/B on replays of Rafal's walk: 0 stalls instead of 1-8, +13-18% median fps.
+			uint32_t spins  = 0;
+			uint32_t yields = 0;
 			while (m_lock.test_and_set(std::memory_order_acquire)) {
-				SpinPause();
+				while (m_lock.test(std::memory_order_relaxed)) {
+					SpinPause();
+					if (++spins >= 2048u) {
+						spins = 0;
+						if (++yields >= 40u) {
+							std::this_thread::sleep_for(std::chrono::milliseconds(1));
+						} else {
+							std::this_thread::yield();
+						}
+					}
+				}
 			}
 		}
 	}
