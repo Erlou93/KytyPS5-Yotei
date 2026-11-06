@@ -912,7 +912,23 @@ void GuestGpu::ExecutionThread() {
 			perf_process.emplace(PerfKind::Process);
 			live_busy.emplace();
 		}
-		operation->processor->Execute(*operation);
+		if (PassCensus::Enabled()) {
+			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
+			const auto kind  = operation->kind;
+			const int  k     = (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto ||
+			                    kind == GpuOperationKind::DrawIndirect)
+			                       ? 1
+			                       : (kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect) ? 2 : 0;
+			const auto pass  = operation->pass_id;
+			const auto wait0 = PassCensus::t_wait_ns;
+			const auto t0    = std::chrono::steady_clock::now();
+			operation->processor->Execute(*operation);
+			const auto ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+			PassCensus::NoteExecute(pass, k, ns, PassCensus::t_wait_ns - wait0);
+		} else {
+			operation->processor->Execute(*operation);
+		}
 		{
 			// KYTY_TEST_PAD_RECORD / KYTY_TEST_PAD_REPLAY: the gameplay-start anchor (debugSample.h GameplayStartNs).
 			static uint32_t last_present = 0, draws_in_frame = 0, frames_in_row = 0;
@@ -1304,6 +1320,7 @@ GpuOperation CommandProcessor::MakeOperation(GpuOperationKind kind) {
 	auto* const stream      = StreamGpu();
 	operation.sequence      = stream != nullptr ? stream->TakeSequence() : 0;
 	operation.num_instances = m_num_instances;
+	operation.pass_id       = PassCensus::CurrentPassId(this); // KYTY_TRACE_PASS_CENSUS (PASS_EXEC)
 	// Only draws, dispatches and state callbacks read registers.
 	if (kind != GpuOperationKind::Callback) {
 		operation.state = SnapshotState(operation.sequence);

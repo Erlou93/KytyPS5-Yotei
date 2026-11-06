@@ -96,6 +96,8 @@ struct GpuOperation {
 	GpuNumInstances   num_instances;
 	// Draws and dispatches: what the resolve thread resolved ahead, if anything.
 	RenderExecutor::ResolvedDraw* resolved = nullptr;
+	// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): the game marker pass it was emitted in.
+	uint16_t pass_id = 0;
 	union {
 		DrawIndexArgs       draw_index;
 		DrawAutoArgs        draw_auto;
