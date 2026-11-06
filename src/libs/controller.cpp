@@ -19,8 +19,10 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <chrono>
 #include <vector>
 
 namespace Libs::Controller {
@@ -1032,6 +1034,88 @@ static const std::vector<PadScriptSegment>& PadScript() {
 	return script;
 }
 
+// KYTY_TEST_PAD_RECORD=<file> (test tool): every change of the real pad state the game reads (buttons, the six axes) is
+// written with its time in ms since gameplay started (debugSample.h GameplayStartNs): "<ms> <buttons hex> LX LY RX RY L2 R2".
+// KYTY_TEST_PAD_REPLAY=<file>: after gameplay started, the state at each read is the recorded one at that time (time, not
+// frames: the game moves in real time, so another fps does not shift the route); before it, KYTY_TEST_PAD_SCRIPT applies.
+struct PadRecord {
+	int64_t  ms      = 0;
+	uint32_t buttons = 0;
+	std::array<int, static_cast<int>(Axis::AxisMax)> axes {};
+};
+
+static int64_t MsSinceGameplay() {
+	const int64_t start = Libs::Graphics::GameplayStartNs().load(std::memory_order_acquire);
+	if (start == 0) return -1;
+	return (std::chrono::steady_clock::now().time_since_epoch().count() - start) / 1000000;
+}
+
+static void RecordPad(const ControllerState& state) {
+	static FILE* const file = [] {
+		const char* path = std::getenv("KYTY_TEST_PAD_RECORD");
+		FILE*       f    = path != nullptr ? std::fopen(path, "w") : nullptr;
+		if (f != nullptr) std::fprintf(stderr, "TEST_PAD_RECORD %s\n", path);
+		return f;
+	}();
+	if (file == nullptr) return;
+	const int64_t ms = MsSinceGameplay();
+	if (ms < 0) return;
+	static PadRecord last {-1, 0xffffffffu, {-1, -1, -1, -1, -1, -1}};
+	bool same = state.buttons == last.buttons;
+	for (size_t a = 0; a < last.axes.size(); a++) same = same && state.axes[a] == last.axes[a];
+	if (same) return;
+	last.ms      = ms;
+	last.buttons = state.buttons;
+	for (size_t a = 0; a < last.axes.size(); a++) last.axes[a] = state.axes[a];
+	std::fprintf(file, "%lld %x %d %d %d %d %d %d\n", static_cast<long long>(ms), state.buttons, state.axes[0], state.axes[1],
+	             state.axes[2], state.axes[3], state.axes[4], state.axes[5]);
+	std::fflush(file);
+}
+
+static const std::vector<PadRecord>& PadReplay() {
+	static const std::vector<PadRecord> records = [] {
+		std::vector<PadRecord> out;
+		const char*            path = std::getenv("KYTY_TEST_PAD_REPLAY");
+		FILE*                  f    = path != nullptr ? std::fopen(path, "r") : nullptr;
+		if (f == nullptr) return out;
+		long long ms = 0;
+		unsigned  buttons = 0;
+		int       a[6]    = {};
+		while (std::fscanf(f, "%lld %x %d %d %d %d %d %d", &ms, &buttons, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5]) == 8) {
+			PadRecord r;
+			r.ms      = ms;
+			r.buttons = buttons;
+			for (int k = 0; k < 6; k++) r.axes[k] = a[k];
+			out.push_back(r);
+		}
+		std::fclose(f);
+		std::fprintf(stderr, "TEST_PAD_REPLAY %s records=%zu last_ms=%lld\n", path, out.size(),
+		             out.empty() ? 0ll : static_cast<long long>(out.back().ms));
+		return out;
+	}();
+	return records;
+}
+
+// True when a replay is loaded and gameplay started: the recorded state at this time replaces the pad state.
+static bool ApplyPadReplay(ControllerState& state) {
+	const auto& records = PadReplay();
+	if (records.empty()) return false;
+	const int64_t ms = MsSinceGameplay();
+	if (ms < 0) return false;
+	static size_t index = 0; // reads are serialised by the controller mutex
+	while (index + 1 < records.size() && records[index + 1].ms <= ms) index++;
+	if (records[index].ms > ms) {
+		state.buttons = 0;
+		for (size_t a = 0; a < 4; a++) state.axes[a] = 128;
+		state.axes[4] = state.axes[5] = 0;
+	} else {
+		state.buttons = records[index].buttons;
+		for (size_t a = 0; a < records[index].axes.size(); a++) state.axes[a] = records[index].axes[a];
+	}
+	state.time = LibKernel::KernelGetProcessTime();
+	return true;
+}
+
 // True while a script segment covers the current presented frame; its axes are applied to the state.
 static bool ApplyPadScript(ControllerState& state) {
 	const auto& script = PadScript();
@@ -1071,7 +1155,8 @@ void GameController::ReadState(ControllerState* state, bool* flag, int* count) {
 	*flag  = m_connected;
 	*count = m_connected_count;
 	*state = m_state;
-	if (ApplyPadScript(*state)) {
+	RecordPad(m_state); // KYTY_TEST_PAD_RECORD
+	if (ApplyPadReplay(*state) || ApplyPadScript(*state)) {
 		*flag  = true;
 		*count = std::max(*count, 1);
 	}
@@ -1090,8 +1175,9 @@ int GameController::ReadStates(ControllerState* states, int states_num, bool* fl
 
 	int ret_num = 0;
 
-	// KYTY_TEST_PAD_SCRIPT: one fresh scripted state per read while a segment is active.
-	if (ControllerState scripted = m_state; ApplyPadScript(scripted)) {
+	RecordPad(m_state); // KYTY_TEST_PAD_RECORD
+	// KYTY_TEST_PAD_SCRIPT / KYTY_TEST_PAD_REPLAY: one fresh scripted state per read while active.
+	if (ControllerState scripted = m_state; ApplyPadReplay(scripted) || ApplyPadScript(scripted)) {
 		*flag     = true;
 		*count    = std::max(*count, 1);
 		states[0] = scripted;

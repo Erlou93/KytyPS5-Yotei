@@ -910,6 +910,24 @@ void GuestGpu::ExecutionThread() {
 			live_busy.emplace();
 		}
 		operation->processor->Execute(*operation);
+		{
+			// KYTY_TEST_PAD_RECORD / KYTY_TEST_PAD_REPLAY: the gameplay-start anchor (debugSample.h GameplayStartNs).
+			static uint32_t last_present = 0, draws_in_frame = 0, frames_in_row = 0;
+			const auto      kind         = operation->kind;
+			if (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto || kind == GpuOperationKind::DrawIndirect) {
+				draws_in_frame++;
+			}
+			const uint32_t present = DebugPresentCount().load(std::memory_order_relaxed);
+			if (present != last_present) {
+				frames_in_row  = draws_in_frame > 3000u ? frames_in_row + 1u : 0u;
+				draws_in_frame = 0;
+				last_present   = present;
+				if (frames_in_row == 8u && GameplayStartNs().load(std::memory_order_relaxed) == 0) {
+					GameplayStartNs().store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
+					std::fprintf(stderr, "GAMEPLAY_START frame=%u\n", present);
+				}
+			}
+		}
 		const auto sequence = operation->sequence;
 		// Destroy the callback before the command processor may reuse what it references.
 		operation.reset();

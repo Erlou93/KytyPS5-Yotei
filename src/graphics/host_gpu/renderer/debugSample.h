@@ -393,6 +393,14 @@ inline std::atomic<uint32_t>& DebugPresentCount() {
 	return count;
 }
 
+// KYTY_TEST_PAD_RECORD / KYTY_TEST_PAD_REPLAY (test tool): steady-clock nanoseconds of the moment gameplay started (the first
+// of 8 presented frames in a row with more than 3000 draws, set once by the execution thread); 0 until then. Recording and
+// replaying pad input count time from here, so a different loading time does not shift the route.
+inline std::atomic<int64_t>& GameplayStartNs() {
+	static std::atomic<int64_t> ns {0};
+	return ns;
+}
+
 // KYTY_TRACE_FRAME_RANGE=<first>-<last>: every presented frame in the range is dumped.
 inline bool DebugFrameRange() {
 	static constinit Common::OnceObject<std::pair<uint32_t, uint32_t>> range_once;
