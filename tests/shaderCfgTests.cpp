@@ -1397,6 +1397,75 @@ void TestNormalizedImageContracts() {
         "Vulkan image-view compatibility classes diverged from production");
 }
 
+// KYTY_PERF_READONLY_GLC_LOADS: GLC loads of a program that writes no device
+// memory lose coherence (=1) or are marked for the plain/coherent comparison
+// (=2); a writing program and a load on a loop keep it.
+void TestReadOnlyGlcLoads() {
+  using namespace ShaderRecompiler::IR;
+
+  struct Result {
+    bool coherent;
+    bool verify;
+  };
+  // Memory 0: the GLC load's buffer; memory 1: another buffer for stores.
+  const auto run = [](int mode, const auto &build) {
+    Program program;
+    program.resource_tracking_complete = true;
+    program.stage = ShaderType::Pixel;
+    for (int index = 0; index < 2; index++) {
+      program.block_storage.push_back(std::make_unique<Block>());
+      program.blocks.push_back(program.block_storage.back().get());
+    }
+    program.memory_info.push_back(
+        {.kind = ResourceKind::Buffer, .coherent = true});
+    program.memory_info.push_back({.kind = ResourceKind::Buffer});
+    build(*program.blocks[0], *program.blocks[1]);
+    ApplyReadOnlyGlcLoads(program, mode);
+    return Result{program.memory_info[0].coherent,
+                  program.memory_info[0].readonly_glc_verify};
+  };
+  const auto load = [](Block &block) {
+    auto &inst = block.AppendNewInst(
+        ValueOpcode::LoadBufferU32,
+        {Value(0u), Value(0u), Value(0u), Value(0u), Value(true)});
+    inst.SetFlags(MemoryFlags{.index = 0});
+  };
+  const auto only_load = [&](Block &entry, Block &) { load(entry); };
+
+  const auto old_path = run(0, only_load);
+  Check(old_path.coherent && !old_path.verify,
+        "KYTY_PERF_READONLY_GLC_LOADS=0 changed a GLC load");
+  const auto read_only = run(1, only_load);
+  Check(!read_only.coherent && !read_only.verify,
+        "a GLC load of a read-only program kept device coherence");
+  const auto verified = run(2, only_load);
+  Check(!verified.coherent && verified.verify,
+        "KYTY_PERF_READONLY_GLC_LOADS=2 did not mark the GLC load for the "
+        "comparison");
+  const auto writer = run(1, [&](Block &entry, Block &) {
+    load(entry);
+    auto &store = entry.AppendNewInst(ValueOpcode::StoreBufferU32,
+                                      {Value(0u), Value(0u), Value(0u),
+                                       Value(0u), Value(1u), Value(true)});
+    store.SetFlags(MemoryFlags{.index = 1});
+  });
+  Check(writer.coherent,
+        "a GLC load of a program with buffer stores lost device coherence");
+  const auto image_writer = run(1, [&](Block &entry, Block &) {
+    load(entry);
+    entry.AppendNewInst(ValueOpcode::ImageWrite,
+                        {Value(0u), Value(0u), Value(0u), Value(true)});
+  });
+  Check(image_writer.coherent,
+        "a GLC load of a program with image stores lost device coherence");
+  const auto polling = run(1, [&](Block &entry, Block &loop) {
+    entry.AddBranch(&loop);
+    loop.AddBranch(&loop);
+    load(loop);
+  });
+  Check(polling.coherent, "a GLC load in a loop lost device coherence");
+}
+
 void TestShaderFeatureCollection() {
   using namespace ShaderRecompiler::IR;
 
@@ -16432,6 +16501,7 @@ int main(int argc, char** argv) {
       KYTY_CFG_CASE(TestNormalizedImageContracts),
       KYTY_CFG_CASE(TestViewLayersAlone),
       KYTY_CFG_CASE(TestShaderFeatureCollection),
+      KYTY_CFG_CASE(TestReadOnlyGlcLoads),
       KYTY_CFG_CASE(TestTypedSpirvSerialization),
       KYTY_CFG_CASE(TestDeferredSpirvPhiPatching),
       KYTY_CFG_CASE(TestCompilerStageInputOwnership),

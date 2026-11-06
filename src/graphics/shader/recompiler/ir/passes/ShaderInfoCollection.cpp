@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <fmt/format.h>
+#include <optional>
+#include <unordered_set>
+#include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
@@ -328,7 +331,7 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			} else if (address_access == AddressAccess::Write) {
 				return Fail("writable FLAT/GLOBAL addresses require GPU ownership tracking");
 			} else {
-				info.coherent_buffers |= memory.coherent;
+				info.coherent_buffers |= memory.coherent || memory.readonly_glc_verify;
 			}
 		}
 		if (buffer_access != BufferAccess::None) {
@@ -336,8 +339,13 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 				info.subgroup_local_invocation_id = true;
 			}
 			if (kind == ResourceKind::Buffer) {
-				info.coherent_buffers |= memory.coherent;
-				info.buffer_int64_atomics |= memory.IsCoherentBufferPairLoad(op);
+				// KYTY_PERF_READONLY_GLC_LOADS=2: the coherent load of a verified record needs the
+				// coherent alias (and the 64-bit alias for a pair load); the plain one keeps the
+				// plain aliases undecorated (no coherent_narrow).
+				auto coherent_load     = memory;
+				coherent_load.coherent = memory.coherent || memory.readonly_glc_verify;
+				info.coherent_buffers |= coherent_load.coherent;
+				info.buffer_int64_atomics |= coherent_load.IsCoherentBufferPairLoad(op);
 				if (memory.resource >= info.buffers.size()) {
 					return Fail("buffer operation has invalid resource metadata");
 				}
@@ -646,6 +654,85 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 		AddBuiltinInput(info, inputs.builtins[i]);
 	}
 	program.shader_info_complete = true;
+}
+
+namespace {
+
+// Whether an instruction can write memory that another invocation of the same draw or dispatch
+// reads: buffer, address and image stores and atomics, GDS writes, or a cache invalidation (it asks
+// for another writer's data). Scratch and LDS are not device memory a buffer load reads.
+bool WritesDeviceMemory(const Program& program, const Inst& inst) {
+	const auto op     = inst.GetOpcode();
+	const auto buffer = BufferAccessOf(op);
+	const auto image  = ImageOpcodeInfoOf(op).access;
+	if (buffer == BufferAccess::Write || buffer == BufferAccess::Atomic ||
+	    image == ImageAccess::Write || image == ImageAccess::Atomic ||
+	    op == ValueOpcode::DataCacheInvalidate) {
+		return true;
+	}
+	if (AddressOpcodeInfoOf(op).access == AddressAccess::Write) {
+		const auto index = inst.Flags<MemoryFlags>().index;
+		const auto kind  = index < program.memory_info.size() ? program.memory_info[index].kind
+		                                                      : ResourceKind::Global;
+		return kind != ResourceKind::Scratch && kind != ResourceKind::FlatLocal;
+	}
+	const auto shared = SharedAccessOf(op);
+	if (shared != SharedAccess::None && shared != SharedAccess::Read) {
+		const auto index = inst.Flags<MemoryFlags>().index;
+		return index >= program.memory_info.size() ||
+		       program.memory_info[index].kind == ResourceKind::Gds;
+	}
+	return false;
+}
+
+// Whether `start` can reach itself through the block graph (it lies on a loop).
+bool BlockOnCycle(const Block* start) {
+	std::vector<const Block*> pending(start->ImmSuccessors().begin(), start->ImmSuccessors().end());
+	std::unordered_set<const Block*> visited;
+	while (!pending.empty()) {
+		const auto* block = pending.back();
+		pending.pop_back();
+		if (block == start) return true;
+		if (!visited.insert(block).second) continue;
+		pending.insert(pending.end(), block->ImmSuccessors().begin(), block->ImmSuccessors().end());
+	}
+	return false;
+}
+
+} // namespace
+
+uint32_t ApplyReadOnlyGlcLoads(Program& program, int mode) {
+	if (mode == 0 || program.has_address_writes) return 0;
+	// Per memory record: 1 = GLC loads outside loops only, 2 = also a GLC load in a block on a
+	// cycle (it may poll).
+	std::vector<uint8_t> state(program.memory_info.size());
+	bool                 any = false;
+	for (const auto* block: program.blocks) {
+		std::optional<bool> on_cycle;
+		for (const auto& inst: *block) {
+			if (WritesDeviceMemory(program, inst)) return 0;
+			const auto op = inst.GetOpcode();
+			if (BufferAccessOf(op) != BufferAccess::Read &&
+			    AddressOpcodeInfoOf(op).access != AddressAccess::Read)
+				continue;
+			const auto index = inst.Flags<MemoryFlags>().index;
+			if (index >= program.memory_info.size() || !program.memory_info[index].coherent)
+				continue;
+			if (!on_cycle) on_cycle = BlockOnCycle(block);
+			state[index] = std::max<uint8_t>(state[index], *on_cycle ? 2u : 1u);
+			any          = true;
+		}
+	}
+	if (!any) return 0;
+	uint32_t changed = 0;
+	for (size_t index = 0; index < state.size(); ++index) {
+		if (state[index] != 1u) continue;
+		auto& memory               = program.memory_info[index];
+		memory.coherent            = false;
+		memory.readonly_glc_verify = mode == 2;
+		changed++;
+	}
+	return changed;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

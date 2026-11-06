@@ -67,6 +67,7 @@ village; below ~2,000 draws the gain flattens.
 | Idea | Result | Kept? |
 |---|---|---|
 | GPU stage threads pinned to their own physical cores (TheCruZ's design) | **+18%** at the gate (pinned 16.3 vs unpinned 13.8 fps, 6 of 6 pairs) | yes, now chosen per processor |
+| GLC loads of shaders that write no device memory read through L1 (`KYTY_PERF_READONLY_GLC_LOADS`, 2026-11-03) | GPU −0.5 ms per frame at the gate (one tessellated draw 0.50 → 0.03 ms); no fps change, the execution thread limits the frame; `=2` 0 differences in 3.9 billion loads | off, offered |
 | Read window fitted to the host-mapped read (2026-11-02) | +1.8% standing, +7.7% walking, same draws | yes |
 | Removing the image half of the old read-ahead "scout" thread | +3.9% at the gate | yes (removed) |
 | Cheaper draws: a short path for draws equal to the previous one ("draw-path rebuild", 2026-10-28) | ceiling **~0%** (9.6 vs 9.8 fps): the work it removed ran on another thread in parallel | no, reverted |

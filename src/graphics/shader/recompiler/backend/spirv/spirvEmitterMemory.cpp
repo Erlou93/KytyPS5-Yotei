@@ -3677,14 +3677,15 @@ uint32_t EmitGetBufferResourceIndex(ValueEmitContext& ctx, const IR::Inst& inst)
 	                                 buffer.indirect_search_iterations, UINT32_MAX);
 }
 
-void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
-	const auto  op  = inst.GetOpcode();
-	const auto& mem = ctx.Memory(inst);
-	if (op == IR::ValueOpcode::LoadAddressU32 && mem.planning_only) return;
-	const auto buffer_components = IR::BufferComponentCount(op);
-	const auto shared_components = IR::SharedComponentCount(op);
-	const auto address_info      = IR::AddressOpcodeInfoOf(op);
-	uint32_t   value;
+namespace {
+
+uint32_t EmitLoadMemoryValue(ValueEmitContext& ctx, const IR::Inst& inst) {
+	const auto  op                = inst.GetOpcode();
+	const auto& mem               = ctx.Memory(inst);
+	const auto  buffer_components = IR::BufferComponentCount(op);
+	const auto  shared_components = IR::SharedComponentCount(op);
+	const auto  address_info      = IR::AddressOpcodeInfoOf(op);
+	uint32_t    value;
 	if (mem.kind == IR::ResourceKind::FlatLocal)
 		value = LoadLocalFlat(ctx, inst);
 	else if (buffer_components > 1u || (buffer_components == 1u && mem.formatted && mem.data_bits == 16u) ||
@@ -3711,6 +3712,69 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 		value = LoadSubword(ctx, inst, mem, 16, false);
 	else
 		value = LoadWord(ctx, inst, mem);
+	return value;
+}
+
+// KYTY_PERF_READONLY_GLC_LOADS=2 (ShaderIR.h): `plain` is the load without coherence; the coherent
+// load of the same record (the path of the switch's =0) is made too and gives the result. The two
+// are compared where the coherent one is a real device-coherent read: a 32-bit storage element
+// through the Coherent alias (or the 64-bit atomic pair load), or a physical pointer; other loads
+// are counted as not compared.
+uint32_t VerifyReadOnlyGlcLoad(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t plain) {
+	auto&      state        = ctx.state;
+	const auto op           = inst.GetOpcode();
+	const auto mem          = ctx.Memory(inst);
+	auto       coherent_mem = mem;
+	coherent_mem.coherent   = true;
+	const auto components =
+	    op == IR::ValueOpcode::LoadAddressU32 ? 1u : IR::BufferComponentCount(op);
+	const bool u32_result =
+	    op == IR::ValueOpcode::LoadAddressU32 || op == IR::ValueOpcode::LoadBufferU32 ||
+	    op == IR::ValueOpcode::LoadBufferU32x2 || op == IR::ValueOpcode::LoadBufferU32x3 ||
+	    op == IR::ValueOpcode::LoadBufferU32x4;
+	const bool coherent_binding = mem.kind == IR::ResourceKind::Buffer
+	                                  ? IR::StorageBufferElementBits(state.program, mem) == 32u &&
+	                                        (state.coherent_buffers_alias.variable != 0u ||
+	                                         coherent_mem.IsCoherentBufferPairLoad(op))
+	                                  : IR::IsAddressResourceKind(mem.kind) &&
+	                                        mem.kind != IR::ResourceKind::Scratch &&
+	                                        mem.kind != IR::ResourceKind::FlatLocal;
+	if (!u32_result || !coherent_binding || state.fault_buffer_variable == 0u) {
+		if (state.fault_buffer_variable != 0u)
+			(void)FaultDiagAdd(state, IR::ReadOnlyGlcDiagWord + 2u, ConstantU32(state, 1));
+		return plain;
+	}
+	ctx.memory_override_inst = &inst;
+	ctx.memory_override      = coherent_mem;
+	const auto coherent      = EmitLoadMemoryValue(ctx, inst);
+	ctx.memory_override_inst = nullptr;
+	// Component by component: a two-dword result is the pair type, not a vector.
+	const auto element = [&](uint32_t composite, uint32_t index) {
+		if (components == 1u) return composite;
+		const auto id = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), id, composite, index);
+		return id;
+	};
+	uint32_t differ = 0;
+	for (uint32_t index = 0; index < components; ++index) {
+		const auto one = Binary(state, spv::OpINotEqual, TypeBool(state), element(plain, index),
+		                        element(coherent, index));
+		differ = index == 0u ? one : Binary(state, spv::OpLogicalOr, TypeBool(state), differ, one);
+	}
+	(void)FaultDiagAdd(state, IR::ReadOnlyGlcDiagWord, ConstantU32(state, 1));
+	(void)FaultDiagAdd(
+	    state, IR::ReadOnlyGlcDiagWord + 1u,
+	    Select(state, TypeU32(state), differ, ConstantU32(state, 1), ConstantU32(state, 0)));
+	return coherent;
+}
+
+} // namespace
+
+void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
+	const auto& mem = ctx.Memory(inst);
+	if (inst.GetOpcode() == IR::ValueOpcode::LoadAddressU32 && mem.planning_only) return;
+	auto value = EmitLoadMemoryValue(ctx, inst);
+	if (mem.readonly_glc_verify) value = VerifyReadOnlyGlcLoad(ctx, inst, value);
 	ctx.Define(inst, value);
 	if (mem.kind == IR::ResourceKind::Lds) ctx.state.lds_pair_synced = false; // (EmitPairLdsWriteSync)
 }

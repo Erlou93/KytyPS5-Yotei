@@ -90,6 +90,9 @@ struct MemoryInfo {
 	bool                    idxen                                                 = false;
 	bool                    offen                                                 = false;
 	bool                    coherent                                              = false;
+	// KYTY_PERF_READONLY_GLC_LOADS=2: a GLC load whose coherence the switch drops; the emitter
+	// loads it both ways.
+	bool                    readonly_glc_verify                                   = false;
 	bool                    planning_only                                         = false;
 	// Record-keyed V#s: a BDA access through a record-keyed V# (its guest ranges are listed per
 	// materialization), so its stores and atomics are no writes through unknown addresses.
@@ -793,6 +796,30 @@ inline int ClampNanMode() {
 		const char* value = Common::ShaderEnv::Read("KYTY_FIX_CLAMP_NAN");
 		const int   m     = value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
 		if (m != 0) std::fprintf(stderr, "FIX_CLAMP_NAN mode=%d\n", m);
+		return m;
+	}();
+	return mode;
+}
+// KYTY_PERF_READONLY_GLC_LOADS (default 0 = today; 1 on; 2 verify): a GLC/DLC vector load is a
+// device-coherent read (the Coherent buffer alias + Volatile, or a Coherent physical pointer),
+// which NVIDIA serves from L2 instead of L1. It can only differ from a plain read when another
+// invocation of the same draw or dispatch writes the memory while the command runs: earlier
+// commands' writes are made visible by the renderer's barriers whatever the decoration. A program
+// with no buffer, address, image or GDS stores or atomics and no cache invalidation
+// (ApplyReadOnlyGlcLoads, ShaderInfoCollection.cpp) cannot be such a writer, and no other command
+// writes memory a running command reads without a barrier between them. =1: its GLC loads read
+// through the plain bindings (a load in a block on a cycle keeps coherence, since it may poll). =2:
+// the old coherent load still gives the result; the plain load is made too and the two are
+// compared, counted in the fault buffer's diagnostic words ReadOnlyGlcDiagWord: +0 compared loads,
+// +1 loads whose values differ, +2 loads not compared (16-bit storage elements: their alias cannot
+// be both plain and coherent) (PERF readonly_glc_loads verify).
+inline constexpr uint32_t ReadOnlyGlcDiagWord = 21140;
+
+inline int ReadOnlyGlcLoadsMode() {
+	static const int mode = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_PERF_READONLY_GLC_LOADS");
+		const int   m     = value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
+		if (m != 0) std::fprintf(stderr, "PERF_READONLY_GLC_LOADS mode=%d\n", m);
 		return m;
 	}();
 	return mode;

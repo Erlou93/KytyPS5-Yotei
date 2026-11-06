@@ -364,6 +364,10 @@ struct ValueEmitContext {
 	uint32_t                                                           scratch_u32_variable = 0;
 	ValueEmitContext*                                                  other_half = nullptr;
 	uint32_t                                                           half       = 0;
+	// KYTY_PERF_READONLY_GLC_LOADS=2 (EmitLoadMemory): while set, Memory(*memory_override_inst) is
+	// memory_override.
+	const IR::Inst* memory_override_inst = nullptr;
+	IR::MemoryInfo  memory_override {};
 };
 
 // spirvEmitterLaneShare.cpp.
@@ -513,6 +517,12 @@ inline bool ClampNanCheckBinding(const IR::Program& program) {
 		}
 	}
 	return false;
+}
+
+// KYTY_PERF_READONLY_GLC_LOADS=2: a program with a verified GLC load gets the fault buffer for the
+// counts.
+inline bool ReadOnlyGlcVerifyBinding(const IR::Program& program) {
+	return std::ranges::any_of(program.memory_info, &IR::MemoryInfo::readonly_glc_verify);
 }
 
 // DX10_CLAMP of the program: compute from COMPUTE_PGM_RSRC1 (ShaderComputeInputInfo::dx10_clamp); the PS and GS/NGG

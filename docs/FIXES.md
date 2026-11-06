@@ -3,6 +3,38 @@
 What was broken, why, how it was fixed and what the fix costs. Newest first. Each entry names the commit that holds the
 fix, so the code and its comment can be read next to it.
 
+## Cache-bypassing loads of read-only shaders read through L1 (2026-11-03, `KYTY_PERF_READONLY_GLC_LOADS`, off)
+
+**Symptom.** None visible. A tessellated draw in the village (about two per frame) took 0.50 ms of GPU time per
+frame; its first stage has a dozen loads with GLC set.
+
+**Cause.** A GLC/DLC vector load (bypass the GPU's L0/L1 caches) is emitted as a device-coherent access: the
+`buffers_coherent` alias with Volatile, or a Coherent physical pointer. NVIDIA serves such loads from L2 and skips L1,
+so a shader that reads the same data many times pays the L2 latency every time. The coherence buys nothing in a
+program that writes no device memory: only another invocation of the same draw or dispatch could change the data while
+the command runs, and a program with no buffer, address, image or GDS stores or atomics and no cache invalidation is
+not such a writer. Writes of earlier commands are made visible by the emulator's barriers, which do not depend on the
+decoration. The PS5's GLC exists to see data another wave wrote moments ago; in a read-only program no wave of the
+command writes.
+
+**Fix.** `ApplyReadOnlyGlcLoads` (`ir/passes/ShaderInfoCollection.cpp`) runs before the shader info is collected. In a
+program that writes no device memory it takes the coherence off the GLC loads, which then read through the plain
+bindings. A GLC load in a block on a loop keeps it: a loop that reads the same address may be waiting for a writer in
+another command. `=2` makes every such load both ways in the same invocation, uses the coherent result and counts the
+loads whose values differ (`PERF readonly_glc_loads verify`). The idea comes from another KytyPS5 branch (CarRamRod-963,
+"shader: drop device coherence from GLC loads of read-only programs"), where a full-screen compose pass went from 6.3 to
+0.26 ms.
+
+**Verify.** `=2` at the gate at night, 300 s standing and 180 s walking through the village: 3.88 billion loads
+compared, 0 differences. 0.24 billion 16-bit loads were not compared: their storage alias cannot be plain and coherent at
+once in one program.
+
+**Cost.** A gain on the GPU only. Standing at the gate (RTX 5080, driver 617.42): the draw above 0.50 → 0.03 ms per
+frame, the 11 changed programs together 0.92 → 0.43 ms, GPU busy 35.7 → 35.2 ms per frame (three pairs of separate
+runs, every run with the switch below every run without). The frame rate does not change measurably: the frame is
+limited by the execution thread (see PERFORMANCE.md). The switch changes the SPIR-V, so it cannot be toggled in a live
+A/B. Default off until it has been tested on more of the game.
+
 ## GPU pipeline threads on whole cores of any processor (2026-11-02, `cfb35beab`)
 
 **Symptom.** None visible on the development PC. The emulator pins its four GPU pipeline threads (execution, command

@@ -188,7 +188,8 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 	expected[static_cast<size_t>(Kind::SharedMemory)] = uses_lds && lds_storage;
 	expected[static_cast<size_t>(Kind::BdaPagetable)] = program.info.uses_dma;
 	expected[static_cast<size_t>(Kind::FaultBuffer)] = program.info.uses_dma || Emitter::ClampNanCheckBinding(program) ||
-	                                                   Emitter::RtTripsCheckBinding(program); // KYTY_DIAG_RT_TRIPS
+	                                                   Emitter::RtTripsCheckBinding(program) || // KYTY_DIAG_RT_TRIPS
+	                                                   Emitter::ReadOnlyGlcVerifyBinding(program);
 	// Uniform const buffers (ShaderIR.h): ReadConst through FlattenedSrtUniform, mapping reads through FlattenedSrt.
 	const bool srt_uniform = read_const && IR::ReadConstUniform(program.srt_reads.size());
 	expected[static_cast<size_t>(Kind::FlattenedSrt)] = srt_uniform ? srt_mapping : (srt_mapping || read_const);

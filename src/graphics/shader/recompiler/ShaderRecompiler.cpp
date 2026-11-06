@@ -972,6 +972,9 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	}
 	mark(5);
 
+	IR::ApplyReadOnlyGlcLoads(
+	    ir, IR::ReadOnlyGlcLoadsMode()); // KYTY_PERF_READONLY_GLC_LOADS (ShaderIR.h)
+
 	// KYTY_TRACE_STARTUP: where a slow compile goes (prepare = specialization, identities, dead code, exec-select
 	// elision; collect = shader info; emit = SPIR-V), one STARTUP_SLOW_COMPILE line for compiles of 200 ms or more.
 	const auto collect_begin   = startup_trace ? std::chrono::steady_clock::now() : emit_begin;

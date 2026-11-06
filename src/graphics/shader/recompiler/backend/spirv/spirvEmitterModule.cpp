@@ -253,7 +253,8 @@ void DefineDescriptors(EmitterState& state) {
 	    info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer;
 	counts[static_cast<size_t>(Kind::BdaPagetable)] = info.uses_dma;
 	counts[static_cast<size_t>(Kind::FaultBuffer)] = info.uses_dma || ClampNanCheckBinding(state.program) ||
-	                                                 RtTripsCheckBinding(state.program); // KYTY_DIAG_RT_TRIPS
+	                                                 RtTripsCheckBinding(state.program) || // KYTY_DIAG_RT_TRIPS
+	                                                 ReadOnlyGlcVerifyBinding(state.program);
 	// Uniform const buffers (ShaderIR.h): ReadConst reads FlattenedSrtUniform; the storage binding keeps the SRT mapping
 	// reads of GPU-selected descriptors (ValidateNativeProgram expects the same split).
 	const bool srt_uniform = info.uses_read_const && IR::ReadConstUniform(state.program.srt_reads.size());
@@ -320,6 +321,7 @@ void DefineDescriptors(EmitterState& state) {
 				// buffer writes in the shader, no invocation of the command produces data a plain read could see early
 				// or late; earlier commands are made visible by the emulator's barriers; the guest's own non-GLC loads
 				// go through its non-coherent GL0/GL1 caches as well. The GLC accesses stay Coherent + Volatile.
+				// KYTY_PERF_READONLY_GLC_LOADS (ShaderIR.h) drops it in programs that write no device memory.
 				const bool per_access_coherence = info.coherent_buffers && !info.buffer_writes && !info.coherent_narrow &&
 				                                  !state.program.has_address_writes;
 				for (uint32_t alias = 0; alias < used.size(); ++alias) {

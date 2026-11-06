@@ -117,6 +117,11 @@ static_assert(ShaderRecompiler::IR::BindlessCensusWord >= IndirectLoadFast::Diag
 static_assert(ShaderRecompiler::IR::WaterfallRecord0CensusWord >= ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords &&
               ShaderRecompiler::IR::WaterfallRecord0CensusWord + ShaderRecompiler::IR::WaterfallRecord0CensusWords <= BufferCache::FAULT_DIAG_WORDS);
 
+static_assert(ShaderRecompiler::IR::ReadOnlyGlcDiagWord >=
+                  ShaderRecompiler::IR::WaterfallRecord0CensusWord +
+                      ShaderRecompiler::IR::WaterfallRecord0CensusWords &&
+              ShaderRecompiler::IR::ReadOnlyGlcDiagWord + 3 <= BufferCache::FAULT_DIAG_WORDS);
+
 // KYTY_DIAG_RT_TRIPS: one fault pass's copy of the diagnostic tail (layout: BufferCache::FAULT_DIAG_*).
 void FaultManager::ReportDiagTail(const uint32_t* tail) {
 	// KYTY_PERF_BDA_ENTRY_SHARE=2: shared page-table entries checked against the old lookup (mismatches must stay 0).
@@ -163,6 +168,24 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 			             "other_sel_x=%08x\n",
 			             static_cast<unsigned long long>(checks), static_cast<unsigned long long>(mismatches),
 			             static_cast<unsigned long long>(others), formats[3], formats[2], formats[1], formats[0], selectors);
+		}
+	}
+	// KYTY_PERF_READONLY_GLC_LOADS=2: GLC loads of read-only programs loaded plain and coherent
+	// (mismatches must stay 0); unchecked counts the loads whose coherent form is not a separate
+	// binding (16-bit storage elements).
+	if (ShaderRecompiler::IR::ReadOnlyGlcLoadsMode() == 2) {
+		constexpr auto  word   = ShaderRecompiler::IR::ReadOnlyGlcDiagWord;
+		static uint64_t checks = 0, mismatches = 0, unchecked = 0, passes = 0;
+		checks += tail[word];
+		mismatches += tail[word + 1];
+		unchecked += tail[word + 2];
+		if ((++passes % 256u) == 0u || tail[word + 1] != 0u) {
+			std::fprintf(
+			    stderr,
+			    "PERF readonly_glc_loads verify checks=%llu mismatches=%llu unchecked=%llu\n",
+			    static_cast<unsigned long long>(checks),
+			    static_cast<unsigned long long>(mismatches),
+			    static_cast<unsigned long long>(unchecked));
 		}
 	}
 	if (ShaderRecompiler::IR::BindlessPlaceholderCensus()) { // KYTY_DIAG_BINDLESS_PLACEHOLDER_CENSUS: lanes by slot read
@@ -346,7 +369,8 @@ void FaultManager::ProcessFaultBuffer() {
 	const auto diag_offset = MaxPendingFaults * PageFaultAreaSize * 2 + m_current_area * DiagAreaSize;
 	if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
-	    ShaderRecompiler::IR::WaterfallRecord0Census()) { // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+	    ShaderRecompiler::IR::WaterfallRecord0Census() || // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+	    ShaderRecompiler::IR::ReadOnlyGlcLoadsMode() == 2) { // + KYTY_PERF_READONLY_GLC_LOADS=2
 		const auto tail_offset = uint64_t {BufferCache::FAULT_DIAG_BASE} * sizeof(uint32_t);
 		vk::BufferMemoryBarrier2 to_copy {};
 		to_copy.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -399,7 +423,8 @@ void FaultManager::ProcessFaultBuffer() {
 		if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    ShaderRecompiler::IR::ClampNanMode() == 2 ||
 	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
-		    ShaderRecompiler::IR::WaterfallRecord0Census()) { // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+		    ShaderRecompiler::IR::WaterfallRecord0Census() || // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+		    ShaderRecompiler::IR::ReadOnlyGlcLoadsMode() == 2) { // KYTY_PERF_READONLY_GLC_LOADS=2
 			m_download_buffer.Invalidate(diag_offset, DiagAreaSize);
 			ReportDiagTail(std::bit_cast<const uint32_t*>(m_download_buffer.Mapped().data() + diag_offset));
 		}
