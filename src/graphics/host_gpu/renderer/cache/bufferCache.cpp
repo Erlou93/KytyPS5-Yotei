@@ -1764,7 +1764,15 @@ bool BufferCache::InDirectRange(uint64_t vaddr, uint64_t size) const {
 bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 	if (vaddr < 0x2002600000ull || vaddr >= 0x2010000000ull || g_ring_frames < 3) return false;
 	const uint64_t page       = vaddr & ~uint64_t {0xfff};
-	const uint64_t prev_start = g_ring_frame_ticks[(g_ring_frames - 2) % g_ring_frame_ticks.size()];
+	// KYTY_DIAG_CEILING_RING_ONE_FRAME (measurement only, APPROXIMATION; live A/B): bytes written before the CURRENT
+	// execution-thread frame began count as dead (one frame younger than the rule); the night 7/8.11 BAR study's idea,
+	// whose game-side assumption is not proven - only a ceiling for Rafał's decision.
+	static const uint32_t one_frame_fixed = [] {
+		const char* v = std::getenv("KYTY_DIAG_CEILING_RING_ONE_FRAME");
+		return v != nullptr && v[0] == '1' ? 1u : 0u;
+	}();
+	const uint64_t back       = Common::LiveAb::Gate(Common::LiveAb::Switch::DiagCeilingRingOneFrame, one_frame_fixed) != 0u ? 1u : 2u;
+	const uint64_t prev_start = g_ring_frame_ticks[(g_ring_frames - back) % g_ring_frame_ticks.size()];
 	std::vector<std::pair<uint64_t, uint64_t>> dead;
 	bool                                       live = false;
 	m_gpu_modified_ranges.ForEachInRange(page, 4096, [&](uint64_t start, uint64_t end) {

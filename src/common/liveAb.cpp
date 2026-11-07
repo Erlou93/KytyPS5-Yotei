@@ -48,6 +48,9 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Measurement only (APPROXIMATION): per write fault, whether ring bytes from the previous execution-thread frame
+    // also count as dead (bufferCache.cpp DropDeadRingBytes); nothing outlives the fault.
+    {Switch::DiagCeilingRingOneFrame, "KYTY_DIAG_CEILING_RING_ONE_FRAME", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
