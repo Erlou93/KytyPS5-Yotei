@@ -50,6 +50,8 @@ constexpr SwitchInfo Switches[] = {
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
     // Exact: per recorded command, the open-buffer size at which a busy GPU is handed the buffer anyway.
     {Switch::SubmitBound, "KYTY_PERF_SUBMIT_BOUND", 1048576},
+    // Exact: per wait, how long the GPU thread polls the timeline value before blocking; the same tick is waited for.
+    {Switch::SemaphoreSpinUs, "KYTY_PERF_SEMAPHORE_SPIN_US", 100000},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
