@@ -5,6 +5,7 @@
 #include "kernel/pthread.h"
 
 #include "common/assert.h"
+#include "common/liveAb.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -1514,7 +1515,19 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 		// The page bit covers every GPU-dirty byte (memoryTracker invariant): test it before the range map.
 		const bool gpu_modified = buffers.IsRegionGpuModified(vaddr, size);
 		const bool gpu_dirty    = gpu_modified && buffers.HasGpuDirtyBytes(vaddr, size);
-		if (gpu_dirty) {
+		// KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION; live A/B): stale bytes, no download.
+		static const uint32_t srt_no_wait_fixed = [] {
+			const char* v = std::getenv("KYTY_DIAG_CEILING_SRT_NO_WAIT");
+			return v != nullptr && v[0] == '1' ? 1u : 0u;
+		}();
+		const bool srt_no_wait =
+		    gpu_dirty && Common::LiveAb::Gate(Common::LiveAb::Switch::DiagCeilingSrtNoWait, srt_no_wait_fixed) != 0u;
+		if (srt_no_wait) {
+			static std::atomic<uint64_t> skipped {0};
+			const uint64_t n = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+			if ((n & (n - 1)) == 0) std::fprintf(stderr, "DIAG_CEILING_SRT_NO_WAIT skipped=%llu\n", static_cast<unsigned long long>(n));
+		}
+		if (gpu_dirty && !srt_no_wait) {
 			KYTY_PROFILER_BLOCK("SrtWalker::Read");
 			Graphics::PerfReasonScope reason(Graphics::PerfReason::SrtWalker);
 			buffers.ReadMemory(vaddr, size);

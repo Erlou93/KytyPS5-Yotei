@@ -44,6 +44,10 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION): whether draw and dispatch packets inside the listed marker passes return before the
     // renderer (guest_gpu/command_processor/passCensus.cpp; the list in KYTY_DIAG_CEILING_FREE_PASSES).
     {Switch::DiagCeilingFreePasses, "KYTY_DIAG_CEILING_FREE_PASSES", 1},
+    // Measurement only (APPROXIMATION, cutscene ceiling 7.11): whether the SRT walker reads GPU-dirty bytes from the
+    // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
+    // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
+    {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
