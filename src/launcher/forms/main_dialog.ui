@@ -1110,7 +1110,7 @@
                   </size>
                  </property>
                  <property name="toolTip">
-                  <string>Compile threads. Default: the KYTY_SHADER_PRECOMPILE_THREADS setting (6).</string>
+                  <string>Compile threads. Default: the KYTY_SHADER_PRECOMPILE_THREADS setting (8).</string>
                  </property>
                  <property name="specialValueText">
                   <string>Default</string>
