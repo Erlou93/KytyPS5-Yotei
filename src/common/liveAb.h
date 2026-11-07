@@ -35,6 +35,7 @@ enum class Switch : uint32_t {
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
 	SubmitBound,               // KYTY_PERF_SUBMIT_BOUND (exact: only where the same commands are split)
+	SemaphoreSpinUs,           // KYTY_PERF_SEMAPHORE_SPIN_US (exact: only how a reached tick is noticed)
 	Count
 };
 
