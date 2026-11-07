@@ -41,12 +41,14 @@ of system memory in play; with 16 GB Windows runs out of memory and pages to dis
    to itself, the launcher its settings, `Kyty.ini`; nothing is written anywhere else).
 2. Start `launcher.exe` (not `kyty_emulator.exe`: only the launcher prepares the shaders), choose your Ghost of Yōtei
    dump (game version **2.002**, the one supported and tested since v0.1.4; 1.512 still starts but is no longer
-   tested and has no shader hints): its folder or its `.zar` archive, and press **Play**.
-3. **First start:** the package ships shader hints for the game (`hints\`, a list of the shaders the game uses, without
-   any game code). On the first Play the launcher finds those shaders in your game files and compiles them before the
-   game starts; this takes a few minutes and runs only once. The game then starts by itself. Without it the first
-   hours stutter while shaders compile during play. The v0.1.5 hints (6,880 shaders, 8,001 pipelines) cover the
-   game **from the start to the Snake fight and the open world** around it: other areas
+   tested and has no shader hints): its folder or its `.zar` archive.
+3. **Import the shader hints, then precompile (required since v0.1.6):** the package ships shader hints for the game
+   (`hints\`, a list of the shaders the game uses, without any game code). Shaders page → **Import hints…** → choose
+   `hints\PPSA26344_02.002.000.kyhints`. The launcher finds those shaders in your game files and compiles them; this
+   takes a few minutes and runs only once. Until the hints are imported, **Precompile** and **Play** stay disabled, and
+   **Play** stays disabled until the precompile has finished (a paused one finishes with *Continue precompiling*).
+   Without hints the first hours stutter while shaders compile during play. The v0.1.6 hints (7,014 shaders, 8,188
+   pipelines) cover the game **from the start to the Snake fight, the open world and further areas**: other areas
    compile their shaders while you play, with short stutters the first time you reach them. Shaders compiled while
    playing are saved, so the next visit is smooth.
 4. **Graphics mode:** the game's own *Performance* mode is the one tested. In *Quality* mode the game changes its
