@@ -235,6 +235,11 @@ private:
 	static int                                  g_precompile_threads; // 0: the emulator's setting
 	static bool                                 g_precompile_on_start;
 	static QMap<QString, QPair<qint64, qint64>> g_precompile_progress; // title id -> compiled, all
+	// v0.1.6 first-start steps for a game version whose hints the package ships (hints\<title>_<version>.kyhints):
+	// 1 = the hints were imported, 2 = a precompile then finished. Play waits for 2, Precompile for 1.
+	static QMap<QString, int> g_shader_setup; // "<title id>_<version>" -> step
+	[[nodiscard]] QString ShippedHintsKey(const ConfigurationItem* item) const; // empty: no hints shipped for it
+	[[nodiscard]] int     ShaderSetupStep(const ConfigurationItem* item) const;   // 2 when no hints are shipped
 
 	Ui::MainDialog* m_ui             = {nullptr};
 	MainDialog*     m_main_dialog    = nullptr;
@@ -279,6 +284,7 @@ bool       MainDialogPrivate::g_check_updates_on_startup = true;
 int        MainDialogPrivate::g_precompile_threads       = 0;
 bool       MainDialogPrivate::g_precompile_on_start      = true;
 QMap<QString, QPair<qint64, qint64>> MainDialogPrivate::g_precompile_progress;
+QMap<QString, int>                   MainDialogPrivate::g_shader_setup;
 
 MainDialog::MainDialog(QWidget* parent): QDialog(parent), m_p(new MainDialogPrivate(this)) {
 	m_p->Setup(this);
@@ -679,6 +685,19 @@ QString MainDialogPrivate::HintsDir() const {
 	return QFileInfo(m_interpreter).absoluteDir().filePath(HINTS_DIR);
 }
 
+QString MainDialogPrivate::ShippedHintsKey(const ConfigurationItem* item) const {
+	if (item == nullptr || m_interpreter.isEmpty()) return {};
+	const auto& info = item->GetInfo();
+	if (info.title_id.isEmpty() || info.gameVersion.isEmpty()) return {};
+	const auto key = info.title_id + QLatin1Char('_') + info.gameVersion;
+	return QDir(HintsDir()).exists(key + QStringLiteral(".kyhints")) ? key : QString();
+}
+
+int MainDialogPrivate::ShaderSetupStep(const ConfigurationItem* item) const {
+	const auto key = ShippedHintsKey(item);
+	return key.isEmpty() ? 2 : g_shader_setup.value(key, 0);
+}
+
 QString MainDialogPrivate::FirstStartHints(const QString& title, const QString& version) const {
 	if (title.isEmpty() || version.isEmpty() || m_interpreter.isEmpty() || m_first_start_hints.contains(title)) {
 		return {};
@@ -991,8 +1010,13 @@ void MainDialogPrivate::UpdatePlaySummary(const ConfigurationItem* item) {
 	    !game_info.basedir.isEmpty() && (QDir(game_info.basedir).exists() || GameContent::IsArchive(game_info.basedir));
 	const auto game = game_info.title_id.isEmpty() ? game_info.name : game_info.title_id;
 	m_ui->play_eyebrow->setText((game + (folder_ok ? tr(" · found") : tr(" · folder missing"))).toUpper());
+	const int setup = ShaderSetupStep(item);
 	if (const auto emulator = EmulatorCheck(); emulator.has_value()) {
 		m_ui->play_title->setText(emulator->title);
+	} else if (!item->IsRunning() && folder_ok && setup == 0) {
+		m_ui->play_title->setText(tr("Import shader hints first"));
+	} else if (!item->IsRunning() && folder_ok && setup == 1) {
+		m_ui->play_title->setText(tr("Precompile shaders first"));
 	} else {
 		m_ui->play_title->setText(item->IsRunning() ? tr("Playing") : (folder_ok ? tr("Ready to play") : tr("Game folder missing")));
 	}
@@ -1696,6 +1720,11 @@ void MainDialogPrivate::WriteSettings(QSettings& s) {
 		s.setValue(it.key(), QStringLiteral("%1 %2").arg(it.value().first).arg(it.value().second));
 	}
 	s.endGroup();
+	s.beginGroup(QStringLiteral("ShaderSetup"));
+	for (auto it = g_shader_setup.constBegin(); it != g_shader_setup.constEnd(); ++it) {
+		s.setValue(it.key(), it.value());
+	}
+	s.endGroup();
 
 	s.endGroup();
 }
@@ -1714,6 +1743,12 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 		if (parts.size() == 2) {
 			g_precompile_progress.insert(title_id, {parts.at(0).toLongLong(), parts.at(1).toLongLong()});
 		}
+	}
+	s.endGroup();
+	g_shader_setup.clear();
+	s.beginGroup(QStringLiteral("ShaderSetup"));
+	for (const auto& key: s.childKeys()) {
+		g_shader_setup.insert(key, std::clamp(s.value(key).toInt(), 0, 2));
 	}
 	s.endGroup();
 
@@ -2052,6 +2087,16 @@ void MainDialogPrivate::PrecompileFinished(int exit_code, QProcess::ExitStatus e
 	}
 	m_ui->precompile_status->setText(text);
 	m_ui->precompile_status->setVisible(true);
+	// v0.1.6 first-start steps: an import that found the hints usable, then a precompile that finished.
+	if (const auto key = ShippedHintsKey(m_ui->widget->GetSelectedItem()); !key.isEmpty()) {
+		int step = g_shader_setup.value(key, 0);
+		if (m_precompile_hints.value(QStringLiteral("kind")) == QLatin1String("import") &&
+		    m_precompile_hints.value(QStringLiteral("status")) == QLatin1String("ok")) {
+			step = std::max(step, 1);
+		}
+		if (step >= 1 && status == QLatin1String("complete")) step = 2;
+		g_shader_setup[key] = step;
+	}
 	m_ui->widget->WriteSettings();
 	Update();
 	// Play on a first start: the game now, once its shaders are ready (not after a pause or a failure).
@@ -2078,13 +2123,15 @@ void MainDialogPrivate::Update() {
 		m_ui->precompile_button->setText(progress.first > 0 && progress.first < progress.second ? tr("Continue precompiling")
 		                                                                                        : tr("Precompile shaders"));
 	}
-	m_ui->precompile_button->setEnabled(!precompiling && run_enabled);
+	// v0.1.6: with shipped hints, Precompile waits for their import and Play for a finished precompile.
+	const int setup = ShaderSetupStep(item);
+	m_ui->precompile_button->setEnabled(!precompiling && run_enabled && setup >= 1);
 	m_ui->hints_import_button->setEnabled(!precompiling && run_enabled);
 	m_ui->hints_export_button->setEnabled(!precompiling && run_enabled);
 	m_ui->precompile_pause_button->setVisible(precompiling);
-	m_ui->play_precompile_button->setEnabled(precompiling || run_enabled);
+	m_ui->play_precompile_button->setEnabled(precompiling || (run_enabled && setup >= 1));
 	m_ui->precompile_threads->setEnabled(!precompiling);
-	run_enabled = run_enabled && !precompiling;
+	run_enabled = run_enabled && !precompiling && setup >= 2;
 
 	m_ui->widget->SetRunEnabled(run_enabled);
 	m_ui->play_button->setEnabled(run_enabled);
