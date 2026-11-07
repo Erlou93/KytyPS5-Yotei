@@ -38,6 +38,7 @@ public:
 	// after blocking, 3 other; blocking waits (calls/ns). GPU thread only; reset by TakeStats.
 	struct Stats {
 		std::atomic<uint64_t> queries[4] {}, query_ns[4] {}, blocks {0}, block_ns {0};
+		std::atomic<uint64_t> spins_won {0}, spins_lost {0}, spin_ns {0}; // KYTY_PERF_SEMAPHORE_SPIN_US
 	};
 	static Stats& GetStats();
 

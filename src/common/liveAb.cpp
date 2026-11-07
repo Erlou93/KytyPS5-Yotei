@@ -48,6 +48,8 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Exact: per wait, how long the GPU thread polls the timeline value before blocking; the same tick is waited for.
+    {Switch::SemaphoreSpinUs, "KYTY_PERF_SEMAPHORE_SPIN_US", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
