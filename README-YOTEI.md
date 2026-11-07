@@ -92,6 +92,18 @@ screenshot, the place and how long you had been playing. On a 16 GB card the usa
 the frame rate drops. Watch "Vulkan budget" in the performance panel (Shift+F2): if it gets close to the limit and the
 game slows down, save, quit and start again.
 
+**Known issue: checkered, pixelated shadows after a short stutter.** While a new shader compiles, the emulator skips
+the draws that need it for a few frames instead of making the game wait (otherwise new areas would freeze for seconds).
+Sometimes such an incomplete frame gets into an effect the game carries from frame to frame, and shadows and lit
+surfaces turn into a blocky checkered pattern that stays. **Fix: quit to the main menu and load your save** (no
+restart needed). A proper fix (pipeline libraries, so new shaders no longer need draws skipped) is planned for the next
+version. Reported as issue #11.
+
+**Touch pad (e.g. "Swipe up" prompts):** a DualSense's touch pad works as on the PS5. With a keyboard and mouse press
+**F6**, move the mouse to swipe, and press F6 again to leave touch pad mode. With other controllers assign a button to
+**TouchPadMode** in the launcher's input mapping: that button turns touch pad mode on and off, and the left stick moves
+the finger.
+
 ## Building (Windows)
 
 Toolchain used for this fork:
@@ -199,6 +211,7 @@ until their replacement lands.
 | One fill compute shader (A5) | `WORKAROUND_FILL_CS_HASHES` (code: shader `2bd3cd129405f9a9`) | the shader is recognised by its hash and its stores are taken as a DCC fast clear (it still runs); with the list set by hand, a listed shader's output is filled instead of computed |
 | GPU-selected (bindless) textures (D1/D2) | `DIAG_BINDLESS_EAGER`, `DIAG_NULL_TEXTURE_GRAY`, `DIAG_BINDLESS_IMMEDIATE_BUDGET` (code: 64 new textures per frame) | a new texture can show a placeholder for 1-3 frames; unresolved descriptors read as empty (e.g. snow and mud tracks). Fixed since 2026-10-29 (C9): texture tables over 1 MiB (particles, mist) are translated like every other table instead of showing placeholders past 1 MiB, and a table the table path cannot take stops with `BINDLESS_TABLE_REFUSED` instead of a silent placeholder |
 | Shaders capped (D7) | `SHADER_LOOP_LIMIT_HASHES` (2 shaders), `DIAG_SKIP_UNSUPPORTED_CS`, global loop watchdog `KYTY_SHADER_LOOP_LIMIT` (code; a safety net, not a workaround: every shader loop ends after 65,536 iterations so a runaway loop cannot hang the GPU - it never fired in our tests, 0 of ~1,950 checks at the gate and in the village, 29.10). The particle-emit shader 142383a7 is no longer skipped (29.10; it runs rarely - if a crash follows the log line `W9_PARTICLE_EMIT`, report it) | rare shaders with a loop cap |
+| Draws while a new pipeline compiles | (code) | the draw is skipped until its pipeline is ready (a few frames) instead of the game waiting; can leave checkered shadows until the save is loaded again (see the known issue above) |
 | Terrain shaders (M42) | `WORKAROUND_WATERFALL_POINTER_RECORD0` | approximate material table in some terrain shaders |
 | Texture edge cases | `SDK_FIX_MIP_CHAIN_CLAMP`, `SDK_FIX_NULL_COMPARE_DEPTH`, `SDK_FIX_INTEGER_POINT` (code) | rare sampling edge cases approximated (logged) |
 | Game-specific table (D6) | `RECORD_KEYED_GAME_COUNTS` (code) | one shader's record count is read from the game's data layout instead of a generic bound |
