@@ -939,7 +939,17 @@ namespace {
 // Only how much is published ahead changes: bytes outside the window stay GPU-modified and synchronize when accessed,
 // so every read still gets the newest GPU bytes. The open-world profile (18.10) shows the BAR copy at ~10% of the GPU
 // thread for ~16 MB/5 s of bytes the game needs.
-constexpr uint64_t ReadWindowBytes = uint64_t {4096} << 10u;
+constexpr uint64_t ReadWindowBytesDefault = uint64_t {4096} << 10u;
+// KYTY_PERF_READ_WINDOW_KB=<KiB> (test, live A/B): the half-width in KiB (default 4096). Exact by construction: only how
+// much GPU-modified data around the access is published at once changes.
+uint64_t ReadWindowBytes() {
+	static const uint32_t fixed = [] {
+		const char* v = std::getenv("KYTY_PERF_READ_WINDOW_KB");
+		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
+	}();
+	const uint32_t kb = Common::LiveAb::Gate(Common::LiveAb::Switch::ReadWindowKb, fixed);
+	return kb != 0u ? uint64_t {kb} << 10u : ReadWindowBytesDefault;
+}
 
 // A CPU write into a GPU-modified page whose GPU bytes the write request (ReadMemory with is_write) published (download)
 // or dropped (DropDeadRingBytes) unmarks the page and marks it CPU-dirty under one hold of the region's lock, and the
@@ -3616,7 +3626,7 @@ void BufferCache::ReportBarCopyPerf() {
 	std::fprintf(stderr, "PERF bar_copy calls=%llu MiB=%llu ms=%llu gpu_thread_MiB=%llu gpu_thread_ms=%llu window_kb=%llu\n",
 	             static_cast<unsigned long long>(calls), static_cast<unsigned long long>(bytes >> 20u),
 	             static_cast<unsigned long long>(ns / 1000000u), static_cast<unsigned long long>(g_bytes >> 20u),
-	             static_cast<unsigned long long>(g_ns / 1000000u), static_cast<unsigned long long>(ReadWindowBytes >> 10u));
+	             static_cast<unsigned long long>(g_ns / 1000000u), static_cast<unsigned long long>(ReadWindowBytes() >> 10u));
 	std::fprintf(stderr, "PERF bar_copy_sizes (calls/KiB/ms <4K <64K <1M >=1M)=");
 	for (size_t i = 0; i < 4; i++) {
 		std::fprintf(stderr, "%llu/%llu/%llu ", static_cast<unsigned long long>(g_bar_size_calls[i].exchange(0)),
@@ -3799,8 +3809,9 @@ bool BufferCache::BarServable(Buffer& buffer, uint64_t vaddr, uint64_t size, uin
 std::pair<uint64_t, uint64_t> BufferCache::ReadRange(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	const uint64_t start = buffer.CpuAddress();
 	const uint64_t end   = start + buffer.Size();
-	const uint64_t lo    = std::max(start, vaddr > ReadWindowBytes ? (vaddr - ReadWindowBytes) & ~0xfffull : 0ull);
-	const uint64_t hi    = std::min(end, (vaddr + size + ReadWindowBytes + 0xfffull) & ~0xfffull);
+	const uint64_t window = ReadWindowBytes();
+	const uint64_t lo    = std::max(start, vaddr > window ? (vaddr - window) & ~0xfffull : 0ull);
+	const uint64_t hi    = std::min(end, (vaddr + size + window + 0xfffull) & ~0xfffull);
 	if (!(lo < hi && lo <= vaddr && vaddr + size <= hi)) return {vaddr, vaddr + size};
 	if (buffer.Mapped().empty() || !BarReadsOn()) return {lo, hi}; // no mapping reads: the window, as without a mapping
 	const auto ready = m_buffer_ready_tick.find(reinterpret_cast<uint64_t>(static_cast<VkBuffer>(buffer.Handle())));
