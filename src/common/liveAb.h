@@ -35,6 +35,7 @@ enum class Switch : uint32_t {
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
 	ReadWindowKb,              // KYTY_PERF_READ_WINDOW_KB (exact: only how much is published at once)
+	SubmitBound,               // KYTY_PERF_SUBMIT_BOUND (exact: only where the same commands are split)
 	Count
 };
 

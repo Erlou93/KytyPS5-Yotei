@@ -50,6 +50,8 @@ constexpr SwitchInfo Switches[] = {
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
     // Exact: per access, the half-width of the GPU-modified window a CPU access downloads (bytes outside stay marked).
     {Switch::ReadWindowKb, "KYTY_PERF_READ_WINDOW_KB", 1048576},
+    // Exact: per recorded command, the open-buffer size at which a busy GPU is handed the buffer anyway.
+    {Switch::SubmitBound, "KYTY_PERF_SUBMIT_BOUND", 1048576},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
