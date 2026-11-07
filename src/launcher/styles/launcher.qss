@@ -484,3 +484,11 @@ QTreeWidget#bug_report_files QHeaderView::section {
     border-bottom: 1px solid @border-default;
     padding: 4px 6px;
 }
+
+/* v0.1.6: the shaders' state on the Precompile buttons: red until they are prepared to the end, green when done. */
+QPushButton[shaderState="todo"] {
+    border: 2px solid #b8432f;
+}
+QPushButton[shaderState="done"] {
+    border: 2px solid #4f8a3c;
+}

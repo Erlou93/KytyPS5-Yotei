@@ -2177,6 +2177,18 @@ void MainDialogPrivate::Update() {
 	}
 	// v0.1.6: with shipped hints, Precompile waits for their import and Play for a finished precompile.
 	const int setup = ShaderSetupStep(item);
+	{
+		// v0.1.6: red frame until the shipped hints' shaders are prepared to the end, green when done.
+		const QString state = ShippedHintsKey(item).isEmpty() ? QString() : (setup >= 2 ? QStringLiteral("done") : QStringLiteral("todo"));
+		for (QWidget* button: {static_cast<QWidget*>(m_ui->precompile_button), static_cast<QWidget*>(m_ui->play_precompile_button)}) {
+			if (button->property("shaderState").toString() != state) {
+				button->setProperty("shaderState", state);
+				button->style()->unpolish(button);
+				button->style()->polish(button);
+				button->update();
+			}
+		}
+	}
 	m_ui->precompile_button->setEnabled(!precompiling && run_enabled && setup >= 1);
 	m_ui->hints_import_button->setEnabled(!precompiling && run_enabled);
 	m_ui->hints_export_button->setEnabled(!precompiling && run_enabled);

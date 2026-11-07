@@ -326,6 +326,15 @@ void ArtButton::PaintBrushLook(QPainter& painter, bool hover, bool pressed) {
 		label = pressed ? Color(QStringLiteral("accent/hover"))
 		                : (hover ? gold : Color(QStringLiteral("text/on-dark-strong")));
 	}
+	// v0.1.6: the shaders' state (the dynamic property shaderState): a red frame until they are prepared, green when done.
+	if (const auto state = property("shaderState").toString(); !state.isEmpty()) {
+		painter.save();
+		painter.setRenderHint(QPainter::Antialiasing, true);
+		painter.setPen(QPen(state == QLatin1String("done") ? QColor(0x4f, 0x8a, 0x3c) : QColor(0xb8, 0x43, 0x2f), 2.0));
+		painter.setBrush(Qt::NoBrush);
+		painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 4.0, 4.0);
+		painter.restore();
+	}
 	painter.setPen(label);
 	painter.setFont(font());
 	painter.drawText(rect(), Qt::AlignCenter, text());
