@@ -26,7 +26,6 @@ constexpr int   TILE_HEIGHT  = PAD + COVER + TEXT_GAP + NAME_LINE + META_GAP + M
 constexpr int   SPACING      = 8;
 constexpr qreal TILE_RADIUS  = 8.0; // radius/md
 constexpr qreal COVER_RADIUS = 6.0; // radius/sm
-constexpr qreal FRAME        = 2.0; // the selected tile's gold frame
 constexpr qreal META_TRACKING = -0.2; // "PPSA26344 · 01.512.000" fits the cover width
 constexpr int   EMPTY_HEIGHT = 160;  // the empty-list message
 
@@ -144,13 +143,6 @@ public:
 		p->setPen(dark ? Color(QStringLiteral("text/on-dark-muted")) : Color(QStringLiteral("text/secondary")));
 		p->drawText(meta_rect, Qt::AlignLeft | Qt::AlignVCenter,
 		            QFontMetrics(meta_font).elidedText(meta.join(QStringLiteral(" · ")), Qt::ElideRight, COVER));
-
-		if (selected) {
-			p->setPen(QPen(Color(QStringLiteral("accent/default")), FRAME));
-			p->setBrush(Qt::NoBrush);
-			p->drawRoundedRect(tile.adjusted(FRAME / 2, FRAME / 2, -FRAME / 2, -FRAME / 2), TILE_RADIUS - FRAME / 2,
-			                   TILE_RADIUS - FRAME / 2);
-		}
 		p->restore();
 	}
 

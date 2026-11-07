@@ -63,9 +63,18 @@ of system memory in play; with 16 GB Windows runs out of memory and pages to dis
 
 The package has the same steps with pictures in `KytyPS5-Yotei-Player-Guide.pdf`.
 
-What to expect: on the test PC (Ryzen 7 9800X3D, RTX 5070 Ti) the game runs at roughly 13-17 fps in towns and 21-25
-fps in the open world with the default settings, more with the mods above. The emulator's GPU work runs on four threads, each on its own
+What to expect: on the test PC (Ryzen 7 9800X3D, RTX 5070 Ti) the game runs at roughly 15-17 fps while walking through
+towns and 21-25 fps in the open world with the default settings, more with the mods above. The emulator's GPU work runs on four threads, each on its own
 physical CPU core, chosen automatically for the processor (`KYTY_GPU_THREAD_CPUS=off` turns that off).
+
+Since v0.1.6:
+- **Slow read-back from the graphics card is detected.** On some PCs reading GPU results back over PCIe is very slow (an
+  i9-12900K + RTX 5090 read at about 19 MB/s, against about 1 GB/s on the test PC, and stayed near 10 fps). The emulator
+  times the first reads and, when they are slow, copies the data through the GPU instead. The log shows
+  `BAR_READS fast` or `BAR_READS slow`; `KYTY_BAR_READS=0` / `=1` forces the choice.
+- **"Enable readback" (Graphics & display) is on by default** and is switched on once for existing settings: players
+  reported that faces stayed missing without it. It costs about 2% fps in the town walk; you can turn it off again.
+- Shader precompile uses 8 threads by default (was 6).
 
 Known slow spots:
 - Some in-engine cutscenes are still slower than play: the cutscene after the Snake fight runs at about 8 fps (5.5 in

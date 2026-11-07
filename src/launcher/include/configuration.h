@@ -120,7 +120,7 @@ public:
 	int                    gpu_index                   = -1;
 	bool                   fullscreen_enabled          = false;
 	bool                   hide_cursor_enabled         = false;
-	bool                   readback_linear_images      = false;
+	bool                   readback_linear_images      = true; // v0.1.6: on by default (see ReadSettings)
 	bool                   tessellation_enabled        = true;
 	// --perf-overlay for the game: the performance panel shown from the start (F2 hides or shows it, Shift+F2 its
 	// details).
@@ -206,6 +206,7 @@ public:
 		KYTY_CFG_SET(fullscreen_enabled);
 		KYTY_CFG_SET(hide_cursor_enabled);
 		KYTY_CFG_SET(readback_linear_images);
+		s->setValue("readback_default_v016", true); // the one-time switch below is done
 		KYTY_CFG_SET(tessellation_enabled);
 		KYTY_CFG_SET(overlay_enabled);
 		KYTY_CFG_SET(trophy_enabled);
@@ -251,6 +252,10 @@ public:
 		KYTY_CFG_GET(fullscreen_enabled);
 		KYTY_CFG_GET(hide_cursor_enabled);
 		KYTY_CFG_GET(readback_linear_images);
+		// v0.1.6: the read-back of GPU-written linear images is on by default (players: faces that stayed missing appear with
+		// it; the town walk costs ~1.7% fps). Settings saved before keep the old default "false", so it is switched on once;
+		// a choice saved after that is kept.
+		if (!s->value("readback_default_v016", false).toBool()) readback_linear_images = true;
 		KYTY_CFG_GET(tessellation_enabled);
 		overlay_enabled = s->value("overlay_enabled", overlay_enabled).toBool();
 		trophy_enabled = s->value("trophy_enabled", trophy_enabled).toBool();

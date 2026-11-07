@@ -9,8 +9,8 @@ class QResizeEvent;
 
 // Play: the games as a grid of tiles (square cover from the game's sce_sys/icon0.png, name, "serial · version").
 // It shows the model of the game list (ConfigurationListWidget's tree, kept hidden) and shares its selection, so
-// selecting, sorting and the search filter stay in one place. The selected game has a gold frame, the tile under the
-// mouse a soft highlight. Dark: drawn for the selected game's darkened background (docs/launcher/DESIGN-SPEC.md).
+// selecting, sorting and the search filter stay in one place. The selected game has a paper backing (no frame in the
+// launcher style v08), the tile under the mouse a soft highlight. Dark: drawn for the selected game's darkened background (docs/launcher/DESIGN-SPEC.md).
 class GameTileView: public QListView {
 	Q_OBJECT
 

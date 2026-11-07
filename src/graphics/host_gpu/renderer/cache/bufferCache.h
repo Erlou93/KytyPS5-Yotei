@@ -40,6 +40,10 @@ class TextureCache;
 using BufferId = Common::SlotId;
 inline constexpr BufferId NULL_BUFFER_ID {0};
 
+namespace RingCensus {
+struct Request; // KYTY_TRACE_RING_CENSUS (ringCensus.h)
+} // namespace RingCensus
+
 // Counters of one SynchronizeBuffersInRange call (the BDA region pass's statistics).
 struct BufferSyncStats {
 	uint64_t buffers = 0;  // buffers visited
@@ -359,8 +363,21 @@ public:
 	};
 	// KYTY_TRACE_PERF: the PERF protect_batch line.
 	void ReportProtectPerf();
+	// GPU thread: an asynchronous publish of guest bytes [vaddr, vaddr + size), a priority operation queued at the current
+	// tick (this cache's and the texture cache's download publishes, the only priority operations that write guest memory
+	// on the priority thread). The publish sets the returned flag when it ended (RenderContext::UnmapMemory waits for it).
+	[[nodiscard]] std::shared_ptr<std::atomic_bool> NotePendingGuestWrite(uint64_t vaddr, uint64_t size);
+	// GPU thread: the newest tick of an unfinished publish into [vaddr, vaddr + size), 0 when none (finished ones go).
+	[[nodiscard]] uint64_t PendingGuestWriteTick(uint64_t vaddr, uint64_t size);
 
 private:
+	struct PendingGuestWrite {
+		uint64_t                          start = 0;
+		uint64_t                          end   = 0;
+		uint64_t                          tick  = 0;
+		std::shared_ptr<std::atomic_bool> done;
+	};
+	std::vector<PendingGuestWrite> m_pending_guest_writes; // RenderContext::UnmapMemory's wait, GPU thread
 	// The join tick: a host-mapped read waits for the buffer's creation tick too (see TryBarDownload).
 	enum class CpWriteDecline : uint32_t { Overlap, Pending, Merge, Image, NoBuffer, Shape, Count };
 	// The write-through itself, once the page is known GPU-modified: Count when written, else the reason it is not.
@@ -580,6 +597,12 @@ private:
 	// The write memo: NoteObtainedWrite of a range noted at this tick with nothing undone since (the GPU-dirty set,
 	// the write ticks and the granule ticks already hold it): only its notifications.
 	void NoteObtainedWriteRepeat(uint64_t vaddr, uint64_t size, bool same_tick);
+	// KYTY_TRACE_RING_CENSUS (diagnostic, bufferCacheRingCensus.cpp; execution thread): the writer of a range a draw or
+	// dispatch is about to write; a write request's start, its byte compare (before the page is released) and its record.
+	void RingCensusWrite(uint64_t vaddr, uint64_t size, bool repeat);
+	void RingCensusBegin(RingCensus::Request& request, uint64_t vaddr, uint64_t size);
+	void RingCensusCompare(RingCensus::Request& request);
+	void RingCensusEnd(RingCensus::Request& request);
 	// KYTY_PERF_DIRECT_RANGES (see InDirectRange).
 	struct DirectRange {
 		uint64_t start   = 0;
@@ -787,6 +810,10 @@ private:
 	// 6 nothing GPU-written (TryBarDownload's outcomes).
 	int ScanBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size, std::vector<std::pair<uint64_t, uint64_t>>& intervals,
 	                    uint64_t& newest, uint64_t& total);
+	// ReadRange's question (7.11): ScanBarDownload usable, at most BarMaxBytes and its newest write tick
+	// (and `ready_tick`) before the current tick - answered without the intervals, stopping at the first fact that makes
+	// it false, one write-tick question per 64 KiB granule.
+	[[nodiscard]] bool BarServable(Buffer& buffer, uint64_t vaddr, uint64_t size, uint64_t ready_tick);
 	// The GPU-written bytes a read takes from the host mapping (BAR, uncached PCIe reads, ~0.66 GB/s measured 18.10 with PERF
 	// bar_copy) at most; more go through the GPU copy into cached host memory (the copy path), which is faster for them.
 	// Only how the same bytes are copied changes.

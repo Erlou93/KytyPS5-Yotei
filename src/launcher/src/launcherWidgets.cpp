@@ -1,15 +1,20 @@
 #include "launcherWidgets.h"
 
+#include "launcherBrush.h"
 #include "launcherTheme.h"
 
 #include <QEnterEvent>
 #include <QFontMetrics>
+#include <QHash>
 #include <QIcon>
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRegion>
+#include <QStyle>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 
@@ -35,6 +40,45 @@ QRectF CoverSource(const QPixmap& art, const QRectF& crop, const QSizeF& target)
 QColor WithAlpha(QColor color, qreal alpha) {
 	color.setAlphaF(static_cast<float>(alpha));
 	return color;
+}
+
+// A stable seed for a widget's brush strokes (the same shape on every repaint, a different one per widget).
+std::uint32_t StrokeSeed(const QWidget& widget) {
+	return static_cast<std::uint32_t>(qHash(widget.objectName(), 0));
+}
+
+// The heading underlines of the mockup (version 08), relative to the text: x from the text's left edge (end: from its
+// right edge when end_from_right), drops below the baseline, bow and wobble of the line, stroke width and bristles.
+struct HeadingStroke {
+	qreal start;
+	qreal end;
+	bool  end_from_right;
+	qreal drop_start;
+	qreal drop_end;
+	qreal bow;
+	qreal wobble;
+	qreal width;
+	int   bristles;
+
+	// How far the stroke can reach below the baseline (outer bristles, wobble, line width).
+	[[nodiscard]] qreal Reach() const {
+		return std::max(drop_start, drop_end) + bow + wobble + width * 0.575 + width / bristles * 1.33 + 0.5;
+	}
+};
+
+// Heading/Title: past the end of the text, 10 px broad. Heading/Section: 92 px long, 4.5 px.
+constexpr HeadingStroke TITLE_STROKE {-6.0, 30.0, true, 10.0, 6.0, 3.0, 1.0, 10.0, 18};
+constexpr HeadingStroke SECTION_STROKE {-2.0, 90.0, false, 8.7, 7.7, 1.0, 0.6, 4.5, 9};
+
+const HeadingStroke* HeadingStrokeOf(const QWidget& label) {
+	const auto text_style = label.property("textStyle").toString();
+	if (text_style == QLatin1String("Heading/Title")) {
+		return &TITLE_STROKE;
+	}
+	if (text_style == QLatin1String("Heading/Section")) {
+		return &SECTION_STROKE;
+	}
+	return nullptr;
 }
 
 } // namespace
@@ -72,6 +116,63 @@ void ArtBackground::SetPicture(const QPixmap& picture, qreal ink_alpha) {
 	update();
 }
 
+void ArtBackground::SetCardShadows() {
+	for (auto* child: findChildren<QWidget*>(Qt::FindDirectChildrenOnly)) {
+		if (child->property("card").toBool() && !m_cards.contains(child)) {
+			m_cards.append(child);
+			child->installEventFilter(this);
+		}
+	}
+	update();
+}
+
+bool ArtBackground::eventFilter(QObject* watched, QEvent* event) {
+	switch (event->type()) {
+		case QEvent::Move:
+		case QEvent::Resize:
+		case QEvent::Show:
+		case QEvent::Hide: update(); break; // a card's shadow reaches past the card
+		default: break;
+	}
+	return QWidget::eventFilter(watched, event);
+}
+
+void ArtBackground::PaintCardShadows(QPainter& painter) const {
+	// The CSS blur of 30 px is a Gaussian of sigma 15 px: rounded rectangles grown or shrunk in 5 px steps over
+	// -30..+30 px, each with the share of the 12 % alpha that the Gaussian puts in its step, add up to that blur.
+	constexpr qreal OFFSET = 10.0;
+	constexpr qreal SIGMA  = 15.0;
+	constexpr qreal ALPHA  = 0.12;
+	constexpr qreal RADIUS = 2.0;
+	constexpr qreal STEP   = 5.0;
+	constexpr int   STEPS  = 12;
+	const auto      ink    = LauncherTheme::Color(QStringLiteral("ink"));
+	const auto      cdf    = [](qreal x) { return 0.5 * (1.0 + std::erf(x / std::sqrt(2.0))); };
+	for (const auto& card: m_cards) {
+		if (card == nullptr || !card->isVisible()) {
+			continue;
+		}
+		const QRectF box = QRectF(card->geometry()).translated(0.0, OFFSET);
+		painter.save();
+		painter.setRenderHint(QPainter::Antialiasing);
+		painter.setPen(Qt::NoPen);
+		// As in CSS, nothing under the card itself (it is translucent).
+		painter.setClipRegion(QRegion(rect()).subtracted(QRegion(card->geometry())));
+		for (int k = 0; k < STEPS; k++) {
+			const qreal grow  = 2.0 * SIGMA - STEP * (k + 0.5); // the widest first
+			const qreal share = cdf((grow + STEP / 2.0) / SIGMA) - cdf((grow - STEP / 2.0) / SIGMA);
+			const auto  layer = box.adjusted(-grow, -grow, grow, grow);
+			if (layer.isEmpty()) {
+				continue;
+			}
+			const qreal radius = std::max(0.0, RADIUS + grow);
+			painter.setBrush(WithAlpha(ink, ALPHA * share));
+			painter.drawRoundedRect(layer, radius, radius);
+		}
+		painter.restore();
+	}
+}
+
 void ArtBackground::paintEvent(QPaintEvent* /*event*/) {
 	QPainter p(this);
 	if (!m_picture.isNull()) {
@@ -80,6 +181,7 @@ void ArtBackground::paintEvent(QPaintEvent* /*event*/) {
 		p.setRenderHint(QPainter::SmoothPixmapTransform);
 		p.drawPixmap(QRectF(rect()), m_picture, CoverSource(m_picture, {0.0, 0.0, 1.0, 1.0}, size()));
 		p.fillRect(rect(), WithAlpha(ink, m_picture_ink));
+		PaintCardShadows(p);
 		return;
 	}
 	const auto page = LauncherTheme::Color(QStringLiteral("bg/page"));
@@ -108,6 +210,7 @@ void ArtBackground::paintEvent(QPaintEvent* /*event*/) {
 		fade.setColorAt(1.0, page);
 		p.fillRect(band, fade);
 	}
+	PaintCardShadows(p);
 }
 
 ArtButton::ArtButton(QWidget* parent): QPushButton(parent) {
@@ -119,6 +222,19 @@ void ArtButton::SetArt(const QString& resource, const QRectF& crop) {
 	m_art  = QPixmap(resource);
 	m_crop = crop;
 	update();
+}
+
+void ArtButton::SetBrush(const QString& brush) {
+	m_brush = brush;
+	update();
+}
+
+void ArtButton::changeEvent(QEvent* event) {
+	// The swipe is painted by the parent bar and fades with the button when it is disabled.
+	if (event->type() == QEvent::EnabledChange && m_brush == QLatin1String("swipe") && parentWidget() != nullptr) {
+		parentWidget()->update();
+	}
+	QPushButton::changeEvent(event);
 }
 
 QSize ArtButton::sizeHint() const {
@@ -151,6 +267,10 @@ void ArtButton::paintEvent(QPaintEvent* /*event*/) {
 	if (!enabled) {
 		p.setOpacity(0.4);
 	}
+	if (!m_brush.isEmpty()) {
+		PaintBrushLook(p, hover, pressed);
+		return;
+	}
 
 	QPainterPath shape;
 	shape.addRoundedRect(QRectF(rect()), RADIUS, RADIUS);
@@ -175,6 +295,134 @@ void ArtButton::paintEvent(QPaintEvent* /*event*/) {
 	p.setPen(LauncherTheme::Color(hover || pressed ? QStringLiteral("text/on-dark-strong") : QStringLiteral("text/on-dark")));
 	p.setFont(font());
 	p.drawText(rect(), Qt::AlignCenter, text());
+}
+
+void ArtButton::PaintBrushLook(QPainter& painter, bool hover, bool pressed) {
+	using LauncherTheme::Color;
+	const auto gold = Color(QStringLiteral("accent/default"));
+	QColor     label;
+	if (m_brush == QLatin1String("swipe")) {
+		// PLAY: a gold brush underline under the gold label (8.11: instead of the mockup's warm-ink swipe).
+		LauncherBrush::Style style;
+		style.width    = 4.5;
+		style.bristles = 9;
+		style.seed     = StrokeSeed(*this) ^ 0x9E3779B9u;
+		style.alpha    = hover || pressed ? 1.3 : 1.0;
+		const qreal y  = height() - 6.0;
+		const auto  line = LauncherBrush::Line({width() * 0.18, y}, {width() * 0.82, y - 1.0}, StrokeSeed(*this), 0.8, 0.5);
+		LauncherBrush::Paint(painter, line, style);
+		label = pressed ? Color(QStringLiteral("accent/hover")) : (hover ? gold.lighter(118) : gold);
+	} else {
+		// Mockup: a thin gold stroke 4 px above the bottom edge, along the whole button, under a paper label.
+		LauncherBrush::Style style;
+		style.width    = 3.0;
+		style.bristles = 7;
+		style.seed     = StrokeSeed(*this) ^ 0x9E3779B9u;
+		style.alpha    = hover || pressed ? 1.3 : 1.0;
+		const qreal y  = height() - 4.0;
+		const auto  line =
+		    LauncherBrush::Line({0.0, y}, {static_cast<qreal>(width()), y - 1.0}, StrokeSeed(*this), 0.6, 0.5);
+		LauncherBrush::Paint(painter, line, style);
+		label = pressed ? Color(QStringLiteral("accent/hover"))
+		                : (hover ? gold : Color(QStringLiteral("text/on-dark-strong")));
+	}
+	painter.setPen(label);
+	painter.setFont(font());
+	painter.drawText(rect(), Qt::AlignCenter, text());
+}
+
+BrushBar::BrushBar(QWidget* parent): QFrame(parent) {}
+
+void BrushBar::paintEvent(QPaintEvent* event) {
+	QFrame::paintEvent(event);
+	QPainter p(this);
+	for (const auto* button: findChildren<ArtButton*>(Qt::FindDirectChildrenOnly)) {
+		if (!button->isVisible() || button->Brush() != QLatin1String("ink-swipe")) { // the mockup's swipe (unused now)
+			continue;
+		}
+		// Mockup: from 30 px before the button to 20 px after it, 1.05 times its height, fat pressure, dry gaps along
+		// the way; at 40 % like the disabled button's label.
+		const QRectF         box = button->geometry();
+		const qreal          y   = box.center().y();
+		LauncherBrush::Style style;
+		style.width     = box.height() * 1.05;
+		style.bristles  = 30;
+		style.seed      = StrokeSeed(*button) ^ 0x9E3779B9u;
+		style.pressure  = LauncherBrush::Pressure::Fat;
+		style.dryness   = LauncherBrush::Dryness::Mid;
+		style.colour    = LauncherBrush::Colour::WarmInk;
+		style.alpha     = 1.4;
+		style.dry_scale = 20.0;
+		p.setOpacity(button->isEnabled() ? 1.0 : 0.4);
+		const auto line =
+		    LauncherBrush::Line({box.left() - 30.0, y + 2.0}, {box.right() + 20.0, y - 2.0}, StrokeSeed(*button), 3.0, 1.2);
+		LauncherBrush::Paint(p, line, style);
+	}
+}
+
+BrushHeading::BrushHeading(QWidget* parent): QLabel(parent) {}
+
+bool BrushHeading::event(QEvent* event) {
+	const bool result = QLabel::event(event);
+	// QFrame resets the contents margins to its frame widths (QSS border and padding) when it is polished, restyled
+	// or reparented: the room goes back on after it; a font change moves the baseline.
+	switch (event->type()) {
+		case QEvent::Polish:
+		case QEvent::StyleChange:
+		case QEvent::ParentChange:
+		case QEvent::FontChange: UpdateRoom(); break;
+		default: break;
+	}
+	return result;
+}
+
+// Room below the text for the part of the stroke that reaches past the font's descent, on top of the frame's own
+// bottom width.
+void BrushHeading::UpdateRoom() {
+	const auto* stroke       = HeadingStrokeOf(*this);
+	const qreal reach        = stroke == nullptr ? 0.0 : stroke->Reach() - QFontMetricsF(font()).descent();
+	const int   room         = std::max(0, static_cast<int>(std::ceil(reach)));
+	const int   frame_bottom = frameRect().bottom() - contentsRect().bottom();
+	const auto  margins      = contentsMargins();
+	if (margins.bottom() != frame_bottom + room) {
+		setContentsMargins(margins.left(), margins.top(), margins.right(), frame_bottom + room);
+	}
+}
+
+void BrushHeading::paintEvent(QPaintEvent* event) {
+	if (const auto* stroke = HeadingStrokeOf(*this); stroke != nullptr && !text().isEmpty()) {
+		// The text's place as QLabel draws it (plain text, one line): aligned in the contents rectangle.
+		const QFontMetricsF fm(font());
+		const auto          contents   = QRectF(contentsRect()).adjusted(margin(), margin(), -margin(), -margin());
+		const qreal         text_width = std::min(fm.horizontalAdvance(text()), contents.width());
+		const auto          align      = QStyle::visualAlignment(layoutDirection(), alignment());
+		qreal               left       = contents.left();
+		if (align.testFlag(Qt::AlignRight)) {
+			left = contents.right() - text_width;
+		} else if (align.testFlag(Qt::AlignHCenter)) {
+			left = contents.center().x() - text_width / 2.0;
+		}
+		qreal top = contents.top() + (contents.height() - fm.height()) / 2.0;
+		if (align.testFlag(Qt::AlignTop)) {
+			top = contents.top();
+		} else if (align.testFlag(Qt::AlignBottom)) {
+			top = contents.bottom() - fm.height();
+		}
+		const qreal baseline = top + fm.ascent();
+		const qreal x0       = std::max(1.0, left + stroke->start);
+		const qreal x1       = std::min(width() - 1.0, (stroke->end_from_right ? left + text_width : left) + stroke->end);
+		if (x1 > x0) {
+			LauncherBrush::Style style;
+			style.width    = stroke->width;
+			style.bristles = stroke->bristles;
+			style.seed     = StrokeSeed(*this) ^ 0x9E3779B9u;
+			const auto line = LauncherBrush::Line({x0, baseline + stroke->drop_start}, {x1, baseline + stroke->drop_end},
+			                                      StrokeSeed(*this), stroke->bow, stroke->wobble);
+			QPainter   p(this);
+			LauncherBrush::Paint(p, line, style);
+		}
+	}
+	QLabel::paintEvent(event);
 }
 
 NavButton::NavButton(QWidget* parent): QPushButton(parent) {
@@ -202,16 +450,19 @@ void NavButton::paintEvent(QPaintEvent* /*event*/) {
 	constexpr int PADDING_LEFT = 24; // space/24
 	constexpr int DOT          = 6;
 	constexpr int GAP          = 12; // space/12
-	constexpr int MARKER       = 2;
 
 	const bool active = isChecked();
 
 	QPainter p(this);
 	p.setRenderHint(QPainter::Antialiasing);
 	if (active) {
-		p.fillRect(rect(), LauncherTheme::Color(QStringLiteral("bg/sidebar-active")));
-		p.fillRect(QRect(0, 0, MARKER, height()),
-		           LauncherTheme::Color(m_accent ? QStringLiteral("accent/default") : QStringLiteral("nav/bar")));
+		// Mockup (version 08): a gold stroke 10 px from the left edge, from 6 px below the top to 4 px above the bottom.
+		LauncherBrush::Style style;
+		style.width    = 6.0;
+		style.bristles = 10;
+		style.seed     = StrokeSeed(*this) ^ 0x9E3779B9u;
+		style.pressure = LauncherBrush::Pressure::Sweep;
+		LauncherBrush::Paint(p, LauncherBrush::Line({10.0, 6.0}, {9.0, height() - 4.0}, StrokeSeed(*this), 1.0, 0.6), style);
 	} else if (underMouse()) {
 		p.fillRect(rect(), WithAlpha(LauncherTheme::Color(QStringLiteral("bg/sidebar-active")), 0.5));
 	}

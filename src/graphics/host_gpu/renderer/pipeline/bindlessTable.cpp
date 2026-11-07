@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstdio>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <array>
 #include <atomic>
@@ -1108,6 +1109,7 @@ void BindlessTable::OnImageUnregistered(ImageId id, const char* reason) {
 	if (found == m_image_refs.end()) {
 		return;
 	}
+	if (m_unmap_deferred) unmap_defer.heap_miss++; // keys in an unmap judged keyless (RenderContext UnmapWait)
 	const bool trace = KeyTraceEnabled();
 	for (const auto& [heap, key]: found->second) {
 		// The descriptor the key was resolved from (key trace).
@@ -1199,6 +1201,15 @@ void BindlessTable::DropTableSlot(uint32_t binding, uint32_t slot) {
 	for (auto* owner: info.owners) {
 		owner->dead_slots++;
 		owner->images_dirty = true;
+		// The difference translation: the entries holding it translate again.
+		if (owner->diff_ready) {
+			if (owner->dead_list.size() < 8192u) {
+				owner->dead_list.push_back(slot);
+			} else {
+				owner->diff_ready = false;
+				owner->dead_list.clear();
+			}
+		}
 	}
 	info.owners.clear();
 	if (IntegerClass(info.key.view.numeric_class)) m_table_int_slots--; // KYTY_PERF_BINDLESS_CLASSES
@@ -1209,12 +1220,48 @@ void BindlessTable::DropTableSlot(uint32_t binding, uint32_t slot) {
 		if (images->second.empty()) m_table_image_slots.erase(images);
 	}
 	// The image's views die with the image after the current tick: the placeholder now (an integer access then reads its
-	// class's placeholder).
+	// class's placeholder), or for a guest unmap's drop once the GPU finished that tick (DeferUnmapDrop).
 	m_table_stats.dropped_written++;
-	WriteSlot(binding, slot, PlaceholderView(binding, info.key.view.numeric_class), vk::ImageLayout::eShaderReadOnlyOptimal);
+	const auto placeholder = PlaceholderView(binding, info.key.view.numeric_class);
+	if (m_unmap_deferred) {
+		DeferUnmapDrop(binding, slot, placeholder);
+	} else {
+		WriteSlot(binding, slot, placeholder, vk::ImageLayout::eShaderReadOnlyOptimal);
+	}
 	m_table_slots_dropped.push_back({binding, slot, m_scheduler != nullptr ? m_scheduler->CurrentTick() : 0u});
 	m_table_generation++;
 	m_table_slot_epoch++;
+}
+
+// A slot a guest unmap dropped keeps its image's view (alive until the GPU finished the current tick, where the image's
+// erase is queued after this) until that tick finished; then the placeholder. Draws recorded before the unmap ran in
+// earlier ticks; those after it read tables translated again in the new tick (late_reads counts a read of the slot before
+// then). A dropped slot goes back to the pool only after a commit in a later tick completed (MarkDrawHeapsCommitted): one
+// taken or rewritten by then is counted (reassigned) and keeps what it shows.
+void BindlessTable::DeferUnmapDrop(uint32_t binding, uint32_t slot, vk::ImageView placeholder) {
+	const auto key   = uint64_t {binding} << 32u | slot;
+	const auto shown = slot < m_slot_views[binding].size() ? m_slot_views[binding][slot].first : vk::ImageView {};
+	m_unmap_pending.insert(key);
+	unmap_defer.slots++;
+	m_scheduler->DeferOperation([this, binding, slot, key, shown, placeholder] {
+		m_unmap_pending.erase(key);
+		if (m_table_slot_info[binding][slot].live || slot >= m_slot_views[binding].size() ||
+		    m_slot_views[binding][slot].first != shown) {
+			unmap_defer.reassigned++;
+		} else {
+			WriteSlot(binding, slot, placeholder, vk::ImageLayout::eShaderReadOnlyOptimal);
+		}
+	});
+}
+
+void BindlessTable::NoteDeadSlotRead(const Table& table) {
+	if (m_unmap_pending.empty()) return;
+	for (const auto& [slot, generation]: table.slots) {
+		if (m_unmap_pending.contains(uint64_t {table.view.binding} << 32u | slot)) {
+			unmap_defer.late_reads++;
+			return;
+		}
+	}
 }
 
 void BindlessTable::DropTableImage(ImageId id) {
@@ -1400,13 +1447,25 @@ bool RangeHasAliasPage(uint64_t address, uint64_t size, uint64_t alias) {
 } // namespace
 
 void BindlessTable::UpdateTableOwners(Table& table, std::span<const std::pair<uint32_t, uint32_t>> old_slots,
-                                      uint32_t new_stamp) {
+                                      uint32_t new_stamp, bool skip_kept) {
 	if (!m_slot_owners_on) return;
 	auto& infos = m_table_slot_info[table.view.binding];
-	// The slots that left (a slot still of the generation the table held and not stamped by this translation).
+	if (skip_kept) {
+		if (m_owner_kept.size() < infos.size()) m_owner_kept.resize(infos.size(), 0u);
+		if (++m_owner_kept_token == 0u) {
+			std::fill(m_owner_kept.begin(), m_owner_kept.end(), 0u);
+			m_owner_kept_token = 1u;
+		}
+	}
+	// The slots that left (a slot still of the generation the table held and not stamped by this translation); with
+	// skip_kept, the ones it kept are marked (it is among their owners since the update that listed them).
 	for (const auto& [slot, generation]: old_slots) {
 		auto& info = infos[slot];
-		if (!info.live || info.generation != generation || info.stamp == new_stamp) continue;
+		if (!info.live || info.generation != generation) continue;
+		if (info.stamp == new_stamp) {
+			if (skip_kept) m_owner_kept[slot] = m_owner_kept_token;
+			continue;
+		}
 		std::erase(info.owners, &table);
 		LeaveFastSlot(table, info);
 	}
@@ -1417,6 +1476,7 @@ void BindlessTable::UpdateTableOwners(Table& table, std::span<const std::pair<ui
 			table.dead_slots++;
 			continue;
 		}
+		if (skip_kept && m_owner_kept[slot] == m_owner_kept_token) continue;
 		if (std::find(info.owners.begin(), info.owners.end(), &table) == info.owners.end()) info.owners.push_back(&table);
 	}
 	table.images_dirty = true;

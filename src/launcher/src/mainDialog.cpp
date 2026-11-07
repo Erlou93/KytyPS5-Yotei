@@ -119,7 +119,7 @@ constexpr char HINTS_DIR[] = "hints";
 constexpr char SCREENSHOT_DIR_ENV[] = "KYTY_LAUNCHER_SCREENSHOT_DIR";
 
 // Normalised crops of the ukiyo-e images, as in the Figma frames (docs/launcher/DESIGN-SPEC.md).
-constexpr QRectF ART_PLAY_BACKGROUND {0.0601, 0.0448, 0.8797, 0.9104}; // image B in 1032x716
+constexpr QRectF ART_PLAY_BACKGROUND {0.0, 0.0, 1.0, 1.0};              // image B whole, as cover (style v08)
 constexpr QRectF ART_GINKGO_BRANCH {0.6171, 0.0826, 0.3639, 0.1238};   // image B in the buttons
 constexpr QRectF ART_DISPLAY_BANNER {0.0, 0.1786, 1.0, 0.4568};         // 1032x200
 constexpr QRectF ART_GRAPHICS_BANNER {0.0, 0.1935, 1.0, 0.4568};        // 1032x200
@@ -310,10 +310,10 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 
 	LauncherTheme::ApplyTextStyles(main_dialog);
 	const auto play_art = QStringLiteral(":/images/ukiyoe-play.jpg");
+	// Launcher style v08 (design mockup): Play shows its picture without the paper scrim, the cards
+	// are paper sheets with soft shadows, the Play bar's buttons are brush-painted (forms/main_dialog.ui, "brush").
 	m_ui->play_art->SetArt(play_art, ART_PLAY_BACKGROUND);
-	m_ui->play_art->SetScrim(0.55, 0.62);
-	m_ui->play_button->SetArt(play_art, ART_GINKGO_BRANCH);
-	m_ui->play_precompile_button->SetArt(play_art, ART_GINKGO_BRANCH);
+	m_ui->play_art->SetCardShadows();
 	m_ui->first_folder_button->SetArt(play_art, ART_GINKGO_BRANCH);
 	m_ui->display_banner->SetArt(QStringLiteral(":/images/ukiyoe-display.jpg"), ART_DISPLAY_BANNER);
 	m_ui->display_banner->SetBottomFade(BANNER_FADE);
@@ -328,6 +328,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui->first_start_art->SetArt(QStringLiteral(":/images/ukiyoe-first-start.jpg"), ART_FIRST_START);
 	m_ui->first_start_art->SetScrim(0.85, 0.70);
 	m_ui->first_start_art->SetTopWash(0.95, 300);
+	m_ui->first_start_art->SetCardShadows();
 
 	SetCheck(m_ui->first_folder_check_status, m_ui->first_folder_check, m_ui->first_folder_check_description,
 	         {StatusIcon::Status::Error, tr("No game found"), tr("Pick the folder that contains eboot.bin and sce_sys.")});

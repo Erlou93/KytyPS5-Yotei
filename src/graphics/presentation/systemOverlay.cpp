@@ -9,6 +9,7 @@
 #include "common/stringUtils.h"
 #include "gpu_blit_shaders/gpu_imgui_hdr_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/presentation/brushStroke.h"
 #include "graphics/presentation/ddsImage.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderPrecompile.h"
 #include "graphics/presentation/performanceOverlay.h"
@@ -637,7 +638,7 @@ void CheckVulkanResult(VkResult result) {
 	EXIT_IF(result != VK_SUCCESS);
 }
 
-// The in-game shader badge (Figma "ShaderBadge"): shown only while the shader precompile compiles in the background.
+// The in-game shader badge (the G9 ensō): shown only while the shader precompile compiles in the background.
 bool ShaderBadgeVisible() {
 	if (!ShaderPrecompiler::Enabled()) return false;
 	const auto progress = GetPrecompileProgress();
@@ -940,7 +941,6 @@ struct SystemOverlay::Impl {
 		drawing_cursor_image = LoadTouchCursorImage("drawing.png");
 		// The loading screen's and the shader badge's fonts (the launcher's; default font when missing).
 		ui_font    = LoadUiFont(io, "Manrope-Regular.ttf");
-		mono_font  = LoadUiFont(io, "JetBrainsMono-Regular.ttf");
 		brand_font = LoadUiFont(io, "CormorantGaramond-SemiBold.ttf");
 	}
 
@@ -1049,23 +1049,22 @@ struct SystemOverlay::Impl {
 			value = static_cast<float>(std::min(progress.finished, progress.queued)) / static_cast<float>(progress.queued);
 			stage = fmt::format("Preparing shaders… {}%", static_cast<int>(value * 100.0f));
 		}
-		// Name 32 px (Cormorant Garamond SemiBold, #171513), 24 px gap, bar 320x4, 24 px gap, stage 14 px (#6f6a62).
+		// Name 32 px (Cormorant Garamond SemiBold, #171513), 24 px gap, stage 14 px (#6f6a62). The shader progress is the G9
+		// badge in the top-right corner (DrawShaderBadge, drawn over this screen too; 8.11: no bar, the circle in the
+		// corner while the game loads).
 		const char* name      = "KytyPS5 · Yōtei fork";
 		const float name_size = 32.0f * s;
-		const float bar_w     = 320.0f * s;
-		const float bar_h     = std::max(1.0f, 4.0f * s);
 		const float body_size = 14.0f * s;
 		const float gap       = 24.0f * s;
 		ImFont*     brand     = brand_font != nullptr ? brand_font : ImGui::GetFont();
 		ImFont*     body      = ui_font != nullptr ? ui_font : ImGui::GetFont();
 		const auto  name_dim  = brand->CalcTextSizeA(name_size, std::numeric_limits<float>::max(), 0.0f, name);
 		const auto  stage_dim = body->CalcTextSizeA(body_size, std::numeric_limits<float>::max(), 0.0f, stage.c_str());
-		const float block_h   = 38.0f * s + gap + bar_h + gap + 20.0f * s;
+		const float block_h   = 38.0f * s + gap + 20.0f * s;
 		float       y         = centre.y - block_h * 0.5f;
 		draw->AddText(brand, name_size, {centre.x - name_dim.x * 0.5f, y}, a(0x17, 0x15, 0x13, 1.0f), name);
 		y += 38.0f * s + gap;
-		DrawGoldBar(draw, {centre.x - bar_w * 0.5f, y}, {bar_w, bar_h}, value, alpha);
-		y += bar_h + gap;
+		(void)value; // the progress itself is the corner badge's
 		draw->AddText(body, body_size, {centre.x - stage_dim.x * 0.5f, y + (20.0f * s - stage_dim.y) * 0.5f},
 		              a(0x6f, 0x6a, 0x62, 1.0f), stage.c_str());
 		// Version, 12 px, 48 px from the bottom.
@@ -1088,48 +1087,22 @@ struct SystemOverlay::Impl {
 		}
 	}
 
-	// The shader badge (Figma node 20:99): top-right, 24 px from the edges at 1080p (48 px at 2160p); translucent ink
-	// #171513 at 88%, "Preparing shaders ·" (Manrope 12 px, #ece8e0) and "62% · 17 840 / 28 700" (JetBrains Mono 12 px,
-	// #c9c6bf), padding 12x8, 8 px gap, a 3 px gold bar along the bottom edge.
-	void DrawShaderBadge(vk::Extent2D frame_extent) {
+	// The shader badge (design mockup, G9 "Żar ze stygnącymi rozpryskami"): a 56 px gold brush ensō
+	// at 1080p (112 px at 2160p), top-right 24 px from the edges, painted as the precompile progresses, the percentage in
+	// the middle. The ember at the brush tip, its sparks and the drops keep moving while the progress stalls.
+	void DrawShaderBadge(vk::Extent2D frame_extent, Clock::time_point now) {
 		if (!ShaderBadgeVisible()) return;
-		const auto  progress = GetPrecompileProgress();
-		const auto  done     = std::min(progress.finished, progress.queued);
-		const float value    = static_cast<float>(done) / static_cast<float>(progress.queued);
-		const auto  group    = [](uint32_t n) {
-            std::string text = std::to_string(n);
-            for (int i = static_cast<int>(text.size()) - 3; i > 0; i -= 3) text.insert(static_cast<size_t>(i), " ");
-            return text;
-		};
-		const std::string label   = "Preparing shaders ·";
-		const std::string details = fmt::format("{}% · {} / {}", static_cast<int>(value * 100.0f), group(done),
-		                                        group(progress.queued));
-		const float s         = static_cast<float>(frame_extent.height) / 1080.0f;
-		const float text_size = 12.0f * s;
-		const float pad_x     = 12.0f * s;
-		const float pad_y     = 8.0f * s;
-		const float gap       = 8.0f * s;
-		const float bar_h     = std::max(1.0f, 3.0f * s);
-		const float margin    = 24.0f * s;
-		ImFont*     ui        = ui_font != nullptr ? ui_font : ImGui::GetFont();
-		ImFont*     mono      = mono_font != nullptr ? mono_font : ImGui::GetFont();
-		const auto  label_dim = ui->CalcTextSizeA(text_size, std::numeric_limits<float>::max(), 0.0f, label.c_str());
-		const auto  det_dim   = mono->CalcTextSizeA(text_size, std::numeric_limits<float>::max(), 0.0f, details.c_str());
-		const float line_h    = 16.0f * s;
-		const float width     = pad_x + label_dim.x + gap + det_dim.x + pad_x;
-		const float height    = pad_y + line_h + pad_y + bar_h;
-		const ImVec2 pos {static_cast<float>(frame_extent.width) - margin - width, margin};
-		auto*        draw   = ImGui::GetForegroundDrawList();
-		const float  radius = 6.0f * s;
-		draw->AddRectFilled(pos, {pos.x + width, pos.y + height}, IM_COL32(0x17, 0x15, 0x13, 224), radius);
-		const float text_y = pos.y + pad_y + (line_h - label_dim.y) * 0.5f;
-		draw->AddText(ui, text_size, {pos.x + pad_x, text_y}, IM_COL32(0xec, 0xe8, 0xe0, 255), label.c_str());
-		draw->AddText(mono, text_size, {pos.x + pad_x + label_dim.x + gap, text_y}, IM_COL32(0xc9, 0xc6, 0xbf, 255),
-		              details.c_str());
-		// The bar along the bottom edge, inside the rounded corners.
-		draw->PushClipRect(pos, {pos.x + width, pos.y + height}, true);
-		DrawGoldBar(draw, {pos.x, pos.y + height - bar_h}, {width, bar_h}, value, 1.0f);
-		draw->PopClipRect();
+		const auto progress = GetPrecompileProgress();
+		if (progress.queued == 0) return;
+		const auto   done   = std::min(progress.finished, progress.queued);
+		const float  value  = static_cast<float>(done) / static_cast<float>(progress.queued);
+		const float  s      = static_cast<float>(frame_extent.height) / 1080.0f;
+		const float  size   = 56.0f * s;
+		const float  margin = 24.0f * s;
+		const ImVec2 pos {static_cast<float>(frame_extent.width) - margin - size, margin};
+		Brush::DrawShaderEnso(ImGui::GetForegroundDrawList(), pos, size, value,
+		                      std::chrono::duration<double>(now - badge_epoch).count(),
+		                      brand_font != nullptr ? brand_font : ImGui::GetFont(), static_cast<int>(value * 100.0f));
 	}
 
 	void PlayTrophySound() {
@@ -2059,8 +2032,8 @@ struct SystemOverlay::Impl {
 		ImGui::NewFrame();
 		if (!DrawLoadingScreen(frame_extent, now)) {
 			DrawSplash(frame_extent);
-			DrawShaderBadge(frame_extent);
 		}
+		DrawShaderBadge(frame_extent, now); // over the loading screen as well (foreground list)
 		const float performance_bottom = DrawPerformanceOverlay(graphics, frame_extent);
 		GetOverlaySnapshot(&snapshot);
 		if (has_overlay && snapshot.session == prepared_session) {
@@ -2131,9 +2104,9 @@ struct SystemOverlay::Impl {
 	std::unique_ptr<ImTextureData>              trophy_notification_image;
 	std::unique_ptr<ImTextureData>              loading_art; // the loading screen's art (LoadLoadingArt)
 	bool                                        loading_art_tried = false;
-	ImFont*                                     ui_font    = nullptr; // Manrope (loading screen, shader badge)
-	ImFont*                                     mono_font  = nullptr; // JetBrains Mono (shader badge)
-	ImFont*                                     brand_font = nullptr; // Cormorant Garamond (loading screen name)
+	ImFont*                                     ui_font    = nullptr; // Manrope (loading screen)
+	ImFont*                                     brand_font = nullptr; // Cormorant Garamond (loading screen, badge)
+	Clock::time_point                           badge_epoch = Clock::now(); // the shader badge's motion clock
 	std::unique_ptr<ImTextureData>              hand_cursor_image;
 	std::unique_ptr<ImTextureData>              drawing_cursor_image;
 	bool                                        cursor_initialized = false;

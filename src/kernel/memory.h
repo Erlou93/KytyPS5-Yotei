@@ -182,6 +182,9 @@ void                   WriteBacking(uint64_t vaddr, const void* data, uint64_t s
 void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
 void                   InstallGpuResources(Graphics::RenderContext* renderer) noexcept;
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
+// The fatal report of an access no handler took (runtimeLinker.cpp): the page as the host, the guest kernel and the
+// renderer see it, the replacement in progress (KYTY_FIX_REPLACE_GAP) and the recent unmaps over it. Crash path only.
+void ReportUnhandledFaultPage(uint64_t vaddr) noexcept;
 // The one reader for the emulator's own ordinary reads of guest memory. Bytes of a page under the image read watch come from
 // the backing mapping (no fault, no wait): what a plain read gives without the watch. A page the buffer cache also watches is
 // read plainly, so that its fault runs as without the watch. Any thread.

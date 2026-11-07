@@ -2,6 +2,7 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "kernel/memory.h"
 #include "kernel/memoryTrace.h"
+#include "kernel/pthread.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -31,6 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -154,6 +156,123 @@ static void ReportRecentUnmaps(uint64_t vaddr, uint64_t size) {
 	std::fprintf(stderr, "INVALID_ADDRESS_RANGE_STATE reserved_or_committed_bytes=0x%llx of 0x%llx\n",
 	             static_cast<unsigned long long>(TryClampReservedRangeSize(vaddr, size)),
 	             static_cast<unsigned long long>(size));
+}
+
+// AWARIA-WCZYTYWANIE-2026-11-08: on Windows a MAP_FIXED map (or a reserve) over memory that is still mapped goes through
+// ReplaceFixedRangeWithReserved, which unmaps the old views before the new view exists: for that moment the range is a
+// placeholder, and RenderContext no longer lists it (UnmapGpuRange ran first), so another thread's access faults and
+// HandleGpuFault refuses it. On the PS5 such a map replaces the old one atomically (the Linux path keeps the old view
+// until mmap replaces it, 46900d804). The replacement in progress: [begin, end) (begin 0: none) and the thread doing it;
+// written under g_memory_operation_mutex, read by the fault handler and the fatal report.
+struct ReplaceGap {
+	std::atomic<uint64_t> begin {0};
+	std::atomic<uint64_t> end {0};
+	std::atomic<uint64_t> owner {0};
+	std::atomic<uint64_t> opened {0};
+};
+static ReplaceGap       g_replace_gap;
+static thread_local int t_replace_gap_scopes = 0;
+
+static uint64_t ThisThreadKey() {
+	static thread_local const char key = 0;
+	return reinterpret_cast<uint64_t>(&key);
+}
+
+// One map or reserve call that may replace mapped memory: a gap opened inside it (OpenReplaceGap) is closed when the
+// outermost such call of the thread returns, after the new view and its MapGpuRange, or after the rollback.
+class ReplaceGapScope {
+public:
+	ReplaceGapScope() { t_replace_gap_scopes++; }
+	~ReplaceGapScope() {
+		if (--t_replace_gap_scopes == 0 && g_replace_gap.owner.load(std::memory_order_relaxed) == ThisThreadKey()) {
+			g_replace_gap.begin.store(0, std::memory_order_release);
+			g_replace_gap.owner.store(0, std::memory_order_release);
+		}
+	}
+	ReplaceGapScope(const ReplaceGapScope&)            = delete;
+	ReplaceGapScope& operator=(const ReplaceGapScope&) = delete;
+};
+
+static void OpenReplaceGap(uint64_t start, uint64_t size) {
+	if (t_replace_gap_scopes == 0) return; // not inside a map call: nothing waits for it
+	g_replace_gap.owner.store(ThisThreadKey(), std::memory_order_relaxed);
+	g_replace_gap.end.store(start + size, std::memory_order_relaxed);
+	g_replace_gap.begin.store(start, std::memory_order_release);
+	g_replace_gap.opened.fetch_add(1, std::memory_order_relaxed);
+}
+
+// The replacement in progress covers vaddr.
+static bool InReplaceGap(uint64_t vaddr) {
+	for (;;) {
+		const auto begin = g_replace_gap.begin.load(std::memory_order_acquire);
+		if (begin == 0 || vaddr < begin) return false;
+		const auto end = g_replace_gap.end.load(std::memory_order_acquire);
+		if (g_replace_gap.begin.load(std::memory_order_acquire) == begin) return vaddr < end;
+	}
+}
+
+// KYTY_FIX_REPLACE_GAP=1 (test switch, default 0): an access that faults inside the replacement in progress, on a thread
+// other than the replacing one and the GPU thread, waits until the replacement is done (at most 5 s) and runs again - what
+// the PS5's atomic replace gives that thread. The replacing thread needs neither (it waits for the GPU thread only in
+// UnmapGpuRange, before the old views go). Any other refused access ends as before.
+static bool ReplaceGapFixEnabled() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_FIX_REPLACE_GAP");
+		const bool  v     = value != nullptr && value[0] == '1';
+		if (v) std::fprintf(stderr, "FIX_REPLACE_GAP enabled\n");
+		return v;
+	}();
+	return on;
+}
+
+// The replacement state when the renderer refused this thread's last access (ReportUnhandledFaultPage prints it: by the
+// time the report runs the replacement has most likely finished).
+struct RefusalSnapshot {
+	bool     taken  = false;
+	bool     in_gap = false;
+	bool     owner  = false;
+	uint64_t begin  = 0;
+	uint64_t end    = 0;
+	uint64_t opened = 0;
+};
+static thread_local RefusalSnapshot t_refusal;
+
+static void NoteRefusal(uint64_t vaddr) noexcept {
+	t_refusal.taken  = true;
+	t_refusal.in_gap = InReplaceGap(vaddr);
+	t_refusal.owner  = g_replace_gap.owner.load(std::memory_order_acquire) == ThisThreadKey();
+	t_refusal.begin  = g_replace_gap.begin.load(std::memory_order_acquire);
+	t_refusal.end    = g_replace_gap.end.load(std::memory_order_acquire);
+	t_refusal.opened = g_replace_gap.opened.load(std::memory_order_relaxed);
+}
+
+static bool WaitReplaceGap(uint64_t vaddr) noexcept {
+	if (!ReplaceGapFixEnabled() || !InReplaceGap(vaddr) ||
+	    g_replace_gap.owner.load(std::memory_order_acquire) == ThisThreadKey() || Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	uint32_t   spins = 0;
+	while (InReplaceGap(vaddr)) {
+		if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
+			std::fprintf(stderr, "FIX_REPLACE_GAP timeout addr=0x%016llx\n", static_cast<unsigned long long>(vaddr));
+			return false;
+		}
+		if (++spins < 64u) {
+			std::this_thread::yield();
+		} else {
+			std::this_thread::sleep_for(std::chrono::microseconds(100));
+		}
+	}
+	static std::atomic<uint64_t> waits {0};
+	const auto                   n = waits.fetch_add(1, std::memory_order_relaxed) + 1u;
+	if (n <= 16u || (n & 1023u) == 0u) {
+		const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+		std::fprintf(stderr, "FIX_REPLACE_GAP waited addr=0x%016llx us=%lld n=%llu frame=%u\n",
+		             static_cast<unsigned long long>(vaddr), static_cast<long long>(us), static_cast<unsigned long long>(n),
+		             Graphics::DebugPresentCount().load());
+	}
+	return true;
 }
 
 static thread_local const ClampContext* t_clamp_context = nullptr;
@@ -1468,6 +1587,8 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 	const size_t count = log.entries.size();
 	auto&        cache = t_ordinary_read_pages;
 	stop               = begin;
+	// KYTY_TRACE_SRT_CLASSES, read once per call (an out-of-line call per run and page was ~0.4% of the GPU thread).
+	const bool srt_classes = Ir::SrtClassTrace();
 	if (begin >= count) {
 		stop = count;
 		return Result::Unchanged;
@@ -1547,7 +1668,7 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 		}
 		// KYTY_TRACE_SRT_CLASSES: the run's class, for the page waits below.
 		uint8_t run_class = 0;
-		if (Ir::SrtClassTrace()) {
+		if (srt_classes) {
 			for (size_t i = index; i < next; ++i) run_class |= log.entries[i].cls;
 		}
 		// Prove the run's pages (one question per page, answers shared through the session's page cache).
@@ -1568,9 +1689,9 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 
 					// A page with command-processor writes still pending is left to the
 					// readers, which put them over guest memory.
-					const uint64_t wait_start = Ir::SrtClassTrace() ? SrtClassesNowNs() : 0;
+					const uint64_t wait_start = srt_classes ? SrtClassesNowNs() : 0;
 					const bool     page_busy  = buffers.WaitPendingReadbacks(base, 4096u);
-					if (Ir::SrtClassTrace()) SrtClassesWait("verify", run_class, base, SrtClassesNowNs() - wait_start);
+					if (srt_classes) SrtClassesWait("verify", run_class, base, SrtClassesNowNs() - wait_start);
 					if (page_busy || buffers.IsRegionGpuModified(base, 4096u)) {
 						clean = false;
 						break;
@@ -1699,7 +1820,99 @@ void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
 }
 
 bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept {
-	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
+	if (g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr)) return true;
+	NoteRefusal(fault_vaddr);
+	return WaitReplaceGap(fault_vaddr); // KYTY_FIX_REPLACE_GAP
+}
+
+// KYTY_TRACE_REPLACE_LIVE=1 (diagnostic): every MAP_FIXED map or reserve that replaces mapped memory (on Windows through
+// ReplaceFixedRangeWithReserved, with a gap), the first 64 in full, then a count every 256: the call, the range, how much
+// of it was mapped, the calling guest thread, and for a direct map whether every replaced direct range already maps the
+// same backing (same=1: on the PS5 the call changes only the attributes).
+static void TraceReplaceLive(const char* kind, uint64_t vaddr, uint64_t len, int64_t direct_offset) {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_TRACE_REPLACE_LIVE");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (!on || g_virtual_ranges == nullptr || len == 0) return;
+	const auto end       = vaddr + len;
+	uint64_t   mapped    = 0;
+	uint32_t   ranges    = 0;
+	bool       same      = direct_offset >= 0;
+	auto       current   = vaddr;
+	while (current < end) {
+		VirtualRanges::Range range {};
+		if (!g_virtual_ranges->Query(current, 1, &range) || range.start >= end) break;
+		const auto start = std::max(current, range.start);
+		const auto stop  = std::min(end, range.start + range.size);
+		if (IsCommittedRangeType(range.type)) {
+			mapped += stop - start;
+			ranges++;
+			same = same && range.type == VirtualRangeType::Direct &&
+			       range.offset + (start - range.start) == static_cast<uint64_t>(direct_offset) + (start - vaddr);
+		}
+		current = stop;
+	}
+	if (mapped == 0) return;
+	static std::atomic<uint64_t> count {0};
+	const auto                   n = count.fetch_add(1, std::memory_order_relaxed) + 1u;
+	if (n > 64u && (n & 255u) != 0u) return;
+	char thread_name[64] = "(host thread)";
+	if (auto self = Libs::LibKernel::PthreadSelfOrNull(); self != nullptr) {
+		if (Libs::LibKernel::PthreadGetname(self, thread_name) != 0) std::snprintf(thread_name, sizeof(thread_name), "(unnamed)");
+	}
+	std::fprintf(stderr, "REPLACE_LIVE n=%llu kind=%s addr=0x%016llx len=0x%llx mapped=0x%llx ranges=%u same=%d thread=%s frame=%u\n",
+	             static_cast<unsigned long long>(n), kind, static_cast<unsigned long long>(vaddr),
+	             static_cast<unsigned long long>(len), static_cast<unsigned long long>(mapped), ranges, same ? 1 : 0,
+	             thread_name, Graphics::DebugPresentCount().load());
+}
+
+void ReportUnhandledFaultPage(uint64_t vaddr) noexcept {
+	const auto page = vaddr & ~uint64_t {0x3fff};
+	std::fprintf(stderr, "FAULT_PAGE addr=0x%016llx frame=%u\n", static_cast<unsigned long long>(vaddr),
+	             Graphics::DebugPresentCount().load());
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	MEMORY_BASIC_INFORMATION mbi {};
+	if (VirtualQuery(reinterpret_cast<const void*>(vaddr), &mbi, sizeof(mbi)) != 0) {
+		std::fprintf(stderr,
+		             "FAULT_PAGE host base=0x%016llx size=0x%llx alloc_base=0x%016llx state=0x%lx protect=0x%lx type=0x%lx "
+		             "(state 0x1000 commit 0x2000 reserve 0x10000 free; protect 0x2 readonly 0x4 readwrite 0x1 noaccess)\n",
+		             static_cast<unsigned long long>(reinterpret_cast<uint64_t>(mbi.BaseAddress)),
+		             static_cast<unsigned long long>(mbi.RegionSize),
+		             static_cast<unsigned long long>(reinterpret_cast<uint64_t>(mbi.AllocationBase)),
+		             static_cast<unsigned long>(mbi.State), static_cast<unsigned long>(mbi.Protect),
+		             static_cast<unsigned long>(mbi.Type));
+	}
+#endif
+	if (g_virtual_ranges != nullptr) {
+		VirtualRanges::Range range {};
+		if (g_virtual_ranges->Query(vaddr, 0, &range)) {
+			std::fprintf(stderr, "FAULT_PAGE guest range=0x%016llx+0x%llx type=%s prot=0x%x offset=0x%llx name=%.32s\n",
+			             static_cast<unsigned long long>(range.start), static_cast<unsigned long long>(range.size),
+			             std::string(magic_enum::enum_name(range.type)).c_str(), static_cast<unsigned>(range.protection),
+			             static_cast<unsigned long long>(range.offset), range.name);
+		} else {
+			std::fprintf(stderr, "FAULT_PAGE guest range=none\n");
+		}
+	}
+	if (g_gpu_resources != nullptr) {
+		auto& pages = g_gpu_resources->GetPageManager();
+		std::fprintf(stderr, "FAULT_PAGE renderer mapped=%d image_read=%d watchers_allow_write=%d\n",
+		             g_gpu_resources->IsMapped(vaddr, 1) ? 1 : 0, pages.ImageReadArmed(vaddr) ? 1 : 0,
+		             pages.WatchersAllow(vaddr, true) ? 1 : 0);
+	}
+	std::fprintf(stderr, "FAULT_PAGE at_refusal taken=%d in_gap=%d owner=%d begin=0x%016llx end=0x%016llx opened=%llu\n",
+	             t_refusal.taken ? 1 : 0, t_refusal.in_gap ? 1 : 0, t_refusal.owner ? 1 : 0,
+	             static_cast<unsigned long long>(t_refusal.begin), static_cast<unsigned long long>(t_refusal.end),
+	             static_cast<unsigned long long>(t_refusal.opened));
+	std::fprintf(stderr, "FAULT_PAGE replace_gap now in=%d begin=0x%016llx end=0x%016llx opened=%llu fix=%d\n",
+	             InReplaceGap(vaddr) ? 1 : 0,
+	             static_cast<unsigned long long>(g_replace_gap.begin.load(std::memory_order_acquire)),
+	             static_cast<unsigned long long>(g_replace_gap.end.load(std::memory_order_acquire)),
+	             static_cast<unsigned long long>(g_replace_gap.opened.load(std::memory_order_relaxed)),
+	             ReplaceGapFixEnabled() ? 1 : 0);
+	ReportRecentUnmaps(page, 0x4000);
+	std::fflush(stderr);
 }
 
 void ReadGuestPlain(void* dst, uint64_t vaddr, uint64_t size) {
@@ -3117,6 +3330,7 @@ static bool UnmapPooledBackingTransactional(const std::vector<PooledMemory::Mapp
 static int MapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                              const char* name) {
 	EXIT_NOT_IMPLEMENTED(addr_in_out == nullptr);
+	ReplaceGapScope replace_gap_scope; // KYTY_FIX_REPLACE_GAP
 
 	constexpr size_t   PAGE_SIZE                = 0x4000;
 	constexpr size_t   MAXIMUM_NAME_SIZE        = 32;
@@ -3184,6 +3398,7 @@ static int MapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags
 			reserved_target = true;
 			out_addr        = in_addr;
 		}
+		if (!reserved_target) TraceReplaceLive("flexible", in_addr, len, -1); // KYTY_TRACE_REPLACE_LIVE
 		if (!reserved_target && ReplaceFixedRangeWithReserved(in_addr, len)) {
 			reserved_target = true;
 			out_addr        = in_addr;
@@ -3869,6 +4084,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	if (addr == nullptr) {
 		return KERNEL_ERROR_EFAULT;
 	}
+	ReplaceGapScope replace_gap_scope; // KYTY_FIX_REPLACE_GAP
 	constexpr uint64_t PAGE_SIZE              = 0x4000;
 	constexpr int      GUEST_MAP_FIXED        = 0x10;
 	constexpr int      GUEST_MAP_NO_OVERWRITE = 0x80;
@@ -3983,6 +4199,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 				UnmapGpuRange(in_addr, len, UnmapCaller::MapOther);
 				reserved_target = true;
 			}
+			if (!reserved_target) TraceReplaceLive("direct", in_addr, len, direct_memory_start); // KYTY_TRACE_REPLACE_LIVE
 			if (!reserved_target && ReplaceFixedRangeWithReserved(in_addr, len)) {
 				reserved_target = true;
 			}
@@ -4287,7 +4504,8 @@ static bool ReplaceFixedRangeWithReserved(uint64_t start, uint64_t size) {
 		return ok;
 	};
 
-	UnmapGpuRange(start, size);
+	UnmapGpuRange(start, size, UnmapCaller::MapReplace); // (was Other: the report tells the replacement apart)
+	OpenReplaceGap(start, size); // KYTY_FIX_REPLACE_GAP: until the calling map or reserve returns
 	g_virtual_ranges->Remove(start, size);
 
 	for (auto& chunk: chunks) {
@@ -4390,6 +4608,7 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 	PRINT_NAME();
 
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
+	ReplaceGapScope                       replace_gap_scope; // KYTY_FIX_REPLACE_GAP
 
 	const auto in_addr = (addr != nullptr ? reinterpret_cast<uint64_t>(*addr) : 0);
 
@@ -4420,6 +4639,7 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 		if ((flags & GUEST_MAP_NO_OVERWRITE) != 0 && g_virtual_ranges->HasOverlap(in_addr, len)) {
 			return KERNEL_ERROR_ENOMEM;
 		}
+		TraceReplaceLive("reserve", in_addr, len, -1); // KYTY_TRACE_REPLACE_LIVE
 		if (ReplaceFixedRangeWithReserved(in_addr, len)) {
 			out_addr            = in_addr;
 			range_already_added = true;

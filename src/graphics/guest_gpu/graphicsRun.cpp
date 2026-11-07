@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/guest_gpu/stallWatch.h"
 #include "graphics/guest_gpu/drawStateObserver.h"
 #include "graphics/host_gpu/renderer/cleanDraws.h"
 
@@ -606,6 +607,7 @@ GuestGpu::GuestGpu(RenderContext& renderer)
 	m_executor = std::jthread([this] { ExecutionThread(); });
 	m_resolver = std::jthread([this] { ResolveThread(); });
 	m_thread   = std::jthread(ThreadRun, this);
+	StallWatch::StartIfEnabled(); // KYTY_DIAG_STALL_WATCH (diagnostic)
 }
 
 GuestGpu::~GuestGpu() {

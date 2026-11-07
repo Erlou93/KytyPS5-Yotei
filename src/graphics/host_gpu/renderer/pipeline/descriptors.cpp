@@ -30,6 +30,7 @@
 #include "graphics/host_gpu/renderer/drawRepeat.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/cache/ringCensus.h"
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/recordPackets.h"
@@ -2780,7 +2781,10 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	}
 	// This draw reads a translation that still names a dead slot (dropped in this
 	// tick after the table's one translation of the tick).
-	if (table.generation != bindless.TableGeneration()) stats.dead_slot_reads++;
+	if (table.generation != bindless.TableGeneration()) {
+		stats.dead_slot_reads++;
+		bindless.NoteDeadSlotRead(table); // a guest unmap's deferred drop read early (PERF unmap_image_defer)
+	}
 	const auto first = static_cast<uint32_t>((use.base - table_base) / 4u);
 	const auto total = table.covered / 4u;
 	if (first >= total) return fallback(Fallback::NoLayout);
@@ -2860,9 +2864,172 @@ void RenderExecutor::LearnBindlessClass(uint64_t shader_hash, const ShaderRecomp
 // Gate 22.10: one 93,840-byte table alternates with 23,184 bytes every frame (two full translations per frame).
 static std::atomic<uint64_t> g_ttd_translations {0}, g_ttd_entries {0}, g_ttd_reused {0};
 
-bool RenderExecutor::TranslateBindlessTable(BindlessTable::Table& table, uint32_t covered, uint64_t hash,
-                                            uint64_t frame, uint64_t shader_hash) {
+namespace {
+// The difference translation: the fields a translation named the entries with.
+uint64_t TableFieldsSignature(const BindlessTable::Table& table) {
+	uint64_t h = 0x9E3779B97F4A7C15ull ^ table.fields.size();
+	for (const auto& field: table.fields)
+		h = (h ^ ((uint64_t {field.stride} << 42u) ^ (uint64_t {field.offset} << 21u) ^ field.end)) * 0x100000001B3ull;
+	return h;
+}
+
+} // namespace
+
+bool RenderExecutor::TranslateBindlessTable(BindlessTable::Table& table, uint32_t covered, uint64_t hash, uint64_t frame,
+                                            uint64_t shader_hash) {
+	// A table over 1 MiB translates by difference from its last translation when it can (6.11, checked against
+	// the entry-by-entry translation: 2,559 translations of the town walk, 0 different values, slots and field tallies;
+	// walk +4.6% fps, two runs); every other translation entry by entry.
+	if (covered > TableMaxBytes) {
+		const int result = TranslateTableDiff(table, covered, hash, frame);
+		if (result >= 0) return result == 1;
+	}
+	return TranslateBindlessTableFull(table, covered, hash, frame, shader_hash);
+}
+
+// The bindless binder lock is taken only off the GPU thread: its users all run on the GPU thread (the preparation worker it
+// kept out is gone; 8.11 town walk: no entry from another thread). An entry from another thread still locks and is
+// reported once. (8.11, with the dense slot dedup and the kept-owner skip below: +0.3% / +1.5% fps phases in two
+// live A/B runs, pairs +0.5% / +0.4% median; exact.)
+class BinderLock {
+public:
+	explicit BinderLock(std::mutex& mutex) {
+		if (GuestGpu::IsGpuThread()) return;
+		static std::atomic_bool reported {false};
+		if (!reported.exchange(true)) std::fprintf(stderr, "BINDER_LOCK taken off the GPU thread\n");
+		m_lock = std::unique_lock<std::mutex>(mutex);
+	}
+
+private:
+	std::unique_lock<std::mutex> m_lock;
+};
+
+int RenderExecutor::TranslateTableDiff(BindlessTable::Table& table, uint32_t covered, uint64_t hash, uint64_t frame) {
+	auto&      bindless = m_context.GetBindlessTable();
+	const auto fail     = [](int /*why: 1 not ready, 2 size, 3 fields, 4 prune, 5 no owners, 6 generation*/) { return -1; };
+	if (!table.diff_ready) return fail(1);
+	const uint32_t entries = covered / 4u;
+	if (covered != table.covered || covered != table.src_covered || table.values.size() != entries ||
+	    table.src_values.size() != entries || table.src_words.size() != entries || m_table_words.size() < entries)
+		return fail(2);
+	if (TableFieldsSignature(table) != table.diff_signature || table.diff_entries.size() != table.diff_fields.size())
+		return fail(3);
+	const bool classes = bindless.ClassesEnabled();
+	if (classes && table.field_frames.size() == table.fields.size()) {
+		// The full translation would let unasked fields go (another set of named entries).
+		for (const auto field_frame: table.field_frames)
+			if (field_frame + 64u <= frame) return fail(4);
+	}
+	if (!bindless.SlotOwnersOn()) return fail(5);
+	const bool     timed             = PerfEnabled();
+	const auto     start             = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+	auto&          stats             = bindless.GetTableStats();
+	const uint32_t descriptor_dwords = (table.view.flags & 1u) != 0u ? 4u : 8u; // R128: words 4..7 read as zero
+	const bool     integer           = BindlessTable::IntegerClass(table.view.numeric_class);
+	const bool     tallies           = classes && !integer && table.field_tallies.size() == table.fields.size();
+	const uint32_t binding           = table.view.binding;
+	// The slots that died since the last translation: their entries resolve again (the full translation's taken slot test
+	// fails for them: not live, or live again with another key).
+	const size_t capacity = bindless.TableSlotCount(binding);
+	m_diff_dead.assign(capacity, 0);
+	for (const auto slot: table.dead_list)
+		if (slot < capacity) m_diff_dead[slot] = 1;
+	const uint64_t generation = bindless.TableGeneration();
+	m_diff_new.clear();
+	for (size_t i = 0; i < table.diff_entries.size(); i++) {
+		const uint32_t  entry         = table.diff_entries[i];
+		const uint32_t* now           = m_table_words.data() + entry;
+		uint32_t*       src           = table.src_words.data() + entry;
+		const bool      words_changed = !std::equal(now, now + descriptor_dwords, src);
+		const uint32_t  old_slot      = table.values[entry];
+		const bool      slot_dead     = old_slot < capacity && m_diff_dead[old_slot] != 0;
+		if (!words_changed && !slot_dead) continue; // the full translation takes the previous slot (same words, live)
+		std::array<uint32_t, 8> words {};
+		std::copy_n(now, descriptor_dwords, words.begin());
+		if (words_changed && tallies) {
+			// The field's tally without the old record and with the new one (the full translation counts every record).
+			auto&                                   tally = table.field_tallies[table.diff_fields[i]];
+			ShaderRecompiler::IR::BindlessFieldTally before {}, after {};
+			ShaderRecompiler::IR::TallyBindlessFieldDescriptor(src, descriptor_dwords == 4u, binding, before);
+			ShaderRecompiler::IR::TallyBindlessFieldDescriptor(words.data(), descriptor_dwords == 4u, binding, after);
+			tally.uint_count += after.uint_count - before.uint_count;
+			tally.sint_count += after.sint_count - before.sint_count;
+			tally.float_count += after.float_count - before.float_count;
+			tally.float_tiny += after.float_tiny - before.float_tiny;
+			tally.other += after.other - before.other;
+		}
+		const uint32_t slot     = ResolveTableDescriptor(table, words, frame);
+		table.values[entry]     = slot;
+		table.src_values[entry] = slot;
+		if (!bindless.IsPlaceholderSlot(slot)) m_diff_new.push_back(slot);
+		std::copy_n(now, descriptor_dwords, src);
+		stats.fields++;
+	}
+	// The distinct slots in naming order, as the full translation lists them.
+	if (++m_table_stamp == 0u) m_table_stamp = 1u;
+	m_diff_slots.clear();
+	// A slot already listed is skipped by its dense mark (the stamps of earlier translations are older) before its record
+	// is read (the record's stamp is set by this loop only, so the list is the same).
+	if (m_diff_seen.size() < capacity) m_diff_seen.resize(capacity, 0u);
+	for (const uint32_t entry: table.diff_entries) {
+		const uint32_t slot = table.values[entry];
+		if (bindless.IsPlaceholderSlot(slot)) continue;
+		if (slot < capacity) {
+			if (m_diff_seen[slot] == m_table_stamp) continue;
+			m_diff_seen[slot] = m_table_stamp;
+		}
+		auto& info = bindless.GetTableSlot(binding, slot);
+		if (info.stamp == m_table_stamp) continue;
+		info.stamp = m_table_stamp;
+		m_diff_slots.emplace_back(slot, info.generation);
+	}
+	// A lookup dropped an image meanwhile (the full translation's second round): entry by entry then.
+	if (bindless.TableGeneration() != generation) {
+		for (const auto& [slot, slot_generation]: m_diff_slots) {
+			const auto& info = bindless.GetTableSlot(binding, slot);
+			if (!info.live || info.generation != slot_generation) return fail(6);
+		}
+	}
+	m_table_old_slots.assign(table.slots.begin(), table.slots.end());
+	table.slots.swap(m_diff_slots);
+	bindless.UpdateTableOwners(table, m_table_old_slots, m_table_stamp, true);
+	table.dead_list.clear();
+	table.src_frame       = frame;
+	table.covered         = covered;
+	table.hash            = hash;
+	table.translated_tick = m_context.GetCommandScheduler().CurrentTick();
+	if (bindless.TableSlotsAliveFast(table)) table.generation = bindless.TableGeneration();
+	if (table.fast_list && table.refreshed_frame != 0) {
+		// A listed table (differential tables step 2; 7.11 town walk: 4,702 checked full refreshes, 209 million slots, none left due
+		// and none GPU-written off the list; +1.5% fps, two live A/B runs): the slots it took are refreshed at the next
+		// refresh (RefreshTableSlots, as the full pass after a translation refreshes them) and the slots that left go from
+		// the table's lists (the full pass rebuilds both lists from the table's slots, stamped by this translation).
+		for (const uint32_t slot: m_diff_new) table.diff_new_slots.emplace_back(slot, bindless.GetTableSlot(binding, slot).generation);
+		const auto left = [&](const std::pair<uint32_t, uint32_t>& e) {
+			const auto& info = bindless.GetTableSlot(binding, e.first);
+			return info.stamp != m_table_stamp || info.generation != e.second;
+		};
+		std::erase_if(table.fast_slots, left);
+		std::erase_if(table.gpu_slots, left);
+	} else {
+		table.refreshed_frame = 0; // its slots are looked up and its images listed before the draw
+	}
+	stats.translated++;
+	const bool stored = bindless.StoreTableRegion(table);
+	if (!stored) {
+		table.hash         = 0;
+		table.checked_tick = 0;
+	}
+	if (timed)
+		stats.translate_ns += static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+	return stored ? 1 : 0;
+}
+
+bool RenderExecutor::TranslateBindlessTableFull(BindlessTable::Table& table, uint32_t covered, uint64_t hash,
+                                                uint64_t frame, uint64_t shader_hash) {
 	auto&          bindless = m_context.GetBindlessTable();
+	const bool     large    = covered > TableMaxBytes; // its entries are listed for the difference translation
 	auto&          stats    = bindless.GetTableStats();
 	const bool     timed    = PerfEnabled();
 	const auto     start    = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
@@ -2906,6 +3073,8 @@ bool RenderExecutor::TranslateBindlessTable(BindlessTable::Table& table, uint32_
 		if (++m_table_stamp == 0u) m_table_stamp = 1u;
 		table.values.assign(entries, unnamed);
 		table.slots.clear();
+		table.diff_entries.clear();
+		table.diff_fields.clear();
 		if (classes) table.field_tallies.assign(table.fields.size(), {});
 		descriptors  = 0;
 		placeholders = 0;
@@ -2942,6 +3111,10 @@ bool RenderExecutor::TranslateBindlessTable(BindlessTable::Table& table, uint32_
 					slot = ResolveTableDescriptor(table, words, frame);
 				}
 				table.values[entry] = slot;
+				if (large) {
+					table.diff_entries.push_back(entry);
+					table.diff_fields.push_back(static_cast<uint16_t>(index));
+				}
 				stats.fields++;
 				descriptors++;
 				if (bindless.IsPlaceholderSlot(slot)) {
@@ -2962,11 +3135,21 @@ bool RenderExecutor::TranslateBindlessTable(BindlessTable::Table& table, uint32_
 	if (bindless.SlotOwnersOn()) bindless.UpdateTableOwners(table, m_table_old_slots, m_table_stamp);
 	// The source for the next translation (the larger one wins within two frames, so a table that alternates between two
 	// sizes keeps the large one).
+	bool src_taken = false;
 	if (covered >= table.src_covered || table.src_frame + 2u <= frame) {
 		table.src_words.assign(m_table_words.begin(), m_table_words.begin() + entries);
 		table.src_values  = table.values;
 		table.src_covered = covered;
 		table.src_frame   = frame;
+		src_taken         = true;
+	}
+	// The next translation may go by difference from this one.
+	table.diff_ready     = large && src_taken && table.fields.size() < 65536u;
+	table.diff_signature = TableFieldsSignature(table);
+	table.dead_list.clear();
+	if (!large) {
+		table.diff_entries.clear();
+		table.diff_fields.clear();
 	}
 	const uint64_t translations = g_ttd_translations.fetch_add(1, std::memory_order_relaxed) + 1u;
 	g_ttd_entries.fetch_add(entries, std::memory_order_relaxed);
@@ -3144,8 +3327,8 @@ void RenderExecutor::ListTableImagesByEvents(BindlessTable::Table& table, std::v
 		if (!table.walked || table.walked_hash != table.images_hash || table.layout_log_pos < log.base) {
 			// The set changed (or the log was trimmed past this table): every image once.
 			list.insert(list.end(), table.images.begin(), table.images.end());
-			table.image_set.clear();
-			for (const auto id: table.images) table.image_set.insert(key(id));
+			table.image_set.Clear(table.images.size());
+			for (const auto id: table.images) table.image_set.Insert(key(id));
 			table.unwatched.assign(table.images.begin(), table.images.end());
 			table.walked         = true;
 			table.walked_hash    = table.images_hash;
@@ -3155,7 +3338,7 @@ void RenderExecutor::ListTableImagesByEvents(BindlessTable::Table& table, std::v
 		}
 		for (uint64_t pos = table.layout_log_pos; pos < end; pos++) {
 			const auto id = log.ids[pos - log.base];
-			if (table.image_set.contains(key(id))) list.push_back(id);
+			if (table.image_set.Contains(key(id))) list.push_back(id);
 		}
 		table.layout_log_pos = end;
 	}
@@ -3210,7 +3393,7 @@ void RenderExecutor::RefreshTableSlots(BindlessTable::Table& table, uint64_t fra
 	const bool list_gpu    = full || table.gpu_epoch != bindless.TableGpuEpoch();
 	// The slot journal: the images again only when one of its own slots changed image or died.
 	const bool list_images = table.images_dirty;
-	if (!list_gpu && !list_images && table.gpu_slots.empty()) return;
+	if (!list_gpu && !list_images && table.gpu_slots.empty() && table.diff_new_slots.empty()) return;
 	const bool timed    = PerfEnabled();
 	const auto start    = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	bool       remapped = false;
@@ -3260,6 +3443,41 @@ void RenderExecutor::RefreshTableSlots(BindlessTable::Table& table, uint64_t fra
 		stats.refresh_event_skips++;
 		return true;
 	};
+	// differential tables step 2: the slots the last difference translation took, each as the full pass after a
+	// translation handles it (due unless refreshed in this frame; the trusted skip, else the check, else a refresh; a
+	// skipped one is touched), then on the table's lists as that pass lists them.
+	m_diff_touch.clear();
+	if (!table.diff_new_slots.empty()) {
+		for (const auto& [slot, generation]: table.diff_new_slots) {
+			auto& info = bindless.GetTableSlot(table.view.binding, slot);
+			if (!info.live || info.generation != generation) continue;
+			if (info.refreshed_frame != frame) {
+				if (g_table_slot_journal_pending.load(std::memory_order_acquire)) bindless.DrainSlotJournal();
+				bool skipped = true;
+				if (!trusted(info, generation)) {
+					stats.journal_checked++;
+					if (!unchanged(info, generation)) {
+						remapped = refresh_slot(slot) || remapped;
+						skipped  = false;
+					} else {
+						info.journal_named = false;
+					}
+				}
+				if (skipped) {
+					info.refreshed_frame = frame;
+					info.refreshed_draw  = m_bindless_draw;
+					stats.refresh_event_skips++;
+					m_diff_touch.push_back(info.image);
+				}
+			}
+			if (!info.live || info.generation != generation) continue;
+			if (!trusted(info, generation)) table.fast_slots.emplace_back(slot, generation);
+			const std::pair<uint32_t, uint32_t> entry {slot, generation};
+			if (info.gpu_written && std::find(table.gpu_slots.begin(), table.gpu_slots.end(), entry) == table.gpu_slots.end())
+				table.gpu_slots.push_back(entry);
+		}
+		table.diff_new_slots.clear();
+	}
 	if (list_gpu && on_list) {
 		// The list and the GPU-written slots; the slots the list path leaves alone get no touch (FastTouchKeeps).
 		const auto     loop_start = large_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
@@ -3370,6 +3588,11 @@ void RenderExecutor::RefreshTableSlots(BindlessTable::Table& table, uint64_t fra
 			stats.large_list_ns += large_since(list_start);
 			stats.large_lists++;
 		}
+	}
+	if (!m_diff_touch.empty()) {
+		batch.Release(); // it holds the cache's lock; the touches take it themselves
+		texture_cache.TouchTableImages(m_diff_touch);
+		m_diff_touch.clear();
 	}
 	if (timed)
 		bindless.GetTableStats().refresh_ns += static_cast<uint64_t>(
@@ -3902,8 +4125,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 			if (snapshot.bindless_heaps.empty() || !m_context.GetBindlessTable().Enabled()) {
 				PrepareBindlessHeaps(runtime, prepared);
 			} else {
-				auto&           bindless_table = m_context.GetBindlessTable();
-				std::lock_guard binder_lock(bindless_table.BinderMutex());
+				auto&            bindless_table = m_context.GetBindlessTable();
+				const BinderLock binder_lock(bindless_table.BinderMutex());
 				PrepareBindlessHeaps(runtime, prepared);
 			}
 			BindReplay::Report();
@@ -4129,8 +4352,8 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 		PrepareBindlessHeaps(runtime, prepared);
 	} else {
 		KYTY_PROFILER_BLOCK("PrepareBindings::Bindless");
-		auto&           bindless_table = m_context.GetBindlessTable();
-		std::lock_guard binder_lock(bindless_table.BinderMutex());
+		auto&            bindless_table = m_context.GetBindlessTable();
+		const BinderLock binder_lock(bindless_table.BinderMutex());
 		const DispatchSubTimer heaps_timer(DispatchSub::BindlessHeaps); // KYTY_TRACE_DISPATCH_CENSUS
 		PrepareBindlessHeaps(runtime, prepared);
 	}
@@ -4367,7 +4590,22 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		if (index == UINT32_MAX) continue;
 		uint32_t buffer_offset = 0;
 		KYTY_PROFILER_BLOCK("RebindBuffers::Storage");
-		prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
+		if (buffer.written && RingCensus::Enabled()) [[unlikely]] {
+			// KYTY_TRACE_RING_CENSUS (diagnostic): the census records this binding as the writer of its range.
+			RingCensus::Binding census_binding;
+			census_binding.resource        = resource;
+			census_binding.descriptor      = index;
+			census_binding.max_byte_extent = buffer.max_byte_extent;
+			census_binding.fixed_ranges    = buffer.fixed_writes ? &buffer.fixed_write_ranges : nullptr;
+			census_binding.append    = buffer.append_counter != ShaderRecompiler::IR::BufferResource::NoAppendCounter;
+			census_binding.read      = buffer.read;
+			census_binding.atomic    = buffer.atomic;
+			census_binding.formatted = buffer.formatted;
+			const RingCensus::BindingScope census_scope(&census_binding);
+			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
+		} else {
+			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
+		}
 		pack_memory_offset(index, buffer_offset);
 		if (layout.memory_stride_dword != ShaderRecompiler::IR::PushData::NoStart) {
 			// The record stride the shader reads at run time.
@@ -5581,10 +5819,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	// The bindless heaps prepared for this draw are read by the commands recorded at this tick.
 	{
 		// The worker may be preparing the next draw's bindless heaps meanwhile.
-		auto&                        bindless_table = m_context.GetBindlessTable();
-		std::unique_lock<std::mutex> binder_lock(bindless_table.BinderMutex(), std::defer_lock);
-		const auto                   tick = m_context.GetCommandScheduler().CurrentTick();
-		binder_lock.lock();
+		auto&            bindless_table = m_context.GetBindlessTable();
+		const auto       tick           = m_context.GetCommandScheduler().CurrentTick();
+		const BinderLock binder_lock(bindless_table.BinderMutex());
 		bindless_table.MarkDrawHeapsCommitted(tick, m_commit_bindless_heaps, m_commit_bindless_tables, m_commit_bindless_plan,
 		                                      true);
 	}

@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/bufferCacheTrace.h"
+#include "graphics/host_gpu/renderer/cache/ringCensus.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -627,6 +628,52 @@ static bool SkipReadbackCeiling() {
 	return on;
 }
 
+// Reads of GPU-written bytes from the host mapping of device memory (BAR, write-combined VRAM over PCIe) are fast on
+// most machines (~1 GB/s for the walk's ~4 KiB reads) and very slow on some (8.11: an i9-12900K + RTX 5090 read at
+// ~19 MB/s, 4.1 s of every 5 s on the GPU thread; skipping the downloads gave 32 instead of ~10 fps). The first reads are
+// timed: below BarSlowMbps the downloads take the GPU copy into cached host memory instead (the path larger reads and
+// not yet finished writes take today; the same bytes). KYTY_BAR_READS=0 never reads the mapping, =1 always does.
+namespace {
+constexpr double   BarSlowMbps    = 100.0;
+constexpr uint64_t BarProbeCalls  = 512;
+constexpr uint64_t BarProbeBytes  = 2u << 20u;
+std::atomic<int>      g_bar_reads {-1}; // -1 measuring, 0 off (slow or KYTY_BAR_READS=0), 1 on
+std::atomic<uint64_t> g_bar_probe_calls {0};
+std::atomic<uint64_t> g_bar_probe_bytes {0};
+std::atomic<uint64_t> g_bar_probe_ns {0};
+
+bool BarReadsOn() {
+	static const int forced = [] {
+		const char* value = std::getenv("KYTY_BAR_READS");
+		if (value != nullptr && (value[0] == '0' || value[0] == '1') && value[1] == '\0') {
+			std::fprintf(stderr, "BAR_READS forced %s (KYTY_BAR_READS)\n", value[0] == '1' ? "on" : "off");
+			g_bar_reads.store(value[0] - '0', std::memory_order_relaxed);
+			return value[0] - '0';
+		}
+		return -1;
+	}();
+	(void)forced;
+	return g_bar_reads.load(std::memory_order_relaxed) != 0;
+}
+
+// Every timed BAR copy while measuring: the decision once BarProbeCalls copies and BarProbeBytes bytes were read.
+void BarReadsProbe(uint64_t bytes, uint64_t ns) {
+	if (g_bar_reads.load(std::memory_order_relaxed) != -1) return;
+	const uint64_t calls = g_bar_probe_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+	const uint64_t total = g_bar_probe_bytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+	const uint64_t time  = g_bar_probe_ns.fetch_add(ns, std::memory_order_relaxed) + ns;
+	if (calls < BarProbeCalls || total < BarProbeBytes || time == 0) return;
+	const double mbps = static_cast<double>(total) / (1024.0 * 1024.0) / (static_cast<double>(time) / 1e9);
+	int          expected = -1;
+	if (g_bar_reads.compare_exchange_strong(expected, mbps < BarSlowMbps ? 0 : 1, std::memory_order_relaxed)) {
+		std::fprintf(stderr, "BAR_READS %s: %.0f MB/s over %llu reads (%.1f MiB)%s\n", mbps < BarSlowMbps ? "slow" : "fast",
+		             mbps, static_cast<unsigned long long>(calls), static_cast<double>(total) / (1024.0 * 1024.0),
+		             mbps < BarSlowMbps ? " - downloads go through GPU copies" : "");
+		std::fflush(stderr);
+	}
+}
+} // namespace
+
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	KYTY_PROFILER_BLOCK("BufferCache::DownloadBufferMemory");
@@ -639,7 +686,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			});
 			return any;
 		}
-		if (!buffer.Mapped().empty()) {
+		if (!buffer.Mapped().empty() && BarReadsOn()) {
 			DownloadWaitTrace::g_last_bar_reason = -1;
 			if (TryBarDownload(buffer, vaddr, size) == 1) return true;
 		}
@@ -759,7 +806,15 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		}
 	};
 	if constexpr (async) {
-		m_scheduler.DeferPriorityOperation(std::move(publish));
+		// An unmap of these bytes waits for this publish (RenderContext::UnmapMemory).
+		if (auto published = NotePendingGuestWrite(vaddr, size)) {
+			m_scheduler.DeferPriorityOperation([publish = std::move(publish), published = std::move(published)] {
+				publish();
+				published->store(true, std::memory_order_release);
+			});
+		} else {
+			m_scheduler.DeferPriorityOperation(std::move(publish));
+		}
 	} else {
 		const auto              tick       = m_scheduler.CurrentTick();
 		const auto              wait_start = std::chrono::steady_clock::now();
@@ -963,7 +1018,17 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		// Today's request: runs on the GPU thread (SendCommandSync below).
 		auto request = [this, vaddr, size, is_write, reason, perf_time, call_start, timeline_call, caller_eligible,
 		                allow_defer, attempt, last_tick, defer = &defer_tick, deferred] {
+			// KYTY_TRACE_RING_CENSUS (diagnostic): a write request's census record, inactive unless the census is on.
+			RingCensus::Request census;
+			struct CensusEnd {
+				BufferCache*         cache;
+				RingCensus::Request& request;
+				~CensusEnd() {
+					if (request.active) cache->RingCensusEnd(request);
+				}
+			} census_end {this, census};
 			const auto mark_cpu_written = [&] {
+				if (census.active) RingCensusCompare(census); // KYTY_TRACE_RING_CENSUS: before the page opens
 				CpuDirtyDeferScope defer_scope(deferred);
 				m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 			};
@@ -1081,9 +1146,11 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			// A write whose page's GPU bytes were just published or dropped: in place of UnmarkRegionAsGpuModified +
 			// mark_cpu_written.
 			const auto release_gpu_to_cpu = [&] {
+				if (census.active) RingCensusCompare(census); // KYTY_TRACE_RING_CENSUS: before the page opens
 				CpuDirtyDeferScope defer_scope(deferred);
 				NoteInvalidateProtectMerge(m_memory_tracker.ReleaseGpuToCpu(vaddr, size));
 			};
+			if (is_write && RingCensus::Enabled()) RingCensusBegin(census, vaddr, size); // KYTY_TRACE_RING_CENSUS
 			// A pending asynchronous copy of this window must publish before the CPU reads or
 			// writes it; it may also already make the access fault-free.
 			const bool pending = std::ranges::any_of(m_eager_readbacks, [&](const EagerReadback& entry) {
@@ -1094,6 +1161,8 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			if (!m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
 				PerfCount(pending ? PerfKind::EagerWait : PerfKind::EagerHit);
 				if (pending) ReadbackBurn(); // KYTY_DIAG_GPU_BURN_AT=readback (measurement only)
+				census.downloaded = pending && census.gpu_modified; // KYTY_TRACE_RING_CENSUS
+				census.path       = census.downloaded ? RingCensus::Path::Eager : RingCensus::Path::NotGpu;
 				if (is_write) mark_cpu_written();
 				return;
 			}
@@ -1101,6 +1170,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			// range left without GPU bytes needs nothing more.
 			if (!m_append_pools.empty() && AppendRelease(vaddr, size)) {
 				if (is_write) {
+					census.path = RingCensus::Path::Append; // KYTY_TRACE_RING_CENSUS
 					release_gpu_to_cpu();
 					return;
 				}
@@ -1111,6 +1181,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			// eager copies (which must publish first), before the read window and download planning; a page left
 			// without GPU bytes needs nothing more. Newer GPU bytes go on to the download below.
 			if (is_write && DropDeadRingBytes(vaddr)) {
+				census.path = RingCensus::Path::DeadRing; // KYTY_TRACE_RING_CENSUS
 				release_gpu_to_cpu();
 				return;
 			}
@@ -1127,7 +1198,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			if (lo < hi && lo <= vaddr && vaddr + size <= hi) {
 				PerfCount(PerfKind::SyncRead);
 
+				census.path = RingCensus::Path::WindowDl; // KYTY_TRACE_RING_CENSUS
 				if (timed_download(buffer, lo, hi - lo)) {
+					census.downloaded = true; // KYTY_TRACE_RING_CENSUS
 					if (!is_write) {
 						UnmarkWindow(lo, hi);
 						return;
@@ -1139,18 +1212,22 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 					release_gpu_to_cpu();
 					return;
 				}
+				census.path = RingCensus::Path::NoCopy; // KYTY_TRACE_RING_CENSUS
 				if (is_write) mark_cpu_written();
 				return;
 			}
 			PerfCount(PerfKind::SyncRead);
 
+			census.path = RingCensus::Path::PageDl; // KYTY_TRACE_RING_CENSUS
 			if (timed_download(buffer, vaddr, size)) {
+				census.downloaded = true; // KYTY_TRACE_RING_CENSUS
 				if (is_write) {
 					release_gpu_to_cpu();
 					return;
 				}
 				m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
 			}
+			if (!census.downloaded) census.path = RingCensus::Path::NoCopy; // KYTY_TRACE_RING_CENSUS
 			if (is_write) mark_cpu_written();
 		};
 		m_scheduler.Context().GetGpu().SendCommandSync(std::move(request));
@@ -1243,6 +1320,28 @@ BufferCache::CallerPlan BufferCache::PlanCallerWait(uint64_t vaddr, uint64_t siz
 	}
 	plan.tick = newest;
 	return plan;
+}
+
+// ---- The pending publishes of guest bytes (RenderContext::UnmapMemory waits for those into its range) ----
+std::shared_ptr<std::atomic_bool> BufferCache::NotePendingGuestWrite(uint64_t vaddr, uint64_t size) {
+	if (size == 0) return nullptr;
+	if (m_pending_guest_writes.size() >= 256u) {
+		std::erase_if(m_pending_guest_writes,
+		              [](const PendingGuestWrite& write) { return write.done->load(std::memory_order_acquire); });
+	}
+	auto done = std::make_shared<std::atomic_bool>(false);
+	m_pending_guest_writes.push_back({vaddr, vaddr + size, m_scheduler.CurrentTick(), done});
+	return done;
+}
+
+uint64_t BufferCache::PendingGuestWriteTick(uint64_t vaddr, uint64_t size) {
+	uint64_t tick = 0;
+	std::erase_if(m_pending_guest_writes, [&](const PendingGuestWrite& write) {
+		if (write.done->load(std::memory_order_acquire)) return true;
+		if (vaddr < write.end && write.start < vaddr + size) tick = std::max(tick, write.tick);
+		return false;
+	});
+	return tick;
 }
 
 // The write-through of the GPU thread's own writes of guest memory (end-of-pipe labels and
@@ -2832,6 +2931,7 @@ void BufferCache::NoteObtainedWrite(uint64_t vaddr, uint64_t size) {
 		if (m_gpu_write_observer) m_gpu_write_observer(vaddr, size);
 		return;
 	}
+	if (RingCensus::Enabled()) RingCensusWrite(vaddr, size, false); // KYTY_TRACE_RING_CENSUS (diagnostic)
 	{
 		const DispatchSubTimer dirty_timer(DispatchSub::OwDirtyAdd); // KYTY_TRACE_DISPATCH_CENSUS
 		GpuDirtyAdd(vaddr, size);
@@ -2855,6 +2955,7 @@ void BufferCache::NoteObtainedWriteRepeat(uint64_t vaddr, uint64_t size, bool sa
 	// As NoteObtainedWrite, without what the noted range already holds: the GPU-dirty set's range (the generation still
 	// moves, as for every GPU write) and, at the same tick, the per-range write ticks and the granule write ticks.
 	if (UploadClobberCheck()) C0Note(vaddr, size, C0Event::ShaderWrite, DebugWriterHash().load(std::memory_order_relaxed));
+	if (RingCensus::Enabled()) RingCensusWrite(vaddr, size, true); // KYTY_TRACE_RING_CENSUS (diagnostic)
 	if (!same_tick) NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick());
 	if (m_gpu_write_observer) m_gpu_write_observer(vaddr, size);
 	BumpHotGeneration(vaddr, size);
@@ -2874,6 +2975,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRange(uint64_t vaddr, uint64_
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, false, nullptr, UploadCaller::BdaRange);
 	if (is_written) {
+		const RingCensus::BdaRangeScope census_kind; // KYTY_TRACE_RING_CENSUS: the writer is a device-address range
 		NoteObtainedWrite(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
@@ -3448,6 +3550,7 @@ void CopyFromWriteCombined(uint8_t* dst, const uint8_t* src, uint64_t size) {
 	g_bar_copy_calls.fetch_add(1, std::memory_order_relaxed);
 	g_bar_copy_bytes.fetch_add(size, std::memory_order_relaxed);
 	g_bar_copy_ns.fetch_add(ns, std::memory_order_relaxed);
+	BarReadsProbe(size, ns);
 	const size_t bucket = size < 4096u ? 0u : size < 65536u ? 1u : size < 1048576u ? 2u : 3u;
 	g_bar_size_calls[bucket].fetch_add(1, std::memory_order_relaxed);
 	g_bar_size_bytes[bucket].fetch_add(size, std::memory_order_relaxed);
@@ -3648,6 +3751,46 @@ void BufferCache::BarBatchRead(const uint8_t* mapped, uint64_t base,
 	ReportBarBatch();
 }
 
+// ReadRange's servable question (7.11: the full scan per candidate range was ~3% of the GPU thread in the town walk;
+// 6.3 million answers checked against the scan, 0 different; +3.6% fps, two live A/B runs).
+bool BufferCache::BarServable(Buffer& buffer, uint64_t vaddr, uint64_t size, uint64_t ready_tick) {
+	// The scan's answer is false at the first page without a write tick or outside the buffer, once the bytes exceed
+	// BarMaxBytes, or once a write tick (or the ready tick) is not before the current tick; pages of one granule share
+	// its write tick (WriteTickKey), so a granule that passed is not asked again.
+	const uint64_t current = m_scheduler.CurrentTick();
+	if (ready_tick >= current) return false;
+	const auto base     = buffer.CpuAddress();
+	const auto limit    = base + buffer.Size();
+	bool       fail     = false;
+	bool       any      = false;
+	uint64_t   total    = 0;
+	uint64_t   last_key = ~uint64_t {0};
+	m_memory_tracker.ForEachDownloadRange<false>(vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		if (fail) return;
+		m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+			if (fail) return;
+			if (start < base || end > limit) {
+				fail = true;
+				return;
+			}
+			for (uint64_t page = start & ~uint64_t {TRACKER_PAGE_SIZE - 1}; page < end; page += TRACKER_PAGE_SIZE) {
+				const uint64_t key = WriteTickKey(page);
+				if (key == last_key) continue;
+				const auto tick = GranuleWriteTick(key);
+				if (!tick || *tick >= current) {
+					fail = true;
+					return;
+				}
+				last_key = key;
+			}
+			any = true;
+			total += end - start;
+			if (total > BarMaxBytes) fail = true;
+		});
+	});
+	return !fail && any;
+}
+
 // The read window, unless the host mapping cannot serve it at once (more than BarMaxBytes GPU-dirty, or written by work
 // not finished) while the pages of the access can: then those pages, so the read waits for their writes only and not
 // for the whole queue (frame timeline 2.11: a 4-byte SRT read at the start of a frame took a 1.36 MB window and waited
@@ -3659,15 +3802,10 @@ std::pair<uint64_t, uint64_t> BufferCache::ReadRange(Buffer& buffer, uint64_t va
 	const uint64_t lo    = std::max(start, vaddr > ReadWindowBytes ? (vaddr - ReadWindowBytes) & ~0xfffull : 0ull);
 	const uint64_t hi    = std::min(end, (vaddr + size + ReadWindowBytes + 0xfffull) & ~0xfffull);
 	if (!(lo < hi && lo <= vaddr && vaddr + size <= hi)) return {vaddr, vaddr + size};
-	if (buffer.Mapped().empty()) return {lo, hi};
+	if (buffer.Mapped().empty() || !BarReadsOn()) return {lo, hi}; // no mapping reads: the window, as without a mapping
 	const auto ready = m_buffer_ready_tick.find(reinterpret_cast<uint64_t>(static_cast<VkBuffer>(buffer.Handle())));
 	if (ready == m_buffer_ready_tick.end()) return {lo, hi};
-	const auto servable = [&](uint64_t a, uint64_t b) {
-		std::vector<std::pair<uint64_t, uint64_t>> intervals;
-		uint64_t                                   newest = 0, total = 0;
-		if (ScanBarDownload(buffer, a, b - a, intervals, newest, total) >= 0) return false;
-		return total <= BarMaxBytes && std::max(newest, ready->second) < m_scheduler.CurrentTick();
-	};
+	const auto servable = [&](uint64_t a, uint64_t b) { return BarServable(buffer, a, b - a, ready->second); };
 	if (servable(lo, hi)) return {lo, hi};
 	const uint64_t p_lo = std::max(start, vaddr & ~0xfffull);
 	const uint64_t p_hi = std::min(end, (vaddr + size + 0xfffull) & ~0xfffull);

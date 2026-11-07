@@ -1,7 +1,8 @@
-/* Launcher style (Figma design v1, docs/launcher/DESIGN-SPEC.md). An at-sign before a palette or colour name of
-   styles/tokens.json is replaced by its value (LauncherTheme). Fonts come from the "textStyle" property, not from
-   this file. Gold marks one thing per
-   screen: the Play button on Play, the active page in the sidebar elsewhere. Lines are 1 px hairlines, no shadows. */
+/* Launcher style (Figma design v1, docs/launcher/DESIGN-SPEC.md) with the brush style v08 of
+   design mockup: cards are borderless paper sheets (their soft shadows are painted by
+   ArtBackground), headings, the active page and the Play bar's buttons get gold or warm-ink brush strokes (painted in
+   launcherWidgets.cpp). An at-sign before a palette or colour name of styles/tokens.json is replaced by its value
+   (LauncherTheme). Fonts come from the "textStyle" property, not from this file. Other lines are 1 px hairlines. */
 
 QToolTip {
     background: @ink;
@@ -64,10 +65,11 @@ QLabel[spaced="true"] {
     padding-top: 24px;
 }
 
+/* Style v08: paper-light at 86 %, no border, 2 px corners. */
 QFrame[card="true"] {
-    background: @bg-card;
-    border: 1px solid @border-default;
-    border-radius: 10px;
+    background: rgba(244, 241, 235, 219);
+    border: none;
+    border-radius: 2px;
 }
 
 QFrame[divider="true"] {
@@ -307,7 +309,7 @@ QWidget#play_art[dark="true"] QLabel[tone="secondary"] {
 
 QWidget#play_art[dark="true"] QFrame[card="true"] {
     background: rgba(23, 21, 19, 150);
-    border: 1px solid rgba(236, 232, 224, 46);
+    border: none;
 }
 
 QWidget#play_art[dark="true"] QLineEdit#search_line_edit {

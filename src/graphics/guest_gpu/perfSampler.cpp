@@ -376,6 +376,7 @@ void StartThreadSampler(const char* prefix) {
 		constexpr size_t ChainFrames = 6;
 		constexpr size_t MaxFrames   = 128;
 		std::unordered_map<uint64_t, uint32_t>                       function_inclusive;
+		std::unordered_map<uint64_t, uint32_t>                       function_exclusive; // leaf function start RVA
 		std::map<std::array<uint32_t, ChainFrames>, uint32_t>        chains;
 		std::unordered_map<uint64_t, uint32_t>                       edges; // caller << 32 | callee (function RVAs)
 		std::unordered_set<uint64_t>                                 seen_edges;
@@ -441,6 +442,7 @@ void StartThreadSampler(const char* prefix) {
 			}
 			if (words != 0) {
 				const size_t count = UnwindCopiedStack(context, stack.data(), words, base, end, frames.data(), MaxFrames);
+				if (count != 0 && frames[0] != 0) function_exclusive[frames[0]]++;
 				std::array<uint32_t, ChainFrames> chain {};
 				for (size_t i = 0; i < count && i < ChainFrames; i++) chain[i] = frames[i];
 				chains[chain]++;
@@ -467,7 +469,7 @@ void StartThreadSampler(const char* prefix) {
 				return sorted;
 			};
 			std::fprintf(stderr, "%s samples=%u\n", prefix, samples);
-			for (const auto& [rva, count]: top(exclusive, 60))
+			for (const auto& [rva, count]: top(exclusive, 400))
 				std::fprintf(stderr, "%s excl rva=0x%llx n=%u\n", prefix, static_cast<unsigned long long>(rva), count);
 			for (const auto& [rva, count]: top(inclusive, 150))
 				std::fprintf(stderr, "%s incl rva=0x%llx n=%u\n", prefix, static_cast<unsigned long long>(rva), count);
@@ -475,6 +477,8 @@ void StartThreadSampler(const char* prefix) {
 			// another module).
 			for (const auto& [rva, count]: top(function_inclusive, 500))
 				std::fprintf(stderr, "%s fincl rva=0x%llx n=%u\n", prefix, static_cast<unsigned long long>(rva), count);
+			for (const auto& [rva, count]: top(function_exclusive, 300))
+				std::fprintf(stderr, "%s fexcl rva=0x%llx n=%u\n", prefix, static_cast<unsigned long long>(rva), count);
 			{
 				std::vector<std::pair<std::array<uint32_t, ChainFrames>, uint32_t>> sorted(chains.begin(), chains.end());
 				std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -486,6 +490,7 @@ void StartThreadSampler(const char* prefix) {
 				chains.clear();
 			}
 			function_inclusive.clear();
+			function_exclusive.clear();
 			for (const auto& [edge, count]: top(edges, 3000)) {
 				std::fprintf(stderr, "%s edge n=%u p=%x c=%x\n", prefix, count, static_cast<uint32_t>(edge >> 32u),
 				             static_cast<uint32_t>(edge));

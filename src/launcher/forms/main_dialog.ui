@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Layout of the Figma launcher design v1 (docs/launcher/DESIGN-SPEC.md): sidebar 248 px + pages Play, Display, Graphics, Shaders,
-     Advanced, First start. Widgets with a "textStyle" property get their font from styles/tokens.json (LauncherTheme). -->
+     Advanced, First start. Widgets with a "textStyle" property get their font from styles/tokens.json (LauncherTheme).
+     Brush style v08 (design mockup): headings are BrushHeading (gold brush underline), the Play bar
+     is a BrushBar, and its ArtButtons have a "brush" look ("swipe" for PLAY, "underline" for Precompile shaders). -->
 <ui version="4.0">
  <class>MainDialog</class>
  <widget class="QDialog" name="MainDialog">
@@ -292,7 +294,7 @@
            </widget>
           </item>
           <item>
-           <widget class="QLabel" name="play_title">
+           <widget class="BrushHeading" name="play_title">
             <property name="text">
              <string>Select your game</string>
             </property>
@@ -372,7 +374,7 @@
 <widget class="QFrame" name="card_checks"><property name="minimumSize"><size><width>320</width><height>0</height></size></property>
 <property name="maximumSize"><size><width>320</width><height>16777215</height></size></property><property name="card" stdset="0"><bool>true</bool></property>
 <layout class="QVBoxLayout" name="card_checksLayout"><property name="spacing"><number>16</number></property><property name="leftMargin"><number>24</number></property><property name="topMargin"><number>24</number></property><property name="rightMargin"><number>24</number></property><property name="bottomMargin"><number>24</number></property>
-<item><widget class="QLabel" name="card_checks_title"><property name="text"><string>Checks</string></property>
+<item><widget class="BrushHeading" name="card_checks_title"><property name="text"><string>Checks</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Section</string></property>
 </widget></item>
 <item><widget class="QWidget" name="check_emulator_row"><layout class="QHBoxLayout" name="check_emulatorRow"><property name="spacing"><number>12</number></property><property name="leftMargin"><number>0</number></property><property name="topMargin"><number>0</number></property><property name="rightMargin"><number>0</number></property><property name="bottomMargin"><number>0</number></property>
@@ -467,7 +469,7 @@
         </widget>
        </item>
        <item>
-        <widget class="QFrame" name="bottom_bar">
+        <widget class="BrushBar" name="bottom_bar">
          <property name="minimumSize">
           <size>
            <width>0</width>
@@ -542,6 +544,9 @@
             <property name="textStyle" stdset="0">
              <string notr="true">Label/Button</string>
             </property>
+            <property name="brush" stdset="0">
+             <string notr="true">underline</string>
+            </property>
            </widget>
           </item>
           <item>
@@ -567,6 +572,9 @@
             <property name="textStyle" stdset="0">
              <string notr="true">Brand/Play</string>
             </property>
+            <property name="brush" stdset="0">
+             <string notr="true">swipe</string>
+            </property>
            </widget>
           </item>
          </layout>
@@ -581,7 +589,7 @@
 <item><widget class="QLabel" name="display_eyebrow"><property name="text"><string>Settings</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Label/Eyebrow</string></property>
 <property name="tone" stdset="0"><string notr="true">secondary</string></property></widget></item>
-<item><widget class="QLabel" name="display_title"><property name="text"><string>Display</string></property>
+<item><widget class="BrushHeading" name="display_title"><property name="text"><string>Display</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Title</string></property>
 </widget></item>
 <item><spacer name="displayBannerSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>0</height></size></property></spacer></item>
@@ -651,7 +659,7 @@
 <item><widget class="QLabel" name="graphics_eyebrow"><property name="text"><string>Settings</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Label/Eyebrow</string></property>
 <property name="tone" stdset="0"><string notr="true">secondary</string></property></widget></item>
-<item><widget class="QLabel" name="graphics_title"><property name="text"><string>Graphics</string></property>
+<item><widget class="BrushHeading" name="graphics_title"><property name="text"><string>Graphics</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Title</string></property>
 </widget></item>
 <item><spacer name="graphicsBannerSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>0</height></size></property></spacer></item>
@@ -747,7 +755,7 @@
            </widget>
           </item>
           <item>
-           <widget class="QLabel" name="shaders_title">
+           <widget class="BrushHeading" name="shaders_title">
             <property name="text">
              <string>Shaders</string>
             </property>
@@ -801,7 +809,7 @@
             <number>32</number>
            </property>
            <item>
-            <widget class="QLabel" name="shaders_section_precompile">
+            <widget class="BrushHeading" name="shaders_section_precompile">
              <property name="text">
               <string>Precompile</string>
              </property>
@@ -1139,7 +1147,7 @@
             </layout>
            </item>
            <item>
-            <widget class="QLabel" name="shaders_section_cache">
+            <widget class="BrushHeading" name="shaders_section_cache">
              <property name="text">
               <string>Cache</string>
              </property>
@@ -1381,7 +1389,7 @@
            </widget>
           </item>
           <item>
-           <widget class="QLabel" name="advanced_title">
+           <widget class="BrushHeading" name="advanced_title">
             <property name="text">
              <string>Advanced</string>
             </property>
@@ -1435,7 +1443,7 @@
             <number>32</number>
            </property>
            <item>
-            <widget class="QLabel" name="advanced_section_folders">
+            <widget class="BrushHeading" name="advanced_section_folders">
              <property name="text">
               <string>Folders</string>
              </property>
@@ -1617,7 +1625,7 @@
              </item>
             </layout>
            </item>
-<item><widget class="QLabel" name="advanced_section_support"><property name="text"><string>Support</string></property>
+<item><widget class="BrushHeading" name="advanced_section_support"><property name="text"><string>Support</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Section</string></property>
 <property name="spaced" stdset="0"><bool>true</bool></property></widget></item>
 <item><layout class="QHBoxLayout" name="rowBugReport"><property name="spacing"><number>24</number></property><property name="topMargin"><number>12</number></property>
@@ -1652,7 +1660,7 @@
                <number>0</number>
               </property>
               <item>
-               <widget class="QLabel" name="advanced_section_updates">
+               <widget class="BrushHeading" name="advanced_section_updates">
                 <property name="text">
                  <string>Updates</string>
                 </property>
@@ -1746,7 +1754,7 @@
             </widget>
            </item>
            <item>
-            <widget class="QLabel" name="advanced_section_about">
+            <widget class="BrushHeading" name="advanced_section_about">
              <property name="text">
               <string>About</string>
              </property>
@@ -1954,7 +1962,7 @@
 <item><widget class="QLabel" name="mods_eyebrow"><property name="text"><string>Game</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Label/Eyebrow</string></property>
 <property name="tone" stdset="0"><string notr="true">secondary</string></property></widget></item>
-<item><widget class="QLabel" name="mods_title"><property name="text"><string>Mods</string></property>
+<item><widget class="BrushHeading" name="mods_title"><property name="text"><string>Mods</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Title</string></property>
 </widget></item>
 <item><spacer name="modsBannerSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>0</height></size></property></spacer></item>
@@ -1975,7 +1983,7 @@
 <item><widget class="QLabel" name="first_start_eyebrow"><property name="sizePolicy"><sizepolicy hsizetype="Preferred" vsizetype="Maximum"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property><property name="text"><string>First start</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Label/Eyebrow</string></property>
 <property name="tone" stdset="0"><string notr="true">secondary</string></property></widget></item>
-<item><widget class="QLabel" name="first_start_title"><property name="sizePolicy"><sizepolicy hsizetype="Preferred" vsizetype="Maximum"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property><property name="text"><string>Select your game</string></property>
+<item><widget class="BrushHeading" name="first_start_title"><property name="sizePolicy"><sizepolicy hsizetype="Preferred" vsizetype="Maximum"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property><property name="text"><string>Select your game</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Title</string></property>
 </widget></item>
 <item><widget class="QLabel" name="first_start_lead"><property name="sizePolicy"><sizepolicy hsizetype="Preferred" vsizetype="Maximum"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property><property name="minimumSize"><size><width>0</width><height>0</height></size></property>
@@ -1985,7 +1993,7 @@
 <item alignment="Qt::AlignTop"><widget class="QFrame" name="card_game_folder"><property name="minimumSize"><size><width>540</width><height>0</height></size></property>
 <property name="maximumSize"><size><width>540</width><height>16777215</height></size></property><property name="card" stdset="0"><bool>true</bool></property>
 <layout class="QVBoxLayout" name="card_game_folderLayout"><property name="spacing"><number>16</number></property><property name="leftMargin"><number>24</number></property><property name="topMargin"><number>24</number></property><property name="rightMargin"><number>24</number></property><property name="bottomMargin"><number>24</number></property>
-<item><widget class="QLabel" name="card_game_folder_title"><property name="text"><string>Game folder</string></property>
+<item><widget class="BrushHeading" name="card_game_folder_title"><property name="text"><string>Game folder</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Section</string></property>
 </widget></item><item><layout class="QHBoxLayout" name="first_folder_checkRow"><property name="spacing"><number>12</number></property>
 <item alignment="Qt::AlignTop"><widget class="StatusIcon" name="first_folder_check_status" native="true"/></item>
@@ -2005,7 +2013,7 @@
 <item alignment="Qt::AlignTop"><widget class="QFrame" name="card_system"><property name="minimumSize"><size><width>372</width><height>0</height></size></property>
 <property name="maximumSize"><size><width>372</width><height>16777215</height></size></property><property name="card" stdset="0"><bool>true</bool></property>
 <layout class="QVBoxLayout" name="card_systemLayout"><property name="spacing"><number>16</number></property><property name="leftMargin"><number>24</number></property><property name="topMargin"><number>24</number></property><property name="rightMargin"><number>24</number></property><property name="bottomMargin"><number>24</number></property>
-<item><widget class="QLabel" name="card_system_title"><property name="text"><string>System</string></property>
+<item><widget class="BrushHeading" name="card_system_title"><property name="text"><string>System</string></property>
 <property name="textStyle" stdset="0"><string notr="true">Heading/Section</string></property>
 </widget></item>
 <item><widget class="QWidget" name="system_emulator_row"><layout class="QHBoxLayout" name="system_emulatorRow"><property name="spacing"><number>12</number></property><property name="leftMargin"><number>0</number></property><property name="topMargin"><number>0</number></property><property name="rightMargin"><number>0</number></property><property name="bottomMargin"><number>0</number></property>
@@ -2069,6 +2077,17 @@
   <customwidget>
    <class>ArtButton</class>
    <extends>QPushButton</extends>
+   <header>launcherWidgets.h</header>
+  </customwidget>
+  <customwidget>
+   <class>BrushBar</class>
+   <extends>QFrame</extends>
+   <header>launcherWidgets.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>BrushHeading</class>
+   <extends>QLabel</extends>
    <header>launcherWidgets.h</header>
   </customwidget>
   <customwidget>

@@ -738,6 +738,10 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 		}
 	}
+	// AWARIA-WCZYTYWANIE-2026-11-08: the state of the refused page (host, guest kernel, renderer, replacement, unmaps).
+	if (info->type == Common::HostException::ExceptionType::AccessViolation) {
+		Libs::LibKernel::Memory::ReportUnhandledFaultPage(info->access_violation_vaddr);
+	}
 	// Report whatever guest context can be read safely before terminating: which guest thread
 	// faulted, the register file, the faulting code bytes and the top of its stack.
 	{

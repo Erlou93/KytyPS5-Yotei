@@ -4,6 +4,7 @@
 #include "common/emulatorConfig.h"
 #include "common/hostStats.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/presentation/brushStroke.h"
 #include "imgui.h"
 #include "kernel/memory.h"
 
@@ -11,9 +12,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stop_token>
@@ -29,7 +32,8 @@ using Peak    = Common::DebugCounters::Peak;
 
 constexpr auto   REFRESH_INTERVAL  = std::chrono::seconds(1);
 constexpr size_t FRAME_HISTORY     = 120;
-constexpr float  FRAME_GRAPH_MS    = 50.0f;
+// The graph's top: 100 ms, so ~45 ms frames sit mid-height instead of pinning to the top.
+constexpr float  FRAME_GRAPH_MS    = 100.0f;
 constexpr float  FRAME_TIME_GOOD   = 17.5f;
 constexpr float  FRAME_TIME_MEDIUM = 34.0f;
 constexpr size_t COUNTER_COUNT     = static_cast<size_t>(Counter::Count);
@@ -44,10 +48,27 @@ constexpr ImU32 MEDIUM  = IM_COL32(230, 195, 60, 255);
 constexpr ImU32 BAD     = IM_COL32(235, 80, 70, 255);
 constexpr ImU32 NEUTRAL = IM_COL32(160, 160, 160, 255);
 
+// The panel's look (design mockup, style 2 "Narożniki"): ink background (--bg #171513, at the
+// panel's own opacity), gold brush strokes in two corners, frame times as short brush strokes.
+constexpr ImU32 PANEL_INK   = IM_COL32(0x17, 0x15, 0x13, 255);
+constexpr ImU32 GRAPH_RULE  = IM_COL32(236, 232, 224, 41);  // rgba(236,232,224,.16)
+constexpr ImU32 GRAPH_LABEL = IM_COL32(236, 232, 224, 115); // rgba(236,232,224,.45)
+
+struct FrameReference {
+	float       ms;
+	const char* label;
+};
+constexpr std::array<FrameReference, 3> FRAME_REFERENCES {{
+    {1000.0f / 60.0f, "60"},
+    {1000.0f / 30.0f, "30"},
+    {1000.0f / 20.0f, "20"},
+}};
+
 struct FrameWindow {
 	std::array<float, FRAME_HISTORY> intervals_ms {};
 	size_t                           next         = 0;
 	size_t                           count        = 0;
+	uint64_t                         recorded     = 0; // intervals ever recorded: each one's id for the graph
 	uint32_t                         flips        = 0;
 	float                            max_ms       = 0.0f;
 	uint32_t                         guest_width  = 0;
@@ -76,6 +97,7 @@ struct Snapshot {
 	uint32_t                                                   heap_count = 0;
 	std::array<float, FRAME_HISTORY>                           history {};
 	size_t                                                     history_count = 0;
+	uint64_t                                                   history_first = 0; // id of history[0]
 	Clock::time_point                                          sample_time {};
 	LibKernel::Memory::DebugStats                              guest_memory;
 };
@@ -217,25 +239,51 @@ bool BeginSection(const char* title) {
 	return ImGui::BeginTable(title, 2, TABLE_FLAGS);
 }
 
-void DrawFrameGraph(const std::array<float, FRAME_HISTORY>& history, size_t count, float width,
-                    float height) {
+// The frame-time graph, "ticks" (style style 2): each frame a short brush stroke from the bottom up
+// to its time (0..100 ms), coloured as before; dashed 60 / 30 / 20 FPS lines labelled in a 16 px strip at the right.
+// `first_id` numbers history[0], so a stroke keeps its width, lean and opacity as the graph scrolls.
+void DrawFrameGraph(const std::array<float, FRAME_HISTORY>& history, size_t count, uint64_t first_id,
+                    float width, float height, float scale) {
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 	auto*        draw   = ImGui::GetWindowDrawList();
-	draw->AddRectFilled(origin, {origin.x + width, origin.y + height}, IM_COL32(0, 0, 0, 90));
-	const auto y_of = [&](float ms) {
-		return origin.y + height - std::min(ms, FRAME_GRAPH_MS) / FRAME_GRAPH_MS * height;
+	const float  plot_w = width - 16.0f * scale;
+	const float  top    = origin.y + 3.0f * scale;
+	const float  bottom = origin.y + height - 2.0f * scale;
+	const auto   y_of   = [&](float ms) {
+		return bottom - std::min(ms, FRAME_GRAPH_MS) / FRAME_GRAPH_MS * (bottom - top);
 	};
-	for (const float reference: {1000.0f / 60.0f, 1000.0f / 30.0f}) {
-		draw->AddLine({origin.x, y_of(reference)}, {origin.x + width, y_of(reference)},
-		              IM_COL32(255, 255, 255, 45));
+	// Reference lines: 2 px dashes 3 px apart, one pixel row, up to 18 px from the right edge.
+	ImFont*     font       = ImGui::GetFont();
+	const float label_size = 8.5f * scale;
+	const float dash       = 2.0f * scale;
+	const float period     = 5.0f * scale;
+	const float rule_end   = origin.x + width - 18.0f * scale;
+	const int   dashes     = std::max(0, static_cast<int>((rule_end - origin.x) / period) + 1);
+	for (const auto& reference: FRAME_REFERENCES) {
+		const float y = std::floor(y_of(reference.ms));
+		draw->PrimReserve(dashes * 6, dashes * 4);
+		for (int i = 0; i < dashes; i++) {
+			const float x = origin.x + static_cast<float>(i) * period;
+			draw->PrimRect({x, y}, {std::min(x + dash, rule_end), y + 1.0f}, GRAPH_RULE);
+		}
+		const ImVec2 dim =
+		    font->CalcTextSizeA(label_size, std::numeric_limits<float>::max(), 0.0f, reference.label);
+		draw->AddText(font, label_size, {origin.x + width - dim.x, y + 0.5f - dim.y * 0.5f}, GRAPH_LABEL,
+		              reference.label);
 	}
-	const float bar = width / static_cast<float>(FRAME_HISTORY);
+	// The strokes, newest at the right; the label strip clips them.
+	draw->PushClipRect(origin, {origin.x + plot_w, origin.y + height}, true);
+	const float step = plot_w / static_cast<float>(FRAME_HISTORY);
 	for (size_t i = 0; i < count; i++) {
-		const float ms = history[i];
-		const float x  = origin.x + width - static_cast<float>(count - i) * bar;
-		draw->AddRectFilled({x, y_of(ms)}, {x + std::max(bar - 1.0f, 1.0f), origin.y + height},
-		                    FrameTimeColor(ms));
+		const float ms   = history[i];
+		const float j    = Brush::Hash01(static_cast<uint32_t>(first_id + i));
+		const float x    = origin.x + plot_w - (static_cast<float>(count - 1 - i) + 0.5f) * step;
+		const float lean = j - 0.5f;
+		draw->AddLine({x + lean * scale, bottom}, {x, y_of(ms) + lean * 3.0f * scale},
+		              Brush::WithAlpha(FrameTimeColor(ms), 0.55f + 0.4f * j),
+		              std::max(1.2f * scale, step * (0.55f + 0.3f * j)));
 	}
+	draw->PopClipRect();
 	ImGui::Dummy({width, height});
 }
 
@@ -607,6 +655,7 @@ void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) n
 		frames.intervals_ms[frames.next] = ms;
 		frames.next                      = (frames.next + 1) % FRAME_HISTORY;
 		frames.count                     = std::min(frames.count + 1, FRAME_HISTORY);
+		frames.recorded++;
 		frames.max_ms                    = std::max(frames.max_ms, ms);
 	}
 	frames.last_flip    = now;
@@ -660,6 +709,7 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
 			std::scoped_lock lock(g_frame_mutex);
 			auto&            frames = g_frames;
 			shown.history_count     = frames.count;
+			shown.history_first     = frames.recorded - frames.count;
 			for (size_t i = 0; i < frames.count; i++) {
 				shown.history[i] =
 				    frames.intervals_ms[(frames.next + FRAME_HISTORY - frames.count + i) %
@@ -704,7 +754,10 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
 	    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
 	    ImGuiWindowFlags_AlwaysAutoResize;
 	ImGui::PushFont(nullptr, (details ? 13.0f : 15.0f) * scale);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * scale);
+	// "Narożniki": ink background, small rounding, no border line (the brush corners are the frame).
+	ImGui::PushStyleColor(ImGuiCol_WindowBg, PANEL_INK);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f * scale);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {10.0f * scale, 8.0f * scale});
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {8.0f * scale, 2.0f * scale});
 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {4.0f * scale, 1.0f * scale});
@@ -717,8 +770,8 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
 		} else {
 			ImGui::TextDisabled("Waiting for frames");
 		}
-		DrawFrameGraph(shown.history, shown.history_count, (details ? 330.0f : 260.0f) * scale,
-		               46.0f * scale);
+		DrawFrameGraph(shown.history, shown.history_count, shown.history_first,
+		               (details ? 330.0f : 260.0f) * scale, (details ? 62.0f : 54.0f) * scale, scale);
 		if (details) {
 			// Three columns keep the detailed panel within a 720p window.
 			if (ImGui::BeginTable("##details", 3, TABLE_FLAGS)) {
@@ -740,10 +793,16 @@ float DrawPerformanceOverlay(const GraphicContext& graphics, vk::Extent2D extent
 #else
 		ImGui::TextDisabled(details ? "Shift+F2 compact   F2 hide" : "Shift+F2 details   F2 hide");
 #endif
+		// The frame: gold brush strokes along the top-left and bottom-right corners, over the panel's edges.
+		const ImVec2 window_pos  = ImGui::GetWindowPos();
+		const ImVec2 window_size = ImGui::GetWindowSize();
+		Brush::DrawCornerFrame(ImGui::GetWindowDrawList(), window_pos,
+		                       {window_pos.x + window_size.x, window_pos.y + window_size.y}, scale);
 	}
 	const float bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
 	ImGui::End();
-	ImGui::PopStyleVar(4);
+	ImGui::PopStyleVar(5);
+	ImGui::PopStyleColor();
 	ImGui::PopFont();
 	return bottom;
 }

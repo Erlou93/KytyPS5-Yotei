@@ -183,6 +183,9 @@ public:
 	void               InvalidateMemory(uint64_t address, uint64_t size);
 	void               InvalidateMemoryFromGPU(uint64_t address, uint64_t size);
 	[[nodiscard]] bool IsRegionRegistered(uint64_t address, uint64_t size);
+	// RenderContext::UnmapMemory's wait: whether `test` holds for an image an unmap of the range frees (UnmapMemory: the images
+	// over it and their stencil associations).
+	[[nodiscard]] bool AnyUnmapImage(uint64_t address, uint64_t size, const std::function<bool(ImageId)>& test);
 	// KYTY_PERF_DIRECT_RANGES diagnostics: one stderr line per image registered in the region (at most max_lines).
 	void DescribeImagesInRegion(uint64_t address, uint64_t size, uint32_t max_lines);
 

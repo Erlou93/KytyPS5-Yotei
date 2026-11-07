@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/drawRepeat.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 
+#include <array>
 #include <atomic>
 #include <compare>
 #include <limits>
@@ -75,7 +76,31 @@ public:
 	KYTY_CLASS_NO_COPY(Image);
 
 	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info);
-	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
+	// GetBarriers' result: the usual one barrier for the whole image (or two) without a heap allocation (7.11:
+	// Transit runs for most draws and dispatches); more spill into the vector.
+	class Barriers {
+	public:
+		void push_back(const vk::ImageMemoryBarrier2& barrier) {
+			if (m_heap.empty() && m_count < m_inline.size()) {
+				m_inline[m_count++] = barrier;
+				return;
+			}
+			if (m_heap.empty()) m_heap.assign(m_inline.begin(), m_inline.begin() + m_count);
+			m_heap.push_back(barrier);
+		}
+		[[nodiscard]] const vk::ImageMemoryBarrier2* data() const {
+			return m_heap.empty() ? m_inline.data() : m_heap.data();
+		}
+		[[nodiscard]] size_t size() const { return m_heap.empty() ? m_count : m_heap.size(); }
+		[[nodiscard]] bool   empty() const { return size() == 0; }
+		[[nodiscard]] const vk::ImageMemoryBarrier2* begin() const { return data(); }
+		[[nodiscard]] const vk::ImageMemoryBarrier2* end() const { return data() + size(); }
+
+	private:
+		std::array<vk::ImageMemoryBarrier2, 2> m_inline {};
+		uint32_t                               m_count = 0;
+		std::vector<vk::ImageMemoryBarrier2>   m_heap;
+	};
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
 	                                   vk::AccessFlags2                     destination_access,
 	                                   vk::PipelineStageFlags2              destination_stage,

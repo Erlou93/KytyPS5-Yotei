@@ -36,7 +36,7 @@ struct EnvDefault {
 
 inline constexpr EnvDefault EnvDefaults[] = {
     {"KYTY_SHADER_PRECOMPILE", "1", "config", ""},
-    {"KYTY_SHADER_PRECOMPILE_THREADS", "6", "config", ""},
+    {"KYTY_SHADER_PRECOMPILE_THREADS", "8", "config", ""}, // 8.11: 6 -> 8 (first launch: +39% compiled in the ~30 s start window, same time to gameplay and fps; 12 cost 5.6 s and fps on 8 cores)
     {"KYTY_VRAM_GC_FIX", "1", "config", ""},
     {"KYTY_VRAM_BUDGET", "1", "config", ""},
     {"KYTY_BINDLESS", "1", "config", ""},

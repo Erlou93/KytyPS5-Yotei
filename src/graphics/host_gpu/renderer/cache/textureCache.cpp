@@ -3926,8 +3926,10 @@ bool TextureCache::DownloadImageMemory(ImageId id, bool evicting, std::shared_pt
 	if (!RecordImageDownload(id, destination, offset, mapped)) {
 		return false;
 	}
+	// An unmap of these bytes waits for this publish (RenderContext::UnmapMemory).
+	auto published = m_buffer_cache.NotePendingGuestWrite(range.address, range.size);
 	m_scheduler.DeferPriorityOperation([&download, range, mapped, offset, owner = std::move(temporary), done = std::move(done),
-	                                    cancelled = std::move(cancelled)] {
+	                                    cancelled = std::move(cancelled), published = std::move(published)] {
 		    (owner ? *owner : static_cast<Buffer&>(download)).Invalidate(offset, range.size);
 		    if (!cancelled || !cancelled->load(std::memory_order_acquire)) {
 			    LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
@@ -3935,6 +3937,7 @@ bool TextureCache::DownloadImageMemory(ImageId id, bool evicting, std::shared_pt
 		    if (done) {
 			    done->store(true, std::memory_order_release);
 		    }
+		    if (published) published->store(true, std::memory_order_release);
 	    });
 	return true;
 }
@@ -4638,6 +4641,16 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 bool TextureCache::IsRegionRegistered(uint64_t address, uint64_t size) {
 	std::scoped_lock lock {m_lock};
 	return !FindImagesInRegion(address, size, false).empty();
+}
+
+bool TextureCache::AnyUnmapImage(uint64_t address, uint64_t size, const std::function<bool(ImageId)>& test) {
+	std::scoped_lock lock {m_lock};
+	for (const auto id: FindImagesInRegion(address, size, false)) {
+		if (test(id)) return true;
+		for (const auto association: m_slot_images[id].stencil_ids)
+			if (test(association)) return true;
+	}
+	return false;
 }
 
 void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {

@@ -108,16 +108,26 @@ public:
 			// Other threads' lookup batches let a waiting GPU thread in (GpuWaiting).
 			const bool gpu_thread = PerfIsGpuThread();
 			if (gpu_thread) m_gpu_waiting.store(true, std::memory_order_relaxed);
-			uint32_t spins = 0;
+			uint32_t spins  = 0;
+			uint32_t yields = 0;
 			do {
 				EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
 				// Test before test-and-set: waiting reads do not pull the line away from the holder.
 				while (m_lock.test(std::memory_order_relaxed)) {
 					SpinPause();
-					// After ~25 us of spinning: gives up the time slice, so a holder preempted inside a protect can run.
+					// After ~25 us of spinning: gives up the time slice, so a holder preempted inside a protect can run;
+					// after ~1 ms a guest thread sleeps 1 ms per round. With the game's fault handlers spinning here at once
+					// (8.11 stall watchdog: the main thread, 11 job workers and the GPU thread on one lock for 0.5-2.7 s) a
+					// yield only reaches threads ready on the same processor and the holder got no core: the page-manager
+					// lock's backoff (6.11) for this lock too. The GPU thread keeps spinning: it has a core of its own
+					// (nobody waits for that core), and sleeping it cost ~6-10% fps in the walk.
 					if (++spins >= 2048u) {
 						spins = 0;
-						std::this_thread::yield();
+						if (!gpu_thread && ++yields >= 40u) {
+							std::this_thread::sleep_for(std::chrono::milliseconds(1));
+						} else {
+							std::this_thread::yield();
+						}
 					}
 				}
 			} while (m_lock.test_and_set(std::memory_order_acquire));

@@ -119,7 +119,7 @@ static void PrintUsage() {
 	         "                                       (PRECOMPILE_*) go to stdout; \"quit\" on stdin or Ctrl+C\n"
 	         "                                       stops it and keeps what is done.\n");
 	::printf("  --precompile-threads <1-64>          Workers of --precompile-only. Default: the\n"
-	         "                                       KYTY_SHADER_PRECOMPILE_THREADS setting (6).\n");
+	         "                                       KYTY_SHADER_PRECOMPILE_THREADS setting (8).\n");
 	::printf("  --export-hints <file>                Write the recorded shaders of --game as a hints file\n"
 	         "                                       (no game code) and exit. Implies --precompile-only.\n");
 	::printf("  --import-hints <file>                Find the code of a hints file in the --game folder, add\n"

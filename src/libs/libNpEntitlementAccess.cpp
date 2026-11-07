@@ -165,6 +165,10 @@ static constexpr NpEntitlementAccessAddcontEntitlementInfo NP_ENTITLEMENT_ACCESS
     {{{"85y-je"}, {}}, 3, 4}, // GTA V hash 0xf4315381
     {{{"5d5c48"}, {}}, 3, 4}, // GTA V hash 0x961c34b0
     {{{"_mtqu6"}, {}}, 3, 4}, // GTA V hash 0x9cd1bcad
+    // Ghost of Yotei (PPSA26344) asks at boot whether the base-game SKU is owned; without it some dumps (1.008, 2.002)
+    // stay on the loading spinner behind a "missing base entitlement" dialog. Licence only (3), installed (4), as the
+    // GTA V entries. From CarRamRod-963/KytyPS5 ("libNet: own Ghost of Yotei's base-game entitlement"), GPL-2.0.
+    {{{"GHOST2BASEME0000"}, {}}, 3, 4},
 };
 
 static NpEntitlementAccessAddcontEntitlementInfo

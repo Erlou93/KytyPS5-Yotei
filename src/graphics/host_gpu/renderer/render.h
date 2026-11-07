@@ -348,6 +348,12 @@ public:
 	// region; false when the arena has no room. shader_hash: the reader, for the BINDLESS_TABLE layout log.
 	[[nodiscard]] bool TranslateBindlessTable(BindlessTable::Table& table, uint32_t covered, uint64_t hash,
 	                                          uint64_t frame, uint64_t shader_hash);
+	// The entry-by-entry translation (a table's first one, small tables, and when the difference does not apply).
+	[[nodiscard]] bool TranslateBindlessTableFull(BindlessTable::Table& table, uint32_t covered, uint64_t hash,
+	                                              uint64_t frame, uint64_t shader_hash);
+	// differential tables: a large table's translation by difference from its last one (the entries whose words changed or whose slot
+	// died); -1 when it does not apply (the full translation runs), else whether the region was stored.
+	[[nodiscard]] int TranslateTableDiff(BindlessTable::Table& table, uint32_t covered, uint64_t hash, uint64_t frame);
 	// The table slot of one descriptor, resolving its texture now when no table slot shows it yet; 0 = placeholder.
 	[[nodiscard]] uint32_t ResolveTableDescriptor(BindlessTable::Table& table, const std::array<uint32_t, 8>& words,
 	                                              uint64_t frame);
@@ -517,6 +523,12 @@ private:
 	std::vector<ImageId>                  m_table_touch; // refresh events: unchanged slots' images (RefreshTableSlots)
 	// The slot journal: a translated table's slots before it (TranslateBindlessTable).
 	std::vector<std::pair<uint32_t, uint32_t>> m_table_old_slots;
+	// The difference translation's scratch: dead-slot marks and the new slot list.
+	std::vector<uint8_t>                       m_diff_dead;
+	std::vector<uint32_t>                      m_diff_new;   // the slots a difference translation took
+	std::vector<uint32_t>                      m_diff_seen;  // per slot, the stamp of the difference translation that listed it
+	std::vector<ImageId>                       m_diff_touch; // their images to touch (differential tables step 2)
+	std::vector<std::pair<uint32_t, uint32_t>> m_diff_slots;
 	uint64_t                              m_table_frame         = 0;
 	uint64_t                              m_table_release_frame = 0;
 	PreparedBindings                     m_compute_bindings;

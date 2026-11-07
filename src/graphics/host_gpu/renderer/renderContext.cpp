@@ -6,10 +6,12 @@
 
 #include "common/assert.h"
 #include "common/envRead.h"
+#include "common/liveAb.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/videoOut.h"
+#include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
@@ -210,6 +212,62 @@ void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	// CPU-dirty tracker regions instead (the BDA region pass, the BDA sync epoch).
 }
 
+// A guest unmap of a range a cache holds, or with any priority operation pending, waits for what the unmap needs from the
+// GPU (8.11; town walk, live A/B: +3.3% fps without images,
+// +2.4% / +7.0% (pairs, two runs) with images):
+//  - the asynchronous publishes of guest bytes into the range (BufferCache::PendingGuestWriteTick): a priority operation
+//    writing an unmapped range fails, or writes the next mapping's memory. The rest needs no wait: VkImages and their
+//    views are destroyed deferred, cache buffers outlive the mapping, the BDA fallback table is cleared in the command
+//    stream (ClearFallback), a direct range finishes by itself (DeactivateDirect), and the GPU-written bytes of the range
+//    are downloaded by InvalidateMemory (ReadMemory with its own waits). End-of-pipe labels are written on the GPU thread
+//    after this command, as before;
+//  - registered images in the range: the open command buffer is submitted without a wait, so the images' drops land in a
+//    new tick (tables holding a dropped slot translate again before their next draw), and their table slots keep the
+//    image's view until the GPU finished the drop's tick (BindlessTable::DeferUnmapDrop; the views die only then too):
+//    draws recorded before the unmap sample the image, those after it the placeholder, as with a Finish. Heap keys go
+//    pending in the shared translation buffer at once (OnImageUnregistered): an unmap of an image with heap keys
+//    finishes all GPU work (Finish). The check counters (late_reads, reassigned, heap_miss) were 0 over the walk
+//    (PERF unmap_image_defer).
+namespace {
+// KYTY_TRACE_PERF: PERF unmap_image_defer every ~5 s (unmaps with images deferred / finished for heap keys, slots, checks).
+void ReportUnmapDefer(BindlessTable::UnmapDeferStats& stats) {
+	static auto last = std::chrono::steady_clock::now();
+	const auto  now  = std::chrono::steady_clock::now();
+	if (!Common::EnvRead::PerfLines() || now - last < std::chrono::seconds(5)) return;
+	last = now;
+	std::fprintf(stderr,
+	             "PERF unmap_image_defer deferred=%llu finished=%llu slots=%llu late_reads=%llu reassigned=%llu "
+	             "heap_miss=%llu\n",
+	             static_cast<unsigned long long>(stats.defer), static_cast<unsigned long long>(stats.keys),
+	             static_cast<unsigned long long>(stats.slots), static_cast<unsigned long long>(stats.late_reads),
+	             static_cast<unsigned long long>(stats.reassigned), static_cast<unsigned long long>(stats.heap_miss));
+	stats = {};
+}
+
+// Returns whether the unmap's table slot drops wait for the GPU to finish the current tick (BindlessTable::SetUnmapDeferred).
+bool UnmapWait(CommandScheduler& scheduler, BufferCache& buffers, TextureCache& textures, BindlessTable& bindless,
+               uint64_t vaddr, uint64_t size, uint64_t tick) {
+	const bool images = textures.IsRegionRegistered(vaddr, size);
+	if (images && textures.AnyUnmapImage(vaddr, size, [&](ImageId id) { return bindless.HasImageKeys(id); })) {
+		scheduler.Finish();
+		scheduler.WaitPriorityOperations(tick);
+		bindless.unmap_defer.keys++;
+		ReportUnmapDefer(bindless.unmap_defer);
+		return false;
+	}
+	if (images && !scheduler.Current().IsInvalid()) scheduler.Flush();
+	if (const uint64_t publish = buffers.PendingGuestWriteTick(vaddr, size); publish != 0) {
+		scheduler.Wait(publish);
+		scheduler.WaitPriorityOperations(publish);
+	}
+	if (images) {
+		bindless.unmap_defer.defer++;
+		ReportUnmapDefer(bindless.unmap_defer);
+	}
+	return images;
+}
+} // namespace
+
 void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	if (CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported memory unmap from an asynchronous GPU completion, "
@@ -219,14 +277,14 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	const auto unmap = [this, vaddr, size] {
 		// Check cache ownership on the GPU thread. Guest-memory callbacks can still
 		// access a range with no cached data, so they must finish before it is unmapped.
+		bool deferred = false; // the images' table slot drops wait for the GPU (UnmapWait)
 		if (m_command_scheduler.Active() &&
 		    (m_buffer_cache.IsRegionRegistered(vaddr, size) ||
 		     m_texture_cache.IsRegionRegistered(vaddr, size) ||
 		     m_command_scheduler.HasPendingPriorityOperations())) {
 			const auto              tick = m_command_scheduler.CurrentTick();
 			SyncTimeline::SiteScope timeline_site(SyncTimeline::Site::Unmap); // KYTY_TRACE_SYNC_TIMELINE
-			m_command_scheduler.Finish();
-			m_command_scheduler.WaitPriorityOperations(tick);
+			deferred = UnmapWait(m_command_scheduler, m_buffer_cache, m_texture_cache, m_bindless_table, vaddr, size, tick);
 		}
 		if (m_command_scheduler.Active()) m_buffer_cache.UnmapDirect(vaddr, size); // KYTY_PERF_DIRECT_RANGES
 		m_buffer_cache.InvalidateMemory(vaddr, size);
@@ -235,7 +293,9 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		if (GuestRange {vaddr, size}.Valid()) {
 			m_page_manager.DisarmImageRead(vaddr, size);
 		}
+		m_bindless_table.SetUnmapDeferred(deferred);
 		m_texture_cache.UnmapMemory(vaddr, size);
+		m_bindless_table.SetUnmapDeferred(false);
 		std::lock_guard lock(m_mapped_ranges_mutex);
 		m_mapped_ranges.Subtract(vaddr, size);
 	};

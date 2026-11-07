@@ -3,7 +3,7 @@
 
 // The Yōtei fork's own version and addresses (sidebar footer, About, bug report, update check).
 
-constexpr char FORK_VERSION[] = "v0.1.4";
+constexpr char FORK_VERSION[] = "v0.1.6";
 
 // The fork's GitHub repository (no trailing slash): the About "Source code" button opens it and the bug report opens
 // <address>/issues/new after saving the zip. Empty: the button is hidden and the bug report only saves the zip.

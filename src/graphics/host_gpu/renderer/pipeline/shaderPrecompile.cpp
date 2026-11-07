@@ -1811,7 +1811,7 @@ void ShaderPrecompiler::Start(uint32_t requested_threads) {
 		// --precompile-threads (the launcher's precompile run).
 		threads = std::clamp(requested_threads, 1u, 64u);
 	} else if (const char* value = Common::EnvOrDefault("KYTY_SHADER_PRECOMPILE_THREADS"); value != nullptr) {
-		// Default from Common::EnvDefaults: 6 threads; 4 with KYTY_ENV_DEFAULTS=0.
+		// Default from Common::EnvDefaults: 8 threads (6 until 8.11); 4 with KYTY_ENV_DEFAULTS=0.
 		threads = static_cast<uint32_t>(std::clamp(std::atoi(value), 0, 16));
 	}
 	// Only the jobs left to compile need workers (suspects and pipelines already in the driver cache are dropped).

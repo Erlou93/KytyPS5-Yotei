@@ -8,6 +8,7 @@
 #include "graphics/shader/recompiler/ir/BindlessBindings.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <algorithm>
 #include <array>
 #include <mutex>
 #include <atomic>
@@ -21,6 +22,73 @@
 #include <vulkan/vulkan.hpp>
 
 namespace Libs::Graphics {
+
+// A set of 64-bit keys rebuilt in place (open addressing, linear probing, at most half full): once its slots are large
+// enough a rebuild allocates nothing. The image set of a large table (ListTableImagesByEvents) was an unordered_set
+// that allocated and freed one node per image at every full listing (8.11 profile: ~3% of the GPU thread; +4.2%
+// fps in the town walk, live A/B).
+class FlatKeySet {
+public:
+	void Clear(size_t expected) {
+		size_t capacity = 16;
+		while (capacity < expected * 2u) capacity <<= 1u;
+		if (m_slots.size() < capacity) {
+			m_slots.assign(capacity, kEmpty);
+		} else {
+			std::fill(m_slots.begin(), m_slots.end(), kEmpty);
+		}
+		m_count     = 0;
+		m_has_empty = false;
+		m_limit     = m_slots.size() / 2u;
+	}
+	void Insert(uint64_t key) {
+		if (key == kEmpty) {
+			m_has_empty = true;
+			return;
+		}
+		if (m_count >= m_limit) Grow();
+		const size_t mask = m_slots.size() - 1u;
+		for (size_t i = Hash(key) & mask;; i = (i + 1u) & mask) {
+			if (m_slots[i] == key) return;
+			if (m_slots[i] == kEmpty) {
+				m_slots[i] = key;
+				m_count++;
+				return;
+			}
+		}
+	}
+	[[nodiscard]] bool Contains(uint64_t key) const {
+		if (key == kEmpty) return m_has_empty;
+		if (m_slots.empty()) return false;
+		const size_t mask = m_slots.size() - 1u;
+		for (size_t i = Hash(key) & mask;; i = (i + 1u) & mask) {
+			if (m_slots[i] == key) return true;
+			if (m_slots[i] == kEmpty) return false;
+		}
+	}
+
+private:
+	static constexpr uint64_t kEmpty = ~uint64_t {0};
+	static size_t             Hash(uint64_t key) {
+        key ^= key >> 33u;
+        key *= 0xff51afd7ed558ccdull;
+        key ^= key >> 33u;
+        return static_cast<size_t>(key);
+	}
+	void Grow() {
+		std::vector<uint64_t> old;
+		old.swap(m_slots);
+		m_slots.assign(std::max<size_t>(old.size() * 2u, 16u), kEmpty);
+		m_limit = m_slots.size() / 2u;
+		m_count = 0;
+		for (const uint64_t key: old)
+			if (key != kEmpty) Insert(key);
+	}
+	std::vector<uint64_t> m_slots;
+	size_t                m_count     = 0;
+	size_t                m_limit     = 0;
+	bool                  m_has_empty = false;
+};
 
 struct GraphicContext;
 class CommandScheduler;
@@ -390,7 +458,7 @@ public:
 		uint64_t                     walked_hash    = 0;
 		bool                         walked         = false;
 		uint64_t                     layout_log_pos = 0;
-		std::unordered_set<uint64_t> image_set;
+		FlatKeySet                   image_set;
 		std::vector<ImageId>         unwatched; // listed fully but not yet seen by a layout walk (re-listed until watched)
 		// The slot journal: its slots dropped since `slots` was set, one of its slots changed image or died
 		// since `images` was listed.
@@ -407,6 +475,18 @@ public:
 		uint64_t                                   used_frame = 0;
 		bool                                       fast_list  = false;
 		std::vector<std::pair<uint32_t, uint32_t>> fast_slots;
+		// The difference translation (tables over 1 MiB): the last translation's named entries in naming order and
+		// the field that named each, the signature of the fields it named them with, whether `values` and `src_*` are that
+		// translation's, and the slots that died since (DropTableSlot; a long list ends the difference path until the
+		// next full translation).
+		std::vector<uint32_t> diff_entries;
+		std::vector<uint16_t> diff_fields;
+		uint64_t              diff_signature = 0;
+		bool                  diff_ready     = false;
+		std::vector<uint32_t> dead_list;
+		// differential tables step 2: the slots the last difference translation took, refreshed at the
+		// next refresh instead of a pass over every slot.
+		std::vector<std::pair<uint32_t, uint32_t>> diff_new_slots;
 	};
 	// A slot of the table path, by slot number (per image array).
 	// The fields a table refresh reads for every slot it visits come first, in one cache line.
@@ -497,6 +577,7 @@ public:
 	// A live table slot that shows this descriptor; 0 = none.
 	[[nodiscard]] uint32_t FindTableSlot(const TableSlotKey& key) const;
 	[[nodiscard]] TableSlotInfo& GetTableSlot(uint32_t binding, uint32_t slot) { return m_table_slot_info[binding][slot]; }
+	[[nodiscard]] size_t TableSlotCount(uint32_t binding) const noexcept { return m_table_slot_info[binding].size(); }
 	// A slot the table path took (AllocateSlot) and wrote (WriteSlot) for the descriptor.
 	void AddTableSlot(const TableSlotKey& key, uint32_t slot, ImageId image, bool gpu_written, uint64_t frame,
 	                  uint64_t draw);
@@ -506,6 +587,16 @@ public:
 	// the drop has completed (draws prepared until then may hold it: a table translates at most twice per tick); tables
 	// that reference it translate again before their next draw.
 	void DropTableSlot(uint32_t binding, uint32_t slot);
+	// A guest unmap (renderContext.cpp UnmapWait): whether the drops of the unmap being made get their placeholder only once
+	// the GPU finished their tick; whether an image has heap keys (they go pending at once); the PERF unmap_image_defer
+	// counters (GPU thread). A draw reads a translation that names a dead slot: counted when it is one an unmap dropped
+	// and its deferred point has not come yet.
+	void SetUnmapDeferred(bool deferred) noexcept { m_unmap_deferred = deferred; }
+	[[nodiscard]] bool HasImageKeys(ImageId id) const { return m_image_refs.contains(ImageKey(id)); }
+	void               NoteDeadSlotRead(const Table& table);
+	struct UnmapDeferStats {
+		uint64_t defer = 0, keys = 0, slots = 0, late_reads = 0, reassigned = 0, heap_miss = 0;
+	} unmap_defer;
 	// Whether every slot the table's entries hold is still the one they were translated to.
 	[[nodiscard]] bool TableSlotsAlive(const Table& table) const;
 	[[nodiscard]] bool TableUsesImage(ImageId id) const { return m_table_image_slots.contains(ImageKey(id)); }
@@ -526,7 +617,11 @@ public:
 	// A translation set the table's slots (old_slots: those before): it leaves the owners of the slots that left and
 	// joins those of the ones that joined (its dead count and image list start again).
 	// new_stamp: TableSlotInfo::stamp of every slot the translation listed.
-	void UpdateTableOwners(Table& table, std::span<const std::pair<uint32_t, uint32_t>> old_slots, uint32_t new_stamp);
+	// skip_kept (the difference translation): a slot the table kept (in old_slots, live, same generation, stamped by this
+	// translation) has it among its owners already, so it is not searched (8.11: 148 million kept slots checked, none
+	// without the table).
+	void UpdateTableOwners(Table& table, std::span<const std::pair<uint32_t, uint32_t>> old_slots, uint32_t new_stamp,
+	                       bool skip_kept = false);
 	// The slot's image turned out to be GPU-written: its owners refresh it at every draw from now on.
 	void NoteTableSlotGpuWritten(uint32_t binding, uint32_t slot);
 	// The journal's entries since the last call, as the named mark of their slots.
@@ -673,6 +768,11 @@ private:
 		uint64_t tick    = 0; // command-buffer tick of the drop
 	};
 	std::vector<DroppedSlot>                          m_table_slots_dropped; // freed after a commit in a later tick
+	// A guest unmap: whether its drops are deferred, and the slots it dropped whose deferred point has not come yet
+	// (binding << 32 | slot).
+	void                         DeferUnmapDrop(uint32_t binding, uint32_t slot, vk::ImageView placeholder);
+	bool                         m_unmap_deferred = false;
+	std::unordered_set<uint64_t> m_unmap_pending;
 	uint64_t                                          m_table_generation = 1; // raised whenever a table slot dies
 	uint64_t                                          m_table_slot_epoch = 1;
 	uint64_t                                          m_table_gpu_epoch  = 1;
@@ -697,6 +797,9 @@ private:
 	uint64_t               m_fast_stamp = 0;
 	uint64_t               m_fast_frame = 0;
 	bool                   m_slot_owners_on = false; // the tables are enabled (owners, journal, page index)
+	// UpdateTableOwners skip_kept: per slot the token of the update that found the table keeping it.
+	std::vector<uint32_t> m_owner_kept;
+	uint32_t              m_owner_kept_token = 0;
 	std::vector<std::vector<std::pair<uint32_t, uint32_t>>> m_page_slots; // alias page (1 MiB, 16 bits) -> {binding, slot}
 	std::vector<uint64_t>                                  m_journal_images; // DrainSlotJournal's copies
 	std::vector<std::pair<uint64_t, uint64_t>>              m_journal_pages;
