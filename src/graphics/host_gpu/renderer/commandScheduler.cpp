@@ -5,7 +5,6 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
-#include "common/liveAb.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -622,14 +621,7 @@ void CommandScheduler::NoteGpuCommandBatched() {
 	if (boundary && PerfEnabled()) {
 		m_perf_deferred_periodic.fetch_add(1, std::memory_order_relaxed);
 	}
-	// KYTY_PERF_SUBMIT_BOUND=<commands> (test, live A/B; default SubmitEvery * BatchMaxBatches): while the GPU is busy the open
-	// buffer is submitted once it holds that many draws/dispatches. Exact: only where the same commands are split.
-	static const uint32_t bound_fixed = [] {
-		const char* v = std::getenv("KYTY_PERF_SUBMIT_BOUND");
-		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
-	}();
-	const uint32_t bound = Common::LiveAb::Gate(Common::LiveAb::Switch::SubmitBound, bound_fixed);
-	if (uint64_t {count} > (bound != 0u ? uint64_t {bound} : uint64_t {SubmitEvery} * BatchMaxBatches)) {
+	if (uint64_t {count} > uint64_t {SubmitEvery} * BatchMaxBatches) {
 		FlushFor(SubmitReason::PeriodicBound);
 	}
 }
