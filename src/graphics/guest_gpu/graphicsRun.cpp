@@ -305,9 +305,8 @@ static void PerfReport(RenderContext& renderer) {
 				std::fprintf(stderr, " %s=%llu/%.1fms", n[i], static_cast<unsigned long long>(s.queries[i].exchange(0)),
 				             static_cast<double>(s.query_ns[i].exchange(0)) / 1e6);
 			}
-			std::fprintf(stderr, " blocks=%llu/%.1fms spins=%llu/%llu/%.1fms\n", static_cast<unsigned long long>(s.blocks.exchange(0)),
-			             static_cast<double>(s.block_ns.exchange(0)) / 1e6, static_cast<unsigned long long>(s.spins_won.exchange(0)),
-			             static_cast<unsigned long long>(s.spins_lost.exchange(0)), static_cast<double>(s.spin_ns.exchange(0)) / 1e6);
+			std::fprintf(stderr, " blocks=%llu/%.1fms\n", static_cast<unsigned long long>(s.blocks.exchange(0)),
+			             static_cast<double>(s.block_ns.exchange(0)) / 1e6);
 		}
 		std::fprintf(stderr, "PERF image_unregister %s\n", TakeImageUnregisterStats().c_str());
 	}

@@ -3,7 +3,6 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include "common/assert.h"
-#include "common/liveAb.h"
 #include "common/onceValue.h"
 #include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -14,7 +13,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <immintrin.h>
 
 namespace Libs::Graphics {
 
@@ -99,34 +97,6 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	}
 	if (IsFree(tick)) {
 		return;
-	}
-	// KYTY_PERF_SEMAPHORE_SPIN_US=<us> (default 0, live A/B): before blocking in the driver, poll the timeline value for up
-	// to that many microseconds (a user-mode read, ~0.1 us). The same tick is waited for either way; only how the thread
-	// learns that the GPU reached it changes (a blocked thread's wake-up after the signal costs its own latency).
-	static const uint32_t spin_fixed = [] {
-		const char* v = std::getenv("KYTY_PERF_SEMAPHORE_SPIN_US");
-		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
-	}();
-	if (const uint32_t spin_us = Common::LiveAb::Gate(Common::LiveAb::Switch::SemaphoreSpinUs, spin_fixed); spin_us != 0u) {
-		const auto spin_start = std::chrono::steady_clock::now();
-		const auto spin_end   = spin_start + std::chrono::microseconds(spin_us);
-		const QuerySite site(3);
-		for (;;) {
-			for (int i = 0; i < 16; i++) _mm_pause();
-			RefreshNow();
-			if (IsFree(tick)) {
-				auto& s = GetStats();
-				s.spins_won.fetch_add(1, std::memory_order_relaxed);
-				s.spin_ns.fetch_add(static_cast<uint64_t>((std::chrono::steady_clock::now() - spin_start).count()),
-				                    std::memory_order_relaxed);
-				return;
-			}
-			if (std::chrono::steady_clock::now() >= spin_end) break;
-		}
-		auto& s = GetStats();
-		s.spins_lost.fetch_add(1, std::memory_order_relaxed);
-		s.spin_ns.fetch_add(static_cast<uint64_t>((std::chrono::steady_clock::now() - spin_start).count()),
-		                    std::memory_order_relaxed);
 	}
 	const auto block_start = std::chrono::steady_clock::now();
 	// KYTY_TRACE_SYNC_TIMELINE: a wait that blocks, attributed to its thread, site and reader.
