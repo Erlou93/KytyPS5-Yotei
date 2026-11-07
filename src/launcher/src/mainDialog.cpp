@@ -133,6 +133,9 @@ constexpr int    PAGE_GRAPHICS    = 2;
 constexpr int    PAGE_SHADERS     = 3;
 constexpr int    PAGE_ADVANCED    = 4;
 constexpr int    PAGE_MODS        = 5;
+// v0.1.6: player guide pages (KytyPS5-Yotei-Player-Guide.pdf) of the first-start steps.
+constexpr int    GUIDE_PAGE_IMPORT_HINTS = 4;
+constexpr int    GUIDE_PAGE_PRECOMPILE   = 4;
 constexpr int    PAGE_FIRST_START = 6; // not in the sidebar: shown while no game is found
 // Play background with a game selected: its picture from sce_sys (pic0.png, else pic1.png), scaled to this width
 // (enough for the page on a 1.5x screen), under an ink layer of this alpha.
@@ -240,6 +243,9 @@ private:
 	static QMap<QString, int> g_shader_setup; // "<title id>_<version>" -> step
 	[[nodiscard]] QString ShippedHintsKey(const ConfigurationItem* item) const; // empty: no hints shipped for it
 	[[nodiscard]] int     ShaderSetupStep(const ConfigurationItem* item) const;   // 2 when no hints are shipped
+	// v0.1.6: the player guide (KytyPS5-Yotei-Player-Guide.pdf next to the launcher) opened at a step's page.
+	void         OpenGuide(int page);
+	QPushButton* m_guide_play_button = nullptr; // "How to do this?" on Play while a first-start step is missing
 
 	Ui::MainDialog* m_ui             = {nullptr};
 	MainDialog*     m_main_dialog    = nullptr;
@@ -371,6 +377,33 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 		QDesktopServices::openUrl(QUrl::fromLocalFile(LogDir()));
 	});
 	connect(m_ui->bug_report_button, &QPushButton::clicked, this, &MainDialogPrivate::ExportBugReport);
+	{
+		// v0.1.6: buttons that open the player guide at the page of the step (players skipped the guide).
+		const auto find_box = [](auto&& self, QLayout* layout, QWidget* widget) -> QBoxLayout* {
+			if (layout == nullptr) return nullptr;
+			for (int i = 0; i < layout->count(); ++i) {
+				auto* entry = layout->itemAt(i);
+				if (entry->widget() == widget) return qobject_cast<QBoxLayout*>(layout);
+				if (auto* found = self(self, entry->layout(), widget); found != nullptr) return found;
+			}
+			return nullptr;
+		};
+		const auto add_after = [&](QWidget* anchor, const QString& text, int page) -> QPushButton* {
+			auto* button = new QPushButton(text, anchor->parentWidget());
+			button->setProperty("kind", QStringLiteral("secondary"));
+			button->setProperty("textStyle", QStringLiteral("Label/Button"));
+			button->setCursor(Qt::PointingHandCursor);
+			connect(button, &QPushButton::clicked, this, [this, page]() { OpenGuide(page); });
+			if (auto* box = find_box(find_box, anchor->parentWidget()->layout(), anchor); box != nullptr) {
+				box->insertWidget(box->indexOf(anchor) + 1, button, 0, Qt::AlignLeft);
+			}
+			return button;
+		};
+		m_guide_play_button = add_after(m_ui->play_title, tr("How to do this?"), GUIDE_PAGE_IMPORT_HINTS);
+		m_guide_play_button->setVisible(false);
+		add_after(m_ui->hints_import_button, tr("How to import hints?"), GUIDE_PAGE_IMPORT_HINTS);
+		add_after(m_ui->bug_report_button, tr("Player guide"), 1);
+	}
 	ConnectSettingsPages();
 
 	main_dialog->setWindowFlags(Qt::Dialog /*| Qt::MSWindowsFixedSizeDialogHint*/);
@@ -683,6 +716,19 @@ QString MainDialogPrivate::HintsDir() const {
 		return QApplication::applicationDirPath() + QLatin1Char('/') + QString::fromLatin1(HINTS_DIR);
 	}
 	return QFileInfo(m_interpreter).absoluteDir().filePath(HINTS_DIR);
+}
+
+void MainDialogPrivate::OpenGuide(int page) {
+	const auto pdf =
+	    QDir(QApplication::applicationDirPath()).filePath(QStringLiteral("KytyPS5-Yotei-Player-Guide.pdf"));
+	if (!QFileInfo::exists(pdf)) {
+		QMessageBox::information(m_main_dialog, tr("Player guide"),
+		                         tr("KytyPS5-Yotei-Player-Guide.pdf is not next to launcher.exe."));
+		return;
+	}
+	auto url = QUrl::fromLocalFile(pdf);
+	if (page > 1) url.setFragment(QStringLiteral("page=%1").arg(page)); // PDF viewers that know it open that page
+	QDesktopServices::openUrl(url);
 }
 
 QString MainDialogPrivate::ShippedHintsKey(const ConfigurationItem* item) const {
@@ -1011,6 +1057,12 @@ void MainDialogPrivate::UpdatePlaySummary(const ConfigurationItem* item) {
 	const auto game = game_info.title_id.isEmpty() ? game_info.name : game_info.title_id;
 	m_ui->play_eyebrow->setText((game + (folder_ok ? tr(" · found") : tr(" · folder missing"))).toUpper());
 	const int setup = ShaderSetupStep(item);
+	if (m_guide_play_button != nullptr) {
+		m_guide_play_button->setVisible(folder_ok && !item->IsRunning() && setup < 2);
+		m_guide_play_button->disconnect();
+		const int page = setup == 0 ? GUIDE_PAGE_IMPORT_HINTS : GUIDE_PAGE_PRECOMPILE;
+		connect(m_guide_play_button, &QPushButton::clicked, this, [this, page]() { OpenGuide(page); });
+	}
 	if (const auto emulator = EmulatorCheck(); emulator.has_value()) {
 		m_ui->play_title->setText(emulator->title);
 	} else if (!item->IsRunning() && folder_ok && setup == 0) {
