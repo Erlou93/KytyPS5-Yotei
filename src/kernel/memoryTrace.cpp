@@ -128,7 +128,12 @@ void SrtClassesWait(const char* where, uint32_t cls, uint64_t vaddr, uint64_t ns
 		if (shader.marker.empty() && gpu_thread) shader.marker = Graphics::DebugMarkerPath().substr(0, 80);
 	}
 	static uint32_t printed = 0;
-	if (ns < 200000u || printed >= 600u) return;
+	// KYTY_TRACE_SRT_WAIT_FROM=<presented frame> (diagnostic): the 600 printed long waits start at that frame.
+	static const uint32_t from = [] {
+		const char* v = std::getenv("KYTY_TRACE_SRT_WAIT_FROM");
+		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
+	}();
+	if (ns < 200000u || printed >= 600u || Graphics::DebugPresentCount().load() < from) return;
 	++printed;
 	std::fprintf(stderr, "SRT_CLASS_WAIT frame=%u where=%s phase=%u cls=%u addr=0x%llx us=%llu hash=%016llx marker=%s\n",
 	             Graphics::DebugPresentCount().load(), where, static_cast<uint32_t>(Ir::t_srt_read_phase), cls,
