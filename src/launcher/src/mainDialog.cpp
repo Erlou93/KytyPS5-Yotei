@@ -135,7 +135,7 @@ constexpr int    PAGE_ADVANCED    = 4;
 constexpr int    PAGE_MODS        = 5;
 // v0.1.6: player guide pages (KytyPS5-Yotei-Player-Guide.pdf) of the first-start steps.
 constexpr int    GUIDE_PAGE_IMPORT_HINTS = 4;
-constexpr int    GUIDE_PAGE_PRECOMPILE   = 4;
+constexpr int    GUIDE_PAGE_PRECOMPILE   = 5;
 constexpr int    PAGE_FIRST_START = 6; // not in the sidebar: shown while no game is found
 // Play background with a game selected: its picture from sce_sys (pic0.png, else pic1.png), scaled to this width
 // (enough for the page on a 1.5x screen), under an ink layer of this alpha.
@@ -401,7 +401,8 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 		};
 		m_guide_play_button = add_after(m_ui->play_title, tr("How to do this?"), GUIDE_PAGE_IMPORT_HINTS);
 		m_guide_play_button->setVisible(false);
-		add_after(m_ui->hints_import_button, tr("How to import hints?"), GUIDE_PAGE_IMPORT_HINTS);
+		auto* hints_help = add_after(m_ui->hints_import_button, QStringLiteral("?"), GUIDE_PAGE_IMPORT_HINTS);
+		hints_help->setToolTip(tr("How to import the shader hints (player guide)"));
 		add_after(m_ui->bug_report_button, tr("Player guide"), 1);
 	}
 	ConnectSettingsPages();
@@ -876,6 +877,12 @@ MainDialogPrivate::Check MainDialogPrivate::CacheCheck(const ConfigurationItem* 
 		return {S::Warn, tr("Shader cache"), tr("Select a game to see how much of it is precompiled.")};
 	}
 	const auto& title_id = item->GetInfo().title_id;
+	// v0.1.6: with shipped hints, the first-start steps come first.
+	if (const int setup = ShaderSetupStep(item); setup == 0) {
+		return {S::Warn, tr("Shader cache: hints not imported"), tr("Shaders page → Import hints… first; PLAY waits for it.")};
+	} else if (setup == 1 && PrecompiledPercent(g_precompile_progress.value(title_id)) != 100) {
+		return {S::Warn, tr("Shader cache: precompile not finished"), tr("Let the precompile finish; PLAY waits for it.")};
+	}
 	const int   percent  = PrecompiledPercent(g_precompile_progress.value(title_id));
 	if (percent == 100) {
 		return {S::Ok, tr("Shader cache: precompiled"), tr("As of the last precompile.")};
@@ -1301,8 +1308,8 @@ void MainDialogPrivate::SaveScreenshots(const QString& dir) {
 	m_ui->precompile_progress->setVisible(true);
 	m_ui->precompile_pause_button->setVisible(true);
 	m_ui->precompile_button->setText(tr("Continue precompiling"));
-	PrecompileLine(QStringLiteral("PRECOMPILE_START total=28700 cached=0 old_journals=0"));
-	PrecompileLine(QStringLiteral("PRECOMPILE_PROGRESS done=17840 total=28700 compute=9120 graphics=8720 eta_s=1860 phase=compile"));
+	PrecompileLine(QStringLiteral("PRECOMPILE_START total=10272 cached=0 old_journals=0"));
+	PrecompileLine(QStringLiteral("PRECOMPILE_PROGRESS done=6420 total=10272 compute=1300 graphics=5120 eta_s=540 phase=compile"));
 	save(PAGE_SHADERS, QStringLiteral("shaders-precompiling"));
 	save(PAGE_ADVANCED, QStringLiteral("advanced"));
 	save(PAGE_FIRST_START, QStringLiteral("first-start"));
