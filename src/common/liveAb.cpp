@@ -48,6 +48,8 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Exact: per recorded command, the open-buffer size at which a busy GPU is handed the buffer anyway.
+    {Switch::SubmitBound, "KYTY_PERF_SUBMIT_BOUND", 1048576},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
