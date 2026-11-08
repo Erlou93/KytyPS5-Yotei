@@ -1454,8 +1454,18 @@ void RingExecDataFrame(uint64_t frame) {
 	g_ring_exec_data_frame = frame;
 }
 
+// KYTY_PERF_RING_FRAME_RULE=1 (test switch): ring bytes are dead by the game frame of the work that wrote them (frame
+// <= W-2, W: the frame whose ring half the game writes now) instead of by execution-thread SuspendPoint ticks.
+bool RingFrameRule() {
+	static const bool on = [] {
+		const char* v = std::getenv("KYTY_PERF_RING_FRAME_RULE");
+		return v != nullptr && v[0] == '1';
+	}();
+	return on;
+}
+
 bool RingFrameArmWanted() {
-	return RingAgeDiag();
+	return RingAgeDiag() || RingFrameRule();
 }
 
 void RingFrameArm(int kind) {
@@ -1904,8 +1914,19 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 		}
 	}
 	std::vector<std::pair<uint64_t, uint64_t>> dead;
-	bool                                       live = false;
+	bool                                       live       = false;
+	const bool                                 frame_rule = RingFrameRule();
+	const uint64_t                             write_frame = frame_rule ? g_ring_game_write_frame.load(std::memory_order_acquire) : 0;
 	m_gpu_modified_ranges.ForEachInRange(page, 4096, [&](uint64_t start, uint64_t end) {
+		if (frame_rule) { // KYTY_PERF_RING_FRAME_RULE: frame + 1 stored, 0 unknown (kept)
+			const uint64_t frame1 = QueryTicks(m_write_frames, start, end);
+			if (frame1 != 0 && frame1 + 1u <= write_frame) {
+				dead.emplace_back(start, end);
+			} else {
+				live = true;
+			}
+			return;
+		}
 		const uint64_t tick = QueryWriteTick(start, end);
 		if (tick != 0 && tick < prev_start) {
 			dead.emplace_back(start, end);
@@ -3515,7 +3536,7 @@ void ReportObtainExact(uint64_t count) {
 void BufferCache::NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick) {
 	if (!SyncTimeline::Enabled() && (end <= 0x2002600000ull || start >= 0x2010000000ull)) return;
 	InsertTickRangeJoined(m_write_ticks, start, end, tick);
-	if (RingAgeDiag() && start < 0x2010000000ull && end > 0x2002600000ull) InsertTickRangeJoined(m_write_frames, start, end, g_ring_exec_data_frame + 1u);
+	if (RingFrameArmWanted() && start < 0x2010000000ull && end > 0x2002600000ull) InsertTickRangeJoined(m_write_frames, start, end, g_ring_exec_data_frame + 1u);
 }
 
 void BufferCache::InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick) {

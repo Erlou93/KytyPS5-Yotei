@@ -176,7 +176,10 @@ private:
 
 	uint64_t        m_submit_id = 0;
 	std::atomic_int m_done_num  = 0;
-	bool            m_ring_after_sp = false; // KYTY_DIAG_RING_ONE_FRAME_AGE (m_queue_mutex): a SuspendPoint, not yet its graphics submission
+	// KYTY_PERF_RING_FRAME_RULE / KYTY_DIAG_RING_ONE_FRAME_AGE (m_queue_mutex): SuspendPoints enqueued, and a SuspendPoint
+	// whose graphics submission is not enqueued yet.
+	uint64_t        m_ring_sp_count = 0;
+	bool            m_ring_after_sp = false;
 	uint64_t        m_emitted   = 0;
 	Common::ProgressCounter m_executed;
 	// The pipeline: operations ring from the command processor thread to the resolve thread and from there to the execution

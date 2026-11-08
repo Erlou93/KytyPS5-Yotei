@@ -1788,15 +1788,17 @@ void GuestGpu::Enqueue(Submission submission) {
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	if (RingFrameArmWanted()) {
-		// KYTY_DIAG_RING_ONE_FRAME_AGE: the game frame each submission writes the ring half of. Frame F ends with its
-		// SuspendPoint (m_done_num becomes F+1), then the context kicks and the graphics submission of frame F (7.6
-		// steps 4-7); everything after that graphics submission is frame F+1.
-		const auto done = static_cast<uint64_t>(m_done_num.load(std::memory_order_relaxed));
+		// KYTY_PERF_RING_FRAME_RULE: the game frame each submission writes the ring half of. Frame F ends with its
+		// SuspendPoint (the count becomes F+1), then the context kicks and the graphics submission of frame F (7.6
+		// steps 4-7); everything after that graphics submission is frame F+1. Counted here, under the queue lock, so
+		// a kick enqueued by another thread right after the SuspendPoint sees the new count.
 		if (submission.type == SubmissionType::SuspendPoint) {
-			submission.ring_data_frame = done;
-			m_ring_after_sp            = true;
-			RingGameWriteFrame(done);
+			submission.ring_data_frame = m_ring_sp_count;
+			m_ring_sp_count++;
+			m_ring_after_sp = true;
+			RingGameWriteFrame(m_ring_sp_count - 1u);
 		} else {
+			const uint64_t done = m_ring_sp_count;
 			submission.ring_data_frame = m_ring_after_sp ? done - 1u : done;
 			if (m_ring_after_sp && submission.type == SubmissionType::Graphics) m_ring_after_sp = false;
 			RingGameWriteFrame(m_ring_after_sp ? done - 1u : done);
