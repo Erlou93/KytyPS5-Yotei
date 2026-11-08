@@ -182,6 +182,64 @@ int BufferCache::BdaEntryShareMode() {
 	return mode;
 }
 
+// KYTY_DIAG_BDA_POOLS=1: imports by pool and reason (0 the game's list, 1 a read as 0, 2 a direct download) and the fault
+// pass's pages by pool (3 served by the fallback, 4 read as 0). Pools: arena 1 (0x20_...), arena 2 (0x50_...), the texture
+// manager's range (0x90_... - 0xFC_...), other (the general GPU allocator and the rest).
+namespace {
+std::atomic<uint64_t> g_bda_pools[5][4] {};
+int                   BdaPoolOf(uint64_t vaddr) {
+    const uint64_t top = vaddr >> 36u; // 64 GiB units: 0x20_0000_0000 >> 36 = 2
+    if (top == 2) return 0;
+    if (top == 5) return 1;
+    if (vaddr >= 0x9000000000ull && vaddr < 0xFC00000000ull) return 2;
+    return 3;
+}
+} // namespace
+
+bool BufferCache::DiagBdaPools() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_BDA_POOLS");
+		const bool  b     = value != nullptr && value[0] == '1';
+		if (b) std::fprintf(stderr, "DIAG_BDA_POOLS enabled
+");
+		return b;
+	}();
+	return on;
+}
+
+void BufferCache::DiagBdaPoolRead(uint64_t address, bool served) {
+	if (!DiagBdaPools()) return;
+	g_bda_pools[served ? 3 : 4][BdaPoolOf(address)].fetch_add(1, std::memory_order_relaxed);
+}
+
+void BufferCache::DiagBdaPoolsPrint() {
+	static uint64_t last_sum = 0;
+	uint64_t        v[5][4] {};
+	uint64_t        sum = 0;
+	for (int k = 0; k < 5; k++) {
+		for (int p = 0; p < 4; p++) {
+			v[k][p] = g_bda_pools[k][p].load(std::memory_order_relaxed);
+			sum += v[k][p] * static_cast<uint64_t>(k * 4 + p + 1);
+		}
+	}
+	if (sum == last_sum) return;
+	last_sum = sum;
+	std::fprintf(stderr,
+	             "BDA_POOLS frame=%u import(list/zero/dl) a1=%llu/%llu/%llu a2=%llu/%llu/%llu tex=%llu/%llu/%llu other=%llu/%llu/%llu "
+	             "pages(served/zero) a1=%llu/%llu a2=%llu/%llu tex=%llu/%llu other=%llu/%llu
+",
+	             DebugPresentCount().load(), static_cast<unsigned long long>(v[0][0]), static_cast<unsigned long long>(v[1][0]),
+	             static_cast<unsigned long long>(v[2][0]), static_cast<unsigned long long>(v[0][1]),
+	             static_cast<unsigned long long>(v[1][1]), static_cast<unsigned long long>(v[2][1]),
+	             static_cast<unsigned long long>(v[0][2]), static_cast<unsigned long long>(v[1][2]),
+	             static_cast<unsigned long long>(v[2][2]), static_cast<unsigned long long>(v[0][3]),
+	             static_cast<unsigned long long>(v[1][3]), static_cast<unsigned long long>(v[2][3]),
+	             static_cast<unsigned long long>(v[3][0]), static_cast<unsigned long long>(v[4][0]),
+	             static_cast<unsigned long long>(v[3][1]), static_cast<unsigned long long>(v[4][1]),
+	             static_cast<unsigned long long>(v[3][2]), static_cast<unsigned long long>(v[4][2]),
+	             static_cast<unsigned long long>(v[3][3]), static_cast<unsigned long long>(v[4][3]));
+}
+
 void BufferCache::QueueFallbackMap(uint64_t vaddr, uint64_t size) {
 	if (size == 0) return;
 	std::scoped_lock lock(m_fallback_pending_mutex);
@@ -195,7 +253,7 @@ bool BufferCache::FallbackEntry(uint64_t page, vk::DeviceAddress* entry) {
 	const uint64_t total = LibKernel::Memory::GuestBackingSize();
 	if (LibKernel::Memory::GuestBackingBase() == 0 || offset >= total) return false;
 	const size_t chunk  = static_cast<size_t>(offset / FallbackChunkBytes);
-	Buffer*      import = FallbackChunk(chunk, false);
+	Buffer*      import = FallbackChunk(chunk, false, page, 0);
 	if (import == nullptr) return false;
 	const uint64_t in_chunk = offset - static_cast<uint64_t>(chunk) * FallbackChunkBytes;
 	if (in_chunk + CACHING_PAGESIZE > import->Size()) return false;
@@ -238,7 +296,7 @@ void BufferCache::LoadFallbackList() {
 // a direct download) or the game's list names it, and then added to the list; null when it is neither, or the driver
 // refuses it (remembered and counted: the granule's pages then miss as without the fallback). The direct downloads into
 // the backing take their imports from here (one import of each host range).
-Buffer* BufferCache::FallbackChunk(size_t chunk, bool want) {
+Buffer* BufferCache::FallbackChunk(size_t chunk, bool want, uint64_t diag_vaddr, int diag_reason) {
 	const uint64_t base  = LibKernel::Memory::GuestBackingBase();
 	const uint64_t total = LibKernel::Memory::GuestBackingSize();
 	if (base == 0 || static_cast<uint64_t>(chunk) * FallbackChunkBytes >= total) return nullptr;
@@ -285,6 +343,15 @@ Buffer* BufferCache::FallbackChunk(size_t chunk, bool want) {
 		}
 		m_fallback_chunks[chunk] = std::move(import);
 		m_fallback_stats.chunks++;
+		if (DiagBdaPools()) {
+			g_bda_pools[diag_reason][BdaPoolOf(diag_vaddr)].fetch_add(1, std::memory_order_relaxed);
+			std::fprintf(stderr, "BDA_POOL_IMPORT frame=%u chunk=%zu vaddr=0x%llx reason=%d us=%llu
+", DebugPresentCount().load(),
+			             chunk, static_cast<unsigned long long>(diag_vaddr), diag_reason,
+			             static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+			                                                 std::chrono::steady_clock::now() - t0)
+			                                                 .count()));
+		}
 		m_fallback_stats.imported_bytes += bytes;
 	}
 	return m_fallback_chunks[chunk].get();
@@ -294,7 +361,7 @@ void BufferCache::WantFallback(uint64_t page) {
 	page            = page & ~(CACHING_PAGESIZE - 1);
 	uint64_t offset = 0;
 	if (!LibKernel::Memory::GuestBackingOffset(page, CACHING_PAGESIZE, &offset)) return;
-	if (FallbackChunk(static_cast<size_t>(offset / FallbackChunkBytes), true) == nullptr) return;
+	if (FallbackChunk(static_cast<size_t>(offset / FallbackChunkBytes), true, page, 1) == nullptr) return;
 	// The guest range that maps the granule where `page` maps it (WriteFallbackRange checks each page's own granule;
 	// another view of the granule gets its entries when it is mapped again or faults itself).
 	const uint64_t in_granule = offset % FallbackChunkBytes;
@@ -346,6 +413,7 @@ void BufferCache::ApplyFallbackMaps() {
 		m_fallback_stats.maps++;
 		WriteFallbackRange(vaddr, size);
 	}
+	if (DiagBdaPools() && (m_fallback_stats.applies & 0xffu) == 0u) DiagBdaPoolsPrint();
 	// Checked every 1024 calls; printed at most every 5 s and only when a value changed (D6b: every 1024 calls it was half
 	// of a long session's log).
 	if ((++m_fallback_stats.applies & 0x3ffu) == 0u) {
@@ -596,7 +664,7 @@ bool BufferCache::PlanDownloadToBacking(uint64_t buffer_address, const std::vect
 			const uint64_t chunk      = at / granule;
 			const uint64_t chunk_base = chunk * granule;
 			const uint64_t bytes      = std::min(copy.size - done, chunk_base + granule - at);
-			Buffer*        target     = FallbackChunk(static_cast<size_t>(chunk), true);
+			Buffer*        target     = FallbackChunk(static_cast<size_t>(chunk), true, vaddr + done, 2);
 			// A tail chunk is shorter (whole pages only).
 			if (target == nullptr || at + bytes > chunk_base + target->Size()) {
 				s.fallback_import.fetch_add(1, std::memory_order_relaxed);

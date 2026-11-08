@@ -321,6 +321,10 @@ public:
 	// The fault pass: `page` (backing memory) was read as 0 because its granule is not imported yet: import it, add it to
 	// the game's granule list and give the granule's pages around `page` their fallback entries.
 	void WantFallback(uint64_t page);
+	// KYTY_DIAG_BDA_POOLS=1 (diagnostic, default off; the BDA project's measurement 8.11): the fault pass's pages by the
+	// game's memory pool (YOTEI-ENGINE 4.2), `served` = read through a fallback entry, else read as 0 from backing memory.
+	static bool DiagBdaPools();
+	static void DiagBdaPoolRead(uint64_t address, bool served);
 
 	// KYTY_TRACE_PERF: the PERF fault_wait_on_caller line (the caller wait's counters).
 	void ReportCallerWaitPerf();
@@ -689,7 +693,8 @@ private:
 	// the BDA fallback (M06)
 	bool    FallbackEntry(uint64_t page, vk::DeviceAddress* entry);
 	// The imported backing granule (null: not imported, refused, or not wanted and `want` false); also the direct downloads'
-	Buffer* FallbackChunk(size_t chunk, bool want);
+	Buffer* FallbackChunk(size_t chunk, bool want, uint64_t diag_vaddr = 0, int diag_reason = 0);
+	void    DiagBdaPoolsPrint();
 	void    LoadFallbackList();
 	void    WriteFallbackRange(uint64_t vaddr, uint64_t size);
 	std::vector<std::unique_ptr<Buffer>>              m_fallback_chunks; // imported backing per granule, null: not yet
