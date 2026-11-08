@@ -203,26 +203,6 @@ IR::U32 Translator::ReadScalarCode(uint32_t code) {
 	}
 }
 
-// KYTY_DIAG_CEILING_NO_EXEC_SELECT=<hex hash>[,<hex hash>...] (measurement only, default off, WRONG RESULTS): the listed
-// shaders write their VGPRs on every lane instead of Select(exec, new, old), so lanes outside EXEC lose their old value.
-// The ceiling of the code-size project's K3 (a better exec-select elider): the GPU time those selects cost at most.
-static bool CeilingNoExecSelect(uint64_t hash) {
-	static const std::vector<uint64_t> hashes = [] {
-		std::vector<uint64_t> list;
-		if (const char* value = std::getenv("KYTY_DIAG_CEILING_NO_EXEC_SELECT"); value != nullptr) {
-			for (char* next = const_cast<char*>(value); *next != '\0'; next += *next == ',' ? 1 : 0) {
-				char* end = nullptr;
-				list.push_back(std::strtoull(next, &end, 16));
-				if (end == next) break;
-				next = end;
-			}
-			std::fprintf(stderr, "DIAG_CEILING_NO_EXEC_SELECT %zu shaders (WRONG RESULTS, measurement only)\n", list.size());
-		}
-		return list;
-	}();
-	return std::ranges::find(hashes, hash) != hashes.end();
-}
-
 IR::U32 Translator::ApplyBitSourceModifiers(const Decoder::Operand& operand, IR::U32 value) {
 	if (operand.dpp) {
 		value =
@@ -367,7 +347,7 @@ void Translator::WriteRawU32(const Decoder::Operand& operand, IR::U32 value) {
 			                    (!operand.dpp_bound_ctrl && !operand.dpp8))) {
 				value = IR::U32(ir.Emit(IR::ValueOpcode::DppUpdateU32, {value, old, ir.GetExec()},
 				                        DppFlags(operand)));
-			} else if (!CeilingNoExecSelect(program.shader_hash)) {
+			} else {
 				value = ir.Select(ir.GetExec(), value, old);
 			}
 			ir.SetVectorReg(reg, value);
