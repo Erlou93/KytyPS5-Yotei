@@ -48,6 +48,11 @@ namespace SpirvLive {
 
 inline constexpr uint32_t LiveWordsBytes      = 256;
 inline constexpr uint32_t FlagIndirectLoadFast = 1u << 0u;
+inline constexpr uint32_t FlagFormattedCase    = 1u << 1u; // KYTY_DIAG_FORMATTED_CASE_LIVE
+
+// KYTY_DIAG_FORMATTED_CASE_LIVE=1 (measurement only): the k16_16UNorm case of GPU-selected formatted loads is taken
+// only while FlagFormattedCase is set (KYTY_LIVE_AB=KYTY_DIAG_FORMATTED_CASE_LIVE toggles it), else the table.
+[[nodiscard]] bool FormattedCaseLive();
 
 // Whether any switch is in its live mode (the fault buffer then has the flags word and Update writes it).
 [[nodiscard]] bool Enabled();

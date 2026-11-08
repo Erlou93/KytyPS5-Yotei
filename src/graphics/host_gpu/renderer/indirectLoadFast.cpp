@@ -95,8 +95,16 @@ bool Listed(uint64_t shader_hash) {
 
 namespace SpirvLive {
 
+bool FormattedCaseLive() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_FORMATTED_CASE_LIVE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+
 bool Enabled() {
-	static const bool on = IndirectLoadFast::Mode() == 3;
+	static const bool on = IndirectLoadFast::Mode() == 3 || FormattedCaseLive();
 	return on;
 }
 
@@ -104,6 +112,9 @@ uint32_t Flags() {
 	uint32_t flags = 0;
 	if (IndirectLoadFast::Mode() == 3 && Common::LiveAb::Gate(Common::LiveAb::Switch::IndirectLoadFast, 1u) != 0u) {
 		flags |= FlagIndirectLoadFast;
+	}
+	if (FormattedCaseLive() && Common::LiveAb::Gate(Common::LiveAb::Switch::DiagFormattedCaseLive, 1u) != 0u) {
+		flags |= FlagFormattedCase;
 	}
 	return flags;
 }
