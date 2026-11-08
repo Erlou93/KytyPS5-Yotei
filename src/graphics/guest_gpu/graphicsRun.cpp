@@ -1775,35 +1775,22 @@ void CommandProcessor::ExecuteDmaData(bool dst_gds, uint64_t dst_address_or_offs
 
 void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
-	if (RingFrameArmWanted()) { // KYTY_DIAG_RING_ONE_FRAME_AGE: the submission order around SuspendPoints (game frames 3000-3003, 6000-6003)
-		static int64_t sp_ns = 0;
-		const int64_t  now   = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-		const int      frame = m_done_num;
-		if ((frame >= 3000 && frame <= 3003) || (frame >= 6000 && frame <= 6003)) {
-			std::fprintf(stderr, "DIAG_RING_ORDER frame=%d type=%d queue=%u dw=%zu us_after_sp=%lld\n", frame, static_cast<int>(submission.type),
-			             submission.queue_id, submission.commands.size(), static_cast<long long>(now - sp_ns));
-		}
-		if (submission.type == SubmissionType::SuspendPoint) sp_ns = now;
-	}
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
-	if (RingFrameArmWanted()) {
-		// KYTY_PERF_RING_FRAME_RULE: the game frame each submission writes the ring half of. Frame F ends with its
-		// SuspendPoint (the count becomes F+1), then the context kicks and the graphics submission of frame F (7.6
-		// steps 4-7); everything after that graphics submission is frame F+1. Counted here, under the queue lock, so
-		// a kick enqueued by another thread right after the SuspendPoint sees the new count.
-		if (submission.type == SubmissionType::SuspendPoint) {
-			submission.ring_data_frame = m_ring_sp_count;
-			m_ring_sp_count++;
-			m_ring_after_sp = true;
-			RingGameWriteFrame(m_ring_sp_count - 1u);
-		} else {
-			const uint64_t done = m_ring_sp_count;
-			submission.ring_data_frame = m_ring_after_sp ? done - 1u : done;
-			if (m_ring_after_sp && submission.type == SubmissionType::Graphics) m_ring_after_sp = false;
-			RingGameWriteFrame(m_ring_after_sp ? done - 1u : done);
-		}
+	// The game frame whose data-ring half each submission writes (DropDeadRingBytes). Frame F ends with its
+	// SuspendPoint, then the context kicks and the graphics submission of frame F (YOTEI-ENGINE 7.6 steps 4-7);
+	// everything after that graphics submission is frame F+1. Counted under the queue lock, so a kick another thread
+	// enqueues right after the SuspendPoint sees the new count. The execution thread runs the compute queues out of
+	// order with the graphics queue, so a frame boundary in its ticks would not separate the game's frames.
+	if (submission.type == SubmissionType::SuspendPoint) {
+		submission.ring_frame = m_ring_sp_count;
+		m_ring_sp_count++;
+		m_ring_after_sp = true;
+	} else {
+		submission.ring_frame = m_ring_after_sp ? m_ring_sp_count - 1u : m_ring_sp_count;
+		if (m_ring_after_sp && submission.type == SubmissionType::Graphics) m_ring_after_sp = false;
 	}
+	RingGameWriteFrame(m_ring_after_sp ? m_ring_sp_count - 1u : m_ring_sp_count);
 	m_queues[submission.queue_id].push_back(std::move(submission));
 	m_submission_count++;
 	m_work_epoch.fetch_add(1, std::memory_order_release);
@@ -2053,15 +2040,18 @@ bool GuestGpu::Process(Submission& submission) {
 		cp.ResetDeCe();
 		cp.SetFlip({});
 	}
+	// The execution thread notes the GPU writes of this slice under its game frame (one stream for all queues).
+	if (submission.ring_frame != m_ring_announced) {
+		m_ring_announced = submission.ring_frame;
+		cp.EmitCallback([frame = submission.ring_frame] { RingExecDataFrame(frame); });
+	}
 
-	if (RingFrameArmWanted()) cp.EmitCallback([frame = submission.ring_data_frame] { RingExecDataFrame(frame); }); // KYTY_DIAG_RING_ONE_FRAME_AGE
 	cp.BufferInit();
 	bool complete      = true;
 	m_slice_progressed = false; // the queue waits guard: whether this slice ran a packet
 
 	switch (submission.type) {
 		case SubmissionType::Graphics: {
-			if (first_slice && RingFrameArmWanted()) cp.EmitCallback([] { RingFrameArm(0); }); // KYTY_DIAG_RING_ONE_FRAME_AGE
 			bool progressed = false;
 			submission.constant_complete |= submission.constant_commands.empty();
 			for (;;) {
@@ -2115,7 +2105,6 @@ bool GuestGpu::Process(Submission& submission) {
 		}
 		case SubmissionType::FlipPreparation:
 			cp.PrepareCpuFlip(submission.flip_request_id);
-			if (RingFrameArmWanted()) cp.EmitCallback([] { RingFrameArm(1); }); // KYTY_DIAG_RING_ONE_FRAME_AGE
 			break;
 		case SubmissionType::SuspendPoint:
 			// Age caches at the frame boundary, not once per command list.

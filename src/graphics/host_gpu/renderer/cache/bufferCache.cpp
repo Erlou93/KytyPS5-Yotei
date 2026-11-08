@@ -1406,44 +1406,9 @@ namespace {
 struct RingDeadStats {
 	std::atomic<uint64_t> faults {0}, freed {0}, dropped_bytes {0}, partial {0};
 };
-RingDeadStats g_ring_dead;
-std::array<uint64_t, 8>  g_ring_frame_ticks {}; // tick at the end of frame n (collector pass), slot n % 8
-std::array<int64_t, 8>   g_ring_frame_ns {};    // steady-clock ns at the same moments (KYTY_DIAG_RING_ONE_FRAME_AGE)
-// KYTY_DIAG_RING_ONE_FRAME_AGE=1 (diagnostic, decisions unchanged): for each ring write fault, whether a dead-bytes rule
-// counted from the current execution-thread frame would drop bytes today's rule keeps, and the lowest possible age of
-// those bytes (now minus the end of the frame they were written in), as a histogram (BAR-ODCZYTY 8.11 3.5: any page
-// younger than one game frame stops the idea).
-struct RingAgeStats {
-	std::atomic<uint64_t> faults {0}, extra_pages {0}, b30 {0}, b60 {0}, b100 {0}, b200 {0}, bmore {0}, min_us {~0ull};
-};
-RingAgeStats g_ring_age;
-// Upper bound of a page's write age: the time of the first GPU write noted under the same tick (the write is not older).
-struct RingTickTime { uint64_t tick = 0; int64_t ns = 0; };
-std::array<RingTickTime, 4096> g_ring_tick_first {};
-struct RingAgeUpper { std::atomic<uint64_t> b30 {0}, b60 {0}, b100 {0}, bmore {0}, unknown {0}; };
-RingAgeUpper g_ring_age_upper;
-bool RingAgeDiag() {
-	static const bool on = [] {
-		const char* v = std::getenv("KYTY_DIAG_RING_ONE_FRAME_AGE");
-		return v != nullptr && v[0] == '1';
-	}();
-	return on;
-}
-uint64_t                 g_ring_frames = 0;
-// Armed thresholds (KYTY_DIAG_RING_ONE_FRAME_AGE): g_ring_frames at the moment the execution thread reached the first
-// graphics submission (0) / flip preparation (1) after the latest SuspendPoint; equal to g_ring_frames = armed.
-std::array<std::atomic<uint64_t>, 2> g_ring_armed {};
-std::atomic<uint64_t>                g_ring_sp_count {0}, g_ring_flip_count {0};
-struct RingArmStats { std::atomic<uint64_t> extra {0}, b30 {0}, b60 {0}, b100 {0}, bmore {0}, unknown {0}; };
-std::array<RingArmStats, 2> g_ring_arm_stats;
-// Game-frame rule: GPU bytes on a ring page written by work of game frame <= W-2 (W: the frame the game writes now)
-// are dead - the same ring half, two frames back (BAR-ODCZYTY 3.3, with frames of submissions instead of ticks).
-std::atomic<uint64_t> g_ring_game_write_frame {0};
-uint64_t              g_ring_exec_data_frame = 0; // execution thread
-struct RingFrameRuleStats {
-	std::atomic<uint64_t> extra {0}, freed {0}, today_freed {0}, conflict {0}, unknown {0}, b30 {0}, b60 {0}, b100 {0}, bmore {0}, age_unknown {0};
-};
-RingFrameRuleStats g_ring_frame_rule;
+RingDeadStats         g_ring_dead;
+std::atomic<uint64_t> g_ring_game_write_frame {0}; // game threads: the frame whose ring half the game writes now
+uint64_t              g_ring_exec_data_frame = 0;  // execution thread: the frame of the work being recorded
 } // namespace
 
 void RingGameWriteFrame(uint64_t frame) {
@@ -1452,35 +1417,6 @@ void RingGameWriteFrame(uint64_t frame) {
 
 void RingExecDataFrame(uint64_t frame) {
 	g_ring_exec_data_frame = frame;
-}
-
-// KYTY_PERF_RING_FRAME_RULE=1 (test switch): ring bytes are dead by the game frame of the work that wrote them (frame
-// <= W-2, W: the frame whose ring half the game writes now) instead of by execution-thread SuspendPoint ticks.
-uint32_t RingFrameRuleFixed() {
-	static const uint32_t on = [] {
-		const char* v = std::getenv("KYTY_PERF_RING_FRAME_RULE");
-		return v != nullptr && v[0] == '1' ? 1u : 0u;
-	}();
-	return on;
-}
-
-bool RingFrameRule() {
-	return Common::LiveAb::Gate(Common::LiveAb::Switch::RingFrameRule, RingFrameRuleFixed()) != 0u;
-}
-
-bool RingFrameArmWanted() {
-	static const bool listed = [] { // live A/B: the tags are kept in both phases
-		const char* v = std::getenv("KYTY_LIVE_AB");
-		return v != nullptr && std::strstr(v, "KYTY_PERF_RING_FRAME_RULE") != nullptr;
-	}();
-	return RingAgeDiag() || RingFrameRuleFixed() != 0u || listed;
-}
-
-void RingFrameArm(int kind) {
-	if (!RingAgeDiag() || kind < 0 || kind > 1) return;
-	if (kind == 1) g_ring_flip_count.fetch_add(1, std::memory_order_relaxed);
-	auto& armed = g_ring_armed[static_cast<size_t>(kind)];
-	if (armed.load(std::memory_order_relaxed) != g_ring_frames) armed.store(g_ring_frames, std::memory_order_release);
 }
 
 bool BufferCache::TryCpWriteThrough(uint64_t address, const void* data, uint64_t size) {
@@ -1827,116 +1763,22 @@ bool BufferCache::InDirectRange(uint64_t vaddr, uint64_t size) const {
 }
 
 
-// A CPU write fault into a GPU-modified page of the data ring (two
-// halves, each reused every second frame; the game overwrites what it allocates there and never reads an older
-// frame's data) drops the page's GPU bytes written before the previous frame began instead of downloading them (and
-// waiting for their writer). Newer GPU bytes are downloaded as before. Returns true when no GPU byte is left in the page.
-// Measured (run 20261014-212758): ~290 such faults a frame, 74% with only such old bytes. The
-// frame boundary is the GPU thread's (it lags the game), which only makes the rule stricter.
+// A CPU write fault into a GPU-modified page of the data ring (two halves, each reused every second game frame; the game
+// overwrites what it allocates there and, before reusing a half, waits for the GPU work of the frame that last used it,
+// YOTEI-ENGINE 7.6 step 5) drops the page's GPU bytes written by the work of game frame W-2 or older (W: the frame whose
+// half the game writes now) instead of downloading them (and waiting for their writer). Bytes of frames W-1 and W, and
+// bytes whose frame is not known, are downloaded as before. Returns true when no GPU byte is left in the page. Frames
+// are the game's, from its submissions (GuestGpu::Enqueue); 8.11: ~99% of the ring write faults are dropped (the
+// execution-thread frame boundary used before dropped ~60% in the cutscene, ~10% walking), Rafał's play: image OK.
 bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
-	if (vaddr < 0x2002600000ull || vaddr >= 0x2010000000ull || g_ring_frames < 3) return false;
-	const uint64_t page       = vaddr & ~uint64_t {0xfff};
-	// KYTY_DIAG_CEILING_RING_ONE_FRAME (measurement only, APPROXIMATION; live A/B): bytes written before the CURRENT
-	// execution-thread frame began count as dead (one frame younger than the rule); the night 7/8.11 BAR study's idea,
-	// whose game-side assumption is not proven - only a ceiling for Rafał's decision.
-	static const uint32_t one_frame_fixed = [] {
-		const char* v = std::getenv("KYTY_DIAG_CEILING_RING_ONE_FRAME");
-		return v != nullptr && v[0] == '1' ? 1u : 0u;
-	}();
-	const uint64_t back       = Common::LiveAb::Gate(Common::LiveAb::Switch::DiagCeilingRingOneFrame, one_frame_fixed) != 0u ? 1u : 2u;
-	const uint64_t prev_start = g_ring_frame_ticks[(g_ring_frames - back) % g_ring_frame_ticks.size()];
-	// KYTY_DIAG_RING_ONE_FRAME_AGE (diagnostic): see RingAgeStats.
-	const bool age_diag = RingAgeDiag();
-	if (age_diag) {
-		const uint64_t lo_tick = g_ring_frame_ticks[(g_ring_frames - 2) % g_ring_frame_ticks.size()];
-		const uint64_t hi_tick = g_ring_frame_ticks[(g_ring_frames - 1) % g_ring_frame_ticks.size()];
-		bool           extra   = false;
-		uint64_t       newest  = 0;
-		m_gpu_modified_ranges.ForEachInRange(page, 4096, [&](uint64_t start, uint64_t end) {
-			const uint64_t tick = QueryWriteTick(start, end);
-			if (tick != 0 && tick >= lo_tick && tick < hi_tick) {
-				extra  = true;
-				newest = std::max(newest, tick);
-			}
-		});
-		g_ring_age.faults.fetch_add(1, std::memory_order_relaxed);
-		{ // the game-frame rule against today's, page by page
-			const uint64_t w          = g_ring_game_write_frame.load(std::memory_order_acquire);
-			const uint64_t today_from = g_ring_frame_ticks[(g_ring_frames - 2) % g_ring_frame_ticks.size()];
-			bool           rule_live = false, today_live = false, rule_extra = false, unknown = false;
-			uint64_t       newest_extra = 0;
-			m_gpu_modified_ranges.ForEachInRange(page, 4096, [&](uint64_t start, uint64_t end) {
-				const uint64_t tick    = QueryWriteTick(start, end);
-				const uint64_t frame1  = QueryTicks(m_write_frames, start, end); // frame + 1, 0 unknown
-				const bool     today_d = tick != 0 && tick < today_from;
-				const bool     rule_d  = frame1 != 0 && frame1 + 1u <= w; // frame <= w - 2
-				if (frame1 == 0) unknown = true;
-				if (!today_d) today_live = true;
-				if (!rule_d) rule_live = true;
-				if (rule_d && !today_d) {
-					rule_extra   = true;
-					newest_extra = std::max(newest_extra, tick);
-				}
-				if (today_d && !rule_d && frame1 != 0) g_ring_frame_rule.conflict.fetch_add(1, std::memory_order_relaxed);
-			});
-			if (unknown) g_ring_frame_rule.unknown.fetch_add(1, std::memory_order_relaxed);
-			if (!rule_live) g_ring_frame_rule.freed.fetch_add(1, std::memory_order_relaxed);
-			if (!today_live) g_ring_frame_rule.today_freed.fetch_add(1, std::memory_order_relaxed);
-			if (rule_extra) {
-				g_ring_frame_rule.extra.fetch_add(1, std::memory_order_relaxed);
-				const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-				if (const auto& t = g_ring_tick_first[newest_extra % g_ring_tick_first.size()]; t.tick == newest_extra) {
-					const auto up_us = static_cast<uint64_t>(std::max<int64_t>(0, now_ns - t.ns) / 1000);
-					(up_us < 30000 ? g_ring_frame_rule.b30 : up_us < 60000 ? g_ring_frame_rule.b60 : up_us < 100000 ? g_ring_frame_rule.b100 : g_ring_frame_rule.bmore).fetch_add(1, std::memory_order_relaxed);
-				} else {
-					g_ring_frame_rule.age_unknown.fetch_add(1, std::memory_order_relaxed);
-				}
-			}
-		}
-		if (extra) {
-			const int64_t arm_now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-			for (size_t k = 0; k < g_ring_armed.size(); k++) {
-				if (g_ring_armed[k].load(std::memory_order_acquire) != g_ring_frames) continue; // not armed: today's threshold
-				auto& st = g_ring_arm_stats[k];
-				st.extra.fetch_add(1, std::memory_order_relaxed);
-				if (const auto& t = g_ring_tick_first[newest % g_ring_tick_first.size()]; t.tick == newest) {
-					const auto up_us = static_cast<uint64_t>(std::max<int64_t>(0, arm_now_ns - t.ns) / 1000);
-					(up_us < 30000 ? st.b30 : up_us < 60000 ? st.b60 : up_us < 100000 ? st.b100 : st.bmore).fetch_add(1, std::memory_order_relaxed);
-				} else {
-					st.unknown.fetch_add(1, std::memory_order_relaxed);
-				}
-			}
-			const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-			const auto    age_us = static_cast<uint64_t>(std::max<int64_t>(0, now_ns - g_ring_frame_ns[(g_ring_frames - 1) % g_ring_frame_ns.size()]) / 1000);
-			g_ring_age.extra_pages.fetch_add(1, std::memory_order_relaxed);
-			if (const auto& t = g_ring_tick_first[newest % g_ring_tick_first.size()]; t.tick == newest) {
-				const auto up_us = static_cast<uint64_t>(std::max<int64_t>(0, now_ns - t.ns) / 1000);
-				(up_us < 30000 ? g_ring_age_upper.b30 : up_us < 60000 ? g_ring_age_upper.b60 : up_us < 100000 ? g_ring_age_upper.b100 : g_ring_age_upper.bmore).fetch_add(1, std::memory_order_relaxed);
-			} else {
-				g_ring_age_upper.unknown.fetch_add(1, std::memory_order_relaxed);
-			}
-			(age_us < 30000 ? g_ring_age.b30 : age_us < 60000 ? g_ring_age.b60 : age_us < 100000 ? g_ring_age.b100 : age_us < 200000 ? g_ring_age.b200 : g_ring_age.bmore).fetch_add(1, std::memory_order_relaxed);
-			uint64_t prev = g_ring_age.min_us.load(std::memory_order_relaxed);
-			while (age_us < prev && !g_ring_age.min_us.compare_exchange_weak(prev, age_us, std::memory_order_relaxed)) {
-			}
-		}
-	}
+	const uint64_t write_frame = g_ring_game_write_frame.load(std::memory_order_acquire);
+	if (vaddr < 0x2002600000ull || vaddr >= 0x2010000000ull || write_frame < 2) return false;
+	const uint64_t page = vaddr & ~uint64_t {0xfff};
 	std::vector<std::pair<uint64_t, uint64_t>> dead;
-	bool                                       live       = false;
-	const bool                                 frame_rule = RingFrameRule();
-	const uint64_t                             write_frame = frame_rule ? g_ring_game_write_frame.load(std::memory_order_acquire) : 0;
+	bool                                       live = false;
 	m_gpu_modified_ranges.ForEachInRange(page, 4096, [&](uint64_t start, uint64_t end) {
-		if (frame_rule) { // KYTY_PERF_RING_FRAME_RULE: frame + 1 stored, 0 unknown (kept)
-			const uint64_t frame1 = QueryTicks(m_write_frames, start, end);
-			if (frame1 != 0 && frame1 + 1u <= write_frame) {
-				dead.emplace_back(start, end);
-			} else {
-				live = true;
-			}
-			return;
-		}
-		const uint64_t tick = QueryWriteTick(start, end);
-		if (tick != 0 && tick < prev_start) {
+		const uint64_t frame1 = QueryTicks(m_write_frames, start, end); // frame + 1; 0: part of it unknown
+		if (frame1 != 0 && frame1 + 1u <= write_frame) {
 			dead.emplace_back(start, end);
 		} else {
 			live = true;
@@ -1965,36 +1807,6 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 		             static_cast<unsigned long long>(g_ring_dead.freed.exchange(0)),
 		             static_cast<unsigned long long>(g_ring_dead.partial.exchange(0)),
 		             static_cast<unsigned long long>(g_ring_dead.dropped_bytes.exchange(0) / 1024u));
-		if (age_diag) {
-			std::fprintf(stderr, "DIAG_RING_ONE_FRAME_AGE faults=%llu extra_pages=%llu age_ms[<30=%llu 30-60=%llu 60-100=%llu 100-200=%llu 200+=%llu] min_ms=%.1f\n",
-			             static_cast<unsigned long long>(g_ring_age.faults.exchange(0)), static_cast<unsigned long long>(g_ring_age.extra_pages.exchange(0)),
-			             static_cast<unsigned long long>(g_ring_age.b30.exchange(0)), static_cast<unsigned long long>(g_ring_age.b60.exchange(0)),
-			             static_cast<unsigned long long>(g_ring_age.b100.exchange(0)), static_cast<unsigned long long>(g_ring_age.b200.exchange(0)),
-			             static_cast<unsigned long long>(g_ring_age.bmore.exchange(0)), static_cast<double>(g_ring_age.min_us.exchange(~0ull)) / 1000.0);
-			std::fprintf(stderr, "DIAG_RING_ONE_FRAME_AGE upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]\n",
-			             static_cast<unsigned long long>(g_ring_age_upper.b30.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.b60.exchange(0)),
-			             static_cast<unsigned long long>(g_ring_age_upper.b100.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.bmore.exchange(0)),
-			             static_cast<unsigned long long>(g_ring_age_upper.unknown.exchange(0)));
-			{
-				auto& r = g_ring_frame_rule;
-				std::fprintf(stderr, "DIAG_RING_FRAME_RULE game_frame=%llu freed=%llu today_freed=%llu extra_pages=%llu conflict_ranges=%llu unknown_pages=%llu upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]\n",
-				             static_cast<unsigned long long>(g_ring_game_write_frame.load()), static_cast<unsigned long long>(r.freed.exchange(0)),
-				             static_cast<unsigned long long>(r.today_freed.exchange(0)), static_cast<unsigned long long>(r.extra.exchange(0)),
-				             static_cast<unsigned long long>(r.conflict.exchange(0)), static_cast<unsigned long long>(r.unknown.exchange(0)),
-				             static_cast<unsigned long long>(r.b30.exchange(0)), static_cast<unsigned long long>(r.b60.exchange(0)),
-				             static_cast<unsigned long long>(r.b100.exchange(0)), static_cast<unsigned long long>(r.bmore.exchange(0)),
-				             static_cast<unsigned long long>(r.age_unknown.exchange(0)));
-			}
-			for (size_t k = 0; k < g_ring_arm_stats.size(); k++) {
-				auto& st = g_ring_arm_stats[k];
-				std::fprintf(stderr, "DIAG_RING_ARM %s sp=%llu flips=%llu extra_pages=%llu upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]\n",
-				             k == 0 ? "gfx" : "flip", static_cast<unsigned long long>(k == 0 ? g_ring_sp_count.load() : g_ring_sp_count.exchange(0)),
-				             static_cast<unsigned long long>(k == 0 ? g_ring_flip_count.load() : g_ring_flip_count.exchange(0)),
-				             static_cast<unsigned long long>(st.extra.exchange(0)), static_cast<unsigned long long>(st.b30.exchange(0)),
-				             static_cast<unsigned long long>(st.b60.exchange(0)), static_cast<unsigned long long>(st.b100.exchange(0)),
-				             static_cast<unsigned long long>(st.bmore.exchange(0)), static_cast<unsigned long long>(st.unknown.exchange(0)));
-			}
-		}
 	}
 	return !live;
 }
@@ -3136,11 +2948,7 @@ void BufferCache::NoteObtainedWrite(uint64_t vaddr, uint64_t size) {
 	std::optional<DispatchSubTimer> observer_timer(std::in_place, DispatchSub::OwObserver); // KYTY_TRACE_DISPATCH_CENSUS
 	{ // The per-range write ticks (DropDeadRingBytes, the readback queue, KYTY_TRACE_SYNC_TIMELINE).
 		NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick());
-		if (RingAgeDiag()) { // KYTY_DIAG_RING_ONE_FRAME_AGE
-			const uint64_t tick = m_scheduler.CurrentTick();
-			auto&          slot = g_ring_tick_first[tick % g_ring_tick_first.size()];
-			if (slot.tick != tick) slot = {tick, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()};
-		}
+		NoteWriteFrame(vaddr, vaddr + size);
 	}
 	if (m_gpu_write_observer) m_gpu_write_observer(vaddr, size);
 	BumpHotGeneration(vaddr, size);
@@ -3159,6 +2967,7 @@ void BufferCache::NoteObtainedWriteRepeat(uint64_t vaddr, uint64_t size, bool sa
 	if (UploadClobberCheck()) C0Note(vaddr, size, C0Event::ShaderWrite, DebugWriterHash().load(std::memory_order_relaxed));
 	if (RingCensus::Enabled()) RingCensusWrite(vaddr, size, true); // KYTY_TRACE_RING_CENSUS (diagnostic)
 	if (!same_tick) NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick());
+	NoteWriteFrame(vaddr, vaddr + size); // the same tick can hold work of two game frames
 	if (m_gpu_write_observer) m_gpu_write_observer(vaddr, size);
 	BumpHotGeneration(vaddr, size);
 	if (!same_tick) NoteGpuWriteTick(vaddr, size);
@@ -3544,7 +3353,11 @@ void ReportObtainExact(uint64_t count) {
 void BufferCache::NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick) {
 	if (!SyncTimeline::Enabled() && (end <= 0x2002600000ull || start >= 0x2010000000ull)) return;
 	InsertTickRangeJoined(m_write_ticks, start, end, tick);
-	if (RingFrameArmWanted() && start < 0x2010000000ull && end > 0x2002600000ull) InsertTickRangeJoined(m_write_frames, start, end, g_ring_exec_data_frame + 1u);
+}
+
+void BufferCache::NoteWriteFrame(uint64_t start, uint64_t end) {
+	if (end <= 0x2002600000ull || start >= 0x2010000000ull) return;
+	InsertTickRangeJoined(m_write_frames, start, end, g_ring_exec_data_frame + 1u);
 }
 
 void BufferCache::InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick) {
@@ -3652,11 +3465,6 @@ void BufferCache::NoteCommandEmitted() {
 		// KYTY_TRACE_SYNC_TIMELINE: the final tick for its per-range write ticks too.
 		if (SyncTimeline::Enabled()) {
 			NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick());
-		if (RingAgeDiag()) { // KYTY_DIAG_RING_ONE_FRAME_AGE
-			const uint64_t tick = m_scheduler.CurrentTick();
-			auto&          slot = g_ring_tick_first[tick % g_ring_tick_first.size()];
-			if (slot.tick != tick) slot = {tick, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()};
-		}
 		}
 	}
 	m_bar_pending_writes.clear();
@@ -4273,12 +4081,6 @@ void BufferCache::RunGarbageCollector() {
 			             static_cast<unsigned long long>(m_rk_incomplete));
 		}
 	}
-	// Frame boundaries in ticks (DropDeadRingBytes).
-	g_ring_frame_ticks[g_ring_frames % g_ring_frame_ticks.size()] = m_scheduler.CurrentTick();
-	g_ring_frame_ns[g_ring_frames % g_ring_frame_ns.size()] =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-	g_ring_frames++;
-	g_ring_sp_count.fetch_add(1, std::memory_order_relaxed);
 	for (auto& range: m_direct_ranges) { // KYTY_PERF_DIRECT_RANGES: an image in a direct range ends it
 		if (range.active && m_texture_cache.IsRegionRegistered(range.start, range.end - range.start)) {
 			std::fprintf(stderr, "PERF_DIRECT_RANGES 0x%llx-0x%llx ended: an image was registered in it\n",
