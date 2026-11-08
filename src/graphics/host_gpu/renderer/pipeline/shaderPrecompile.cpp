@@ -2439,6 +2439,26 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 		g_reuse.plans.fetch_add(1, std::memory_order_relaxed);
 	}
 	const double translate_ms  = MillisecondsSince(translate_begin);
+	// KYTY_PERF_SHADER_REUSE_DISK=1 with the permutation on disk: translated only for its program's resource plan; the
+	// SPIR-V and info come from the disk (no CompileProgram).
+	if (disk_hit && disk_mode == 1) {
+		g_reuse.jobs.fetch_add(1, std::memory_order_relaxed);
+		g_reuse.translate_us.fetch_add(static_cast<uint64_t>(translated_ms * 1000.0), std::memory_order_relaxed);
+		g_reuse.plan_us.fetch_add(static_cast<uint64_t>((translate_ms - translated_ms) * 1000.0),
+		                          std::memory_order_relaxed);
+		spirv_words = disk_spirv.size();
+		if (need_module) {
+			module = TryCompileSPV(disk_spirv, m_graphics.device);
+			if (module == nullptr) {
+				return false;
+			}
+		}
+		info = disk_info;
+		if (keep) {
+			StoreReuse(record, key, program, std::move(plan), std::move(disk_spirv), info, translate_ms, disk_compile_ms);
+		}
+		return true;
+	}
 	const auto   compile_begin = std::chrono::steady_clock::now();
 	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options, record.specialization,
 	                                               record.push_data_start);
