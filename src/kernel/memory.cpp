@@ -4290,23 +4290,6 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 		return KERNEL_ERROR_EBUSY;
 	}
 
-	// KYTY_DIAG_BDA_POOLS=1 (diagnostic, the BDA project 8.11): how the game maps the 0x80_... pool and the texture pages.
-	if (static const bool diag = [] {
-		    const char* v = std::getenv("KYTY_DIAG_BDA_POOLS");
-		    return v != nullptr && v[0] == '1';
-	    }();
-	    diag) {
-		static std::atomic<uint32_t> logged[4] {};
-		const uint32_t kind = out_addr >> 36u == 8u ? 0u : out_addr >> 36u == 9u ? 1u : out_addr >> 36u == 5u ? 2u : 3u;
-		if (logged[kind].fetch_add(1) < 12u) {
-			std::fprintf(stderr,
-			             "BDA_POOLS_DMAP addr=0x%llx len=0x%llx prot=0x%x flags=0x%x type=%d start=0x%llx align=0x%llx in=0x%llx "
-			             "name=%s\n",
-			             static_cast<unsigned long long>(out_addr), static_cast<unsigned long long>(len), prot, flags, type,
-			             static_cast<unsigned long long>(direct_memory_start), static_cast<unsigned long long>(alignment),
-			             static_cast<unsigned long long>(in_addr), name != nullptr ? name : "");
-		}
-	}
 	const bool published = !replaced_mappings.empty() || reserved_target
 	                           ? g_virtual_ranges->ReplaceSpan(
 	                                 out_addr, len, replaced_mappings.empty()

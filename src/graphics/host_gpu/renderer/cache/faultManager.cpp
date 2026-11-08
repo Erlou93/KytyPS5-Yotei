@@ -504,9 +504,7 @@ void FaultManager::ProcessFaultBuffer() {
 			// The pass runs at least a frame after the accesses: a page a buffer replaced since was served by its entry.
 			if (m_buffer_cache.IsFallbackPage(address) || m_buffer_cache.WasFallbackPage(address, 8u)) {
 				fallback_served++;
-				BufferCache::DiagBdaPoolRead(address, true);
 			} else {
-				BufferCache::DiagBdaPoolRead(address, false);
 				const auto page       = address & ~(BufferCache::CACHING_PAGESIZE - 1u);
 				uint64_t   offset     = 0;
 				uint64_t   generation = 0;

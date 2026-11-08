@@ -237,7 +237,7 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, GuestDirec
 	EXIT_NOT_IMPLEMENTED(!created);
 	vk::MemoryRequirements requirements {};
 	graphics.device.getBufferMemoryRequirements(m_buffer, &requirements);
-	if (tag.shared_memory) { // KYTY_FIX_BDA_MAPTIME: a view of an imported range
+	if (tag.shared_memory) { // BDA map-time import (AGENTS 19): a view of an imported range
 		const bool bound = graphics.device.bindBufferMemory(m_buffer, tag.shared_memory, tag.memory_offset) == vk::Result::eSuccess;
 		if (refuse(!bound)) return;
 		EXIT_NOT_IMPLEMENTED(!bound);

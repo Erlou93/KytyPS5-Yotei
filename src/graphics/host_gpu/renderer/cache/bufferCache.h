@@ -304,8 +304,8 @@ public:
 	// The BDA fallback (M06): a mapped direct-memory page without a buffer gets a BDA table entry into the imported
 	// direct-memory backing (bit 0 set = fallback), so a shader reads and writes the guest's real bytes instead of zeros /
 	// a dropped store; the shader still reports the page (BDA_FAULT), and the fault pass gives it a device-local buffer as
-	// before. Only the 2 MiB granules of the backing the GPU used are imported (on the first read of one, which reads 0,
-	// or a direct download into it), and the game's granule list keeps them for the next session.
+	// before. The general allocator's pool is imported when mapped (the map-time import below); other 2 MiB granules of
+	// the backing on the first read of one (which reads 0) or a direct download into it.
 	// KYTY_PERF_BDA_ENTRY_SHARE (0 off, 1 on, 2 verify; spirvEmitterMemory.cpp LoadBdaDwordShared): a scalar load through
 	// a GPU-built V# reuses the page-table entry of the invocation's previous such load when the page is the same.
 	// Verify counts checks / mismatches in fault-buffer diag words FAULT_DIAG_ENTRY_SHARE (+0, +1).
@@ -321,23 +321,15 @@ public:
 	// D6 step K4: the page had a fallback entry until a buffer replaced it at most `frames` frames ago (a miss the fault
 	// pass reports later was then served by the entry, not read as 0).
 	[[nodiscard]] bool WasFallbackPage(uint64_t address, uint32_t frames) const;
-	// The fault pass: `page` (backing memory) was read as 0 because its granule is not imported yet: import it, add it to
-	// the game's granule list and give the granule's pages around `page` their fallback entries.
+	// The fault pass: `page` (backing memory) was read as 0 because its granule is not imported yet: the worker imports it
+	// (MapTimeRequestGranule) and the install gives the granule's pages their fallback entries.
 	void WantFallback(uint64_t page);
-	// KYTY_DIAG_BDA_POOLS=1 (diagnostic, default off; the BDA project's measurement 8.11): the fault pass's pages by the
-	// game's memory pool (YOTEI-ENGINE 4.2), `served` = read through a fallback entry, else read as 0 from backing memory.
-	static bool DiagBdaPools();
-	static void DiagBdaPoolRead(uint64_t address, bool served);
-	// RenderContext::MapMemory / UnmapMemory: GPU-visible mapped bytes by pool (live, peak).
-	static void DiagBdaPoolMap(uint64_t vaddr, uint64_t size, bool map);
-	// KYTY_FIX_BDA_MAPTIME (AGENTS 19, notes\PROJEKT-BDA-2026-11-08.md; 0 = the granule list as before, 1 = map time, 2 = map
-	// time + check): the game's general GPU allocator (fixed 2 MiB maps at 0x80_..., prot 0xD3; 626 of 632 fallback reads
-	// of an entry into the game) is visible to the GPU from the moment it is mapped, as on the console: the first map of a
-	// 256 MiB piece of its backing has a worker import the piece whole (2 MiB view buffers = the fallback's granules); the
-	// GPU thread only installs them and writes their entries. Pieces stay for the session (the game keeps the allocation
-	// and maps it again at loads). No granule list. =2 counts the pool's pages the fault pass saw read as 0 (PERF
-	// bda_maptime zero=, must stay 0).
-	[[nodiscard]] static int BdaMapTimeMode();
+	// The BDA map-time import (AGENTS 19, notes\PROJEKT-BDA-2026-11-08.md): the game's general GPU allocator (fixed
+	// 2 MiB maps at 0x80_..., prot 0xD3; 626 of 632 fallback reads of an entry into the game) is visible to the GPU from
+	// the moment it is mapped, as on the console: the first map of a 256 MiB piece of its backing has a worker import the
+	// piece whole (2 MiB view buffers = the fallback's granules); the GPU thread only installs them and writes their
+	// entries. Pieces stay for the session (the game keeps the allocation and maps it again at loads). The check: the
+	// pool's pages the fault pass saw read as 0 (PERF bda_maptime zero=, must stay 0).
 	[[nodiscard]] static bool InBdaMapTimePool(uint64_t vaddr) {
 		return vaddr >= BdaMapTimePoolStart && vaddr < BdaMapTimePoolStart + BdaMapTimePoolSize;
 	}
@@ -714,11 +706,10 @@ private:
 	// the BDA fallback (M06)
 	bool    FallbackEntry(uint64_t page, vk::DeviceAddress* entry);
 	// The imported backing granule (null: not imported, refused, or not wanted and `want` false); also the direct downloads'
-	Buffer* FallbackChunk(size_t chunk, bool want, uint64_t diag_vaddr = 0, int diag_reason = 0);
-	void    DiagBdaPoolsPrint();
-	void    LoadFallbackList();
+	Buffer* FallbackChunk(size_t chunk, bool want, uint64_t vaddr = 0);
+	void    SizeFallback();
 	void    WriteFallbackRange(uint64_t vaddr, uint64_t size);
-	// KYTY_FIX_BDA_MAPTIME: the pool's pages (granule + 1 per 16 KiB page, 0: not mapped), mapped pages per granule, the
+	// BDA map-time import (AGENTS 19): the pool's pages (granule + 1 per 16 KiB page, 0: not mapped), mapped pages per granule, the
 	// granules asked of the worker, the worker's queue and its finished imports.
 	void MapTimeMap(uint64_t vaddr, uint64_t size);   // RenderContext::MapMemory (game threads)
 	void MapTimeInstall();                            // GPU thread (ApplyFallbackMaps)
@@ -740,19 +731,15 @@ private:
 		uint64_t imports = 0, granule_imports = 0, imported_bytes = 0, import_us = 0, refused = 0, installed = 0, dropped = 0;
 	} m_maptime;
 	std::vector<std::unique_ptr<Buffer>>              m_fallback_chunks; // imported backing per granule, null: not yet
-	std::vector<uint8_t>                              m_fallback_chunk_failed;
-	std::vector<uint8_t>                              m_fallback_wanted; // granules the GPU used (now or in the list)
-	std::filesystem::path                             m_fallback_list_path; // the game's granule list (empty: none)
-	bool                                              m_fallback_list_loaded = false;
+	bool                                              m_fallback_sized = false;
 	std::mutex                                        m_fallback_pending_mutex;
 	std::vector<std::pair<uint64_t, uint64_t>>        m_fallback_pending;
 	std::unordered_set<uint64_t>                      m_fallback_pages; // 16 KiB guest pages with a fallback entry
 	std::unordered_map<uint64_t, uint32_t>            m_fallback_replaced; // page -> frame a buffer replaced its entry
 	uint32_t m_fallback_replaced_pruned = ~0u; // present count of the last pruning of m_fallback_replaced
 	struct FallbackStats {
-		uint64_t maps = 0, pages = 0, replaced = 0, restored = 0, cleared = 0, chunks = 0, failed = 0, applies = 0;
-		uint64_t listed = 0, learned = 0; // granules named by the game's list at start; granules added to it now
-		uint64_t import_us = 0, imported_bytes = 0; // D6 step K4 (PERF bda_fallback)
+		uint64_t maps = 0, pages = 0, replaced = 0, restored = 0, cleared = 0, chunks = 0, applies = 0;
+		uint64_t imported_bytes = 0;
 		// D6b: ClearFallback's Fill calls, its GPU-thread time.
 		uint64_t clear_fills = 0, clear_us = 0;
 		bool operator==(const FallbackStats&) const = default;
