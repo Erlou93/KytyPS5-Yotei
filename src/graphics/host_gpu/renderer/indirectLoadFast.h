@@ -35,6 +35,7 @@ inline constexpr uint32_t CensusWord  = 20608;
 inline constexpr uint32_t CensusWords = 512;
 [[nodiscard]] bool CensusEnabled();
 [[nodiscard]] bool CensusFor(uint64_t shader_hash); // KYTY_DIAG_INDIRECT_FORMAT_CENSUS_HASHES (default all)
+[[nodiscard]] int  DiagFixedFormat(uint64_t shader_hash, uint32_t channels); // KYTY_DIAG_INDIRECT_FIXED_FORMAT, -1 = off
 
 } // namespace IndirectLoadFast
 

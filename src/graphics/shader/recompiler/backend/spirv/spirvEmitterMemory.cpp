@@ -2289,7 +2289,12 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 			                                                           any_memory, d16);
 		                       });
 	};
-	const auto values = SpirvFormattedSwitchReference() ? format_switch() : cases();
+	// KYTY_DIAG_INDIRECT_FIXED_FORMAT (measurement only, APPROXIMATION): one fixed format, no switch, no table.
+	const int  fixed  = IndirectLoadFast::DiagFixedFormat(state.program.shader_hash, channels);
+	const auto values = fixed > 0 ? LoadIndirectFormattedElement(ctx, buffer, Format::GetFormatInfo(static_cast<F>(fixed)), channels,
+	                                                             selector, memory, one, any_memory, d16)
+	                    : SpirvFormattedSwitchReference() ? format_switch()
+	                                                      : cases();
 	if (!d16) return values;
 	std::array<uint32_t, 4> channel_values {values};
 	for (uint32_t channel = 0; channel < channels && channels > 1u; ++channel) {
