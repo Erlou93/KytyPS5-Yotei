@@ -2882,20 +2882,14 @@ void DefineIndirectFormattedLoadFunctions(ValueEmitContext& ctx) {
 // (bounds check + BDA translation + load) is emitted once as a non-inlined function and called per
 // component, instead of being expanded at every load. Same result; much smaller SPIR-V for shaders
 // with hundreds of such loads (driver compile time and memory).
-// KYTY_PERF_INDIRECT_RAW_INLINE (test switch, 0 = off, 1 = on): in a program with at most RawInlineMaxLoads raw loads
-// through GPU-selected descriptors, the raw-load functions are marked Inline instead of DontInline - the same code, the
-// driver may expand it at the calls. Profile 8.11 (Nsight, cutscene CS b0c4f2a6, one wave per dispatch, ~400 dispatches
-// per frame, 11 such loads): 21% of its samples on indirect_raw_x3's return (Branch Resolving). Inline in every program
-// ran the driver's compiler out of memory (CS fbdb4e82: 41 s, then "LLVM ERROR: out of memory"), hence the limit.
+// In a program with at most RawInlineMaxLoads raw loads through GPU-selected descriptors, the raw-load functions are
+// marked Inline instead of DontInline - the same code, the driver expands it at the calls. Profile 8.11 (Nsight,
+// cutscene CS b0c4f2a6, one wave per dispatch, ~400 dispatches per frame, 11 such loads): 21% of its samples on
+// indirect_raw_x3's return (Branch Resolving); inlined, its GPU time per call went 20.5 -> 9.2 us and the cutscene's
+// part 2 frame 120.9 -> 110.1 and 115.9 -> 109.9 ms (two run pairs, warm caches). Inline in every program ran the
+// driver's compiler out of memory (CS fbdb4e82: 41 s, then "LLVM ERROR: out of memory"), hence the limit.
 static constexpr uint32_t RawInlineMaxLoads = 16;
 static spv::FunctionControlMask IndirectRawControl(const EmitterState& state) {
-	static const bool inline_raw = [] {
-		const char* value = std::getenv("KYTY_PERF_INDIRECT_RAW_INLINE");
-		const bool  on    = value != nullptr && value[0] == '1';
-		if (on) std::fprintf(stderr, "PERF_INDIRECT_RAW_INLINE on (programs with <= %u raw loads)\n", RawInlineMaxLoads);
-		return on;
-	}();
-	if (!inline_raw) return spv::FunctionControlDontInlineMask;
 	uint32_t loads = 0;
 	for (const auto* block: state.program.blocks) {
 		for (const auto& inst: *block) {
