@@ -325,6 +325,8 @@ public:
 	// game's memory pool (YOTEI-ENGINE 4.2), `served` = read through a fallback entry, else read as 0 from backing memory.
 	static bool DiagBdaPools();
 	static void DiagBdaPoolRead(uint64_t address, bool served);
+	// RenderContext::MapMemory / UnmapMemory: GPU-visible mapped bytes by pool (live, peak).
+	static void DiagBdaPoolMap(uint64_t vaddr, uint64_t size, bool map);
 
 	// KYTY_TRACE_PERF: the PERF fault_wait_on_caller line (the caller wait's counters).
 	void ReportCallerWaitPerf();

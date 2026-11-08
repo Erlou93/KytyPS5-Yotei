@@ -187,6 +187,8 @@ int BufferCache::BdaEntryShareMode() {
 // manager's range (0x90_... - 0xFC_...), other (the general GPU allocator and the rest).
 namespace {
 std::atomic<uint64_t> g_bda_pools[5][4] {};
+std::atomic<int64_t>  g_bda_map_live[4] {};
+std::atomic<int64_t>  g_bda_map_peak[4] {};
 int                   BdaPoolOf(uint64_t vaddr) {
     const uint64_t top = vaddr >> 36u; // 64 GiB units: 0x20_0000_0000 >> 36 = 2
     if (top == 2) return 0;
@@ -211,6 +213,16 @@ void BufferCache::DiagBdaPoolRead(uint64_t address, bool served) {
 	g_bda_pools[served ? 3 : 4][BdaPoolOf(address)].fetch_add(1, std::memory_order_relaxed);
 }
 
+void BufferCache::DiagBdaPoolMap(uint64_t vaddr, uint64_t size, bool map) {
+	if (!DiagBdaPools()) return;
+	const int     pool = BdaPoolOf(vaddr);
+	const int64_t live = g_bda_map_live[pool].fetch_add(map ? static_cast<int64_t>(size) : -static_cast<int64_t>(size)) +
+	                     (map ? static_cast<int64_t>(size) : -static_cast<int64_t>(size));
+	int64_t peak = g_bda_map_peak[pool].load();
+	while (live > peak && !g_bda_map_peak[pool].compare_exchange_weak(peak, live)) {
+	}
+}
+
 void BufferCache::DiagBdaPoolsPrint() {
 	static uint64_t last_sum = 0;
 	uint64_t        v[5][4] {};
@@ -223,6 +235,11 @@ void BufferCache::DiagBdaPoolsPrint() {
 	}
 	if (sum == last_sum) return;
 	last_sum = sum;
+	std::fprintf(stderr, "BDA_POOLS_MAPPED_MiB live/peak a1=%lld/%lld a2=%lld/%lld tex=%lld/%lld other=%lld/%lld\n",
+	             static_cast<long long>(g_bda_map_live[0].load() >> 20), static_cast<long long>(g_bda_map_peak[0].load() >> 20),
+	             static_cast<long long>(g_bda_map_live[1].load() >> 20), static_cast<long long>(g_bda_map_peak[1].load() >> 20),
+	             static_cast<long long>(g_bda_map_live[2].load() >> 20), static_cast<long long>(g_bda_map_peak[2].load() >> 20),
+	             static_cast<long long>(g_bda_map_live[3].load() >> 20), static_cast<long long>(g_bda_map_peak[3].load() >> 20));
 	std::fprintf(stderr,
 	             "BDA_POOLS frame=%u import(list/zero/dl) a1=%llu/%llu/%llu a2=%llu/%llu/%llu tex=%llu/%llu/%llu other=%llu/%llu/%llu "
 	             "pages(served/zero) a1=%llu/%llu a2=%llu/%llu tex=%llu/%llu other=%llu/%llu\n",

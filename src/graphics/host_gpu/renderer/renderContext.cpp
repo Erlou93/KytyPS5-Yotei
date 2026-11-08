@@ -206,6 +206,7 @@ bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
 
 void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	m_buffer_cache.QueueFallbackMap(vaddr, size); // the BDA fallback (M06)
+	BufferCache::DiagBdaPoolMap(vaddr, size, true); // KYTY_DIAG_BDA_POOLS
 	std::lock_guard lock(m_mapped_ranges_mutex);
 	m_mapped_ranges.Add(vaddr, size);
 	// Upstream queues the range for its BDA sync here (d58aefde4, BufferCache::SynchronizeBda); PrepareBda takes the
@@ -289,6 +290,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		if (m_command_scheduler.Active()) m_buffer_cache.UnmapDirect(vaddr, size); // KYTY_PERF_DIRECT_RANGES
 		m_buffer_cache.InvalidateMemory(vaddr, size);
 		m_buffer_cache.ClearFallback(vaddr, size); // the BDA fallback (M06)
+		BufferCache::DiagBdaPoolMap(vaddr, size, false); // KYTY_DIAG_BDA_POOLS
 		// No image read watch outlives the mapping (lifted while it is still mapped).
 		if (GuestRange {vaddr, size}.Valid()) {
 			m_page_manager.DisarmImageRead(vaddr, size);
