@@ -963,6 +963,12 @@ struct ReuseStats {
 	std::atomic<uint64_t> full_start {0};  // not kept: started with the store at its budget (never offered to it)
 	std::atomic<uint64_t> full_us {0};     // the workers' time on results not kept for the budget (full, full_start)
 	std::atomic<uint64_t> full_big {0};    // of them those of ReuseExpensiveMs or more
+	// Where the workers' time goes (project "zapis tłumaczeń" Z0): every background translation, by phase.
+	std::atomic<uint64_t> jobs {0};         // translations (CompileModule calls that reached TranslateProgram)
+	std::atomic<uint64_t> translate_us {0}; // PrepareShaderSource + TranslateProgram + the fit checks
+	std::atomic<uint64_t> plan_us {0};      // ExtractResourcePlan
+	std::atomic<uint64_t> plans {0};
+	std::atomic<uint64_t> compile_us {0};   // CompileProgram (SPIR-V emission)
 };
 ReuseStats g_reuse;
 
@@ -2248,6 +2254,15 @@ void ShaderPrecompiler::Worker(uint32_t index) {
 			             static_cast<unsigned long long>(g_reuse.late.load()),
 			             static_cast<unsigned long long>(g_reuse.found.load()));
 		}
+		// Z0 of the "zapis tłumaczeń" project: the workers' time by phase (summed over threads).
+		std::fprintf(stderr,
+		             "SHADER_PRECOMPILE time: %llu translations, translate %llu ms, plans %llu (%llu ms), SPIR-V emission %llu ms "
+		             "(summed over the workers)\n",
+		             static_cast<unsigned long long>(g_reuse.jobs.load()),
+		             static_cast<unsigned long long>(g_reuse.translate_us.load() / 1000u),
+		             static_cast<unsigned long long>(g_reuse.plans.load()),
+		             static_cast<unsigned long long>(g_reuse.plan_us.load() / 1000u),
+		             static_cast<unsigned long long>(g_reuse.compile_us.load() / 1000u));
 		std::fflush(stderr);
 	}
 }
@@ -2355,14 +2370,20 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 	// The shader reuse: the plan as the GPU thread's first use of the program extracts it (from the same
 	// translation, before CompileProgram); one per program.
 	std::optional<ShaderRecompiler::IR::ResourcePlan> plan;
+	const double translated_ms = MillisecondsSince(translate_begin);
 	if (keep && ReusePlanWanted(program)) {
 		plan.emplace(ShaderRecompiler::IR::ExtractResourcePlan(translated.program));
+		g_reuse.plans.fetch_add(1, std::memory_order_relaxed);
 	}
 	const double translate_ms  = MillisecondsSince(translate_begin);
 	const auto   compile_begin = std::chrono::steady_clock::now();
 	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options, record.specialization,
 	                                               record.push_data_start);
 	const double compile_ms = MillisecondsSince(compile_begin);
+	g_reuse.jobs.fetch_add(1, std::memory_order_relaxed);
+	g_reuse.translate_us.fetch_add(static_cast<uint64_t>(translated_ms * 1000.0), std::memory_order_relaxed);
+	g_reuse.plan_us.fetch_add(static_cast<uint64_t>((translate_ms - translated_ms) * 1000.0), std::memory_order_relaxed);
+	g_reuse.compile_us.fetch_add(static_cast<uint64_t>(compile_ms * 1000.0), std::memory_order_relaxed);
 	spirv_words           = result.spirv.size();
 	const auto spirv_hash = XXH3_64bits(result.spirv.data(), result.spirv.size() * sizeof(uint32_t));
 	if (record.revision == Revision() && spirv_hash != record.spirv_hash) {
