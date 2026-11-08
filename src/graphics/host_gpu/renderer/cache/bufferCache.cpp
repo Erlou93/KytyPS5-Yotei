@@ -187,8 +187,11 @@ int BufferCache::BdaEntryShareMode() {
 // manager's range (0x90_... - 0xFC_...), other (the general GPU allocator and the rest).
 namespace {
 std::atomic<uint64_t> g_bda_pools[5][4] {};
-std::atomic<int64_t>  g_bda_map_live[4] {};
-std::atomic<int64_t>  g_bda_map_peak[4] {};
+// GPU-visible mapped 16 KiB pages (a bitmap of the first 1 TiB) and their count per 4 GiB of address (live, peak).
+std::mutex            g_bda_map_mutex;
+std::vector<uint64_t> g_bda_map_bits;
+int64_t               g_bda_map_live[256] {};
+int64_t               g_bda_map_peak[256] {};
 int                   BdaPoolOf(uint64_t vaddr) {
     const uint64_t top = vaddr >> 36u; // 64 GiB units: 0x20_0000_0000 >> 36 = 2
     if (top == 2) return 0;
@@ -220,11 +223,21 @@ void BufferCache::DiagBdaPoolMap(uint64_t vaddr, uint64_t size, bool map) {
 		std::fprintf(stderr, "BDA_POOLS_MAP %s vaddr=0x%llx size=0x%llx\n", map ? "map" : "unmap",
 		             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size));
 	}
-	const int     pool = BdaPoolOf(vaddr);
-	const int64_t live = g_bda_map_live[pool].fetch_add(map ? static_cast<int64_t>(size) : -static_cast<int64_t>(size)) +
-	                     (map ? static_cast<int64_t>(size) : -static_cast<int64_t>(size));
-	int64_t peak = g_bda_map_peak[pool].load();
-	while (live > peak && !g_bda_map_peak[pool].compare_exchange_weak(peak, live)) {
+	std::scoped_lock lock(g_bda_map_mutex);
+	if (g_bda_map_bits.empty()) g_bda_map_bits.resize((uint64_t {1} << 40u) / CACHING_PAGESIZE / 64u, 0);
+	const uint64_t end = std::min(vaddr + size, uint64_t {1} << 40u);
+	for (uint64_t page = vaddr / CACHING_PAGESIZE; page * CACHING_PAGESIZE < end; page++) {
+		uint64_t&      word   = g_bda_map_bits[page / 64u];
+		const uint64_t bit    = uint64_t {1} << (page % 64u);
+		const size_t   bucket = static_cast<size_t>((page * CACHING_PAGESIZE) >> 32u);
+		if (map && (word & bit) == 0) {
+			word |= bit;
+			g_bda_map_live[bucket]++;
+			g_bda_map_peak[bucket] = std::max(g_bda_map_peak[bucket], g_bda_map_live[bucket]);
+		} else if (!map && (word & bit) != 0) {
+			word &= ~bit;
+			g_bda_map_live[bucket]--;
+		}
 	}
 }
 
