@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/host_gpu/renderer/indirectLoadFast.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
@@ -307,8 +308,26 @@ void DefineBvhIntersect(EmitterState& s) {
 	const auto invalid = Vector(s, vec4, invalid_words);
 	const auto result = EmitValueOrDefaultIfCondition(s, valid, vec4, invalid, [&] {
 		const auto first = GetBdaPointer(s, address);
+		// The node's second 64 bytes: `address` is 64-aligned (base << 8 plus index << 6), so unless it is the last 64
+		// bytes of its 16 KiB page, address + 64 lies in the same page and the page table gives first + 64 (one entry; the
+		// remap of high addresses and the page bound are per page). An unmapped first page keeps the lookup. The
+		// cutscene's BVH shader 91451da6 spent ~10% of its samples in this second lookup (Nsight, 8.11).
+		auto same_page = Binary(
+		    s, spv::OpLogicalAnd, b,
+		    Binary(s, spv::OpULessThan, b, Binary(s, spv::OpBitwiseAnd, wide, address, ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 1u)),
+		           ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 64u)),
+		    Binary(s, spv::OpINotEqual, b, first, ConstantU64(s, 0)));
+		if (SpirvLive::BvhOneLookupLive() && s.fault_buffer_variable != 0u) { // KYTY_PERF_BVH_ONE_LOOKUP=3 (test only)
+			const auto flags = Unary(s, spv::OpLoad, u,
+			                         FaultElementPointer(s, ConstantU32(s, BufferCache::FAULT_DIAG_BASE + BufferCache::FAULT_DIAG_WORDS)));
+			same_page = Binary(s, spv::OpLogicalAnd, b, same_page,
+			                   Binary(s, spv::OpINotEqual, b, Binary(s, spv::OpBitwiseAnd, u, flags, ConstantU32(s, SpirvLive::FlagBvhOneLookup)),
+			                          ConstantU32(s, 0)));
+		}
 		const auto second  = EmitValueOrDefaultIfCondition(s, full, wide, ConstantU64(s, 0), [&] {
-			return GetBdaPointer(s, Binary(s, spv::OpIAdd, wide, address, ConstantU64(s, 64)));
+			return EmitValueOrDefaultIfCondition(
+			    s, Unary(s, spv::OpLogicalNot, b, same_page), wide, Binary(s, spv::OpIAdd, wide, first, ConstantU64(s, 64)),
+			    [&] { return GetBdaPointer(s, Binary(s, spv::OpIAdd, wide, address, ConstantU64(s, 64))); });
 		});
 		const auto present = Binary(
 		    s, spv::OpLogicalAnd, b, Binary(s, spv::OpINotEqual, b, first, ConstantU64(s, 0)),

@@ -371,9 +371,17 @@ void Bvh8Emitter::DefineIntersect() {
 	};
 	const auto first = fetch(address, ConstantBool(s, true));
 	const auto present = [&](uint32_t pointer) { return Not(Binary(s, spv::OpIEqual, b, pointer, ConstantU64(s, 0))); };
+	// The second 64 bytes of a full node: `at` is 64-aligned (base << 8, lane base << 3 with its low 3 bits checked 0,
+	// node offset << 6), so unless it is the last 64 bytes of its 16 KiB page, at + 64 lies in the same page as `at`
+	// and the page table gives first + 64 (one entry; the remap of high addresses and the page bound are per page).
+	// The cutscene's BVH shader 91451da6 spent ~10% of its samples in this second lookup (Nsight, 8.11).
 	const auto tail = [&](uint32_t at, uint32_t pointer) {
 		return EmitValueOrDefaultIfCondition(s, Both(full, present(pointer)), w, ConstantU64(s, 0), [&] {
-			return GetBdaPointer(s, Binary(s, spv::OpIAdd, w, at, ConstantU64(s, 64)));
+			const auto next_page = Not(Binary(s, spv::OpULessThan, b,
+			    Binary(s, spv::OpBitwiseAnd, w, at, ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 1u)), ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 64u)));
+			return EmitValueOrDefaultIfCondition(s, next_page, w,
+			    Binary(s, spv::OpIAdd, w, pointer, ConstantU64(s, 64)),
+			    [&] { return GetBdaPointer(s, Binary(s, spv::OpIAdd, w, at, ConstantU64(s, 64))); });
 		});
 	};
 	const auto second = tail(address, first);
