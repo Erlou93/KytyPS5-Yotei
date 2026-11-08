@@ -64,8 +64,16 @@ bool Listed(uint64_t shader_hash) {
 
 namespace SpirvLive {
 
+bool BvhPageMemoLive() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PERF_BVH_PAGE_MEMO");
+		return value != nullptr && value[0] == '3';
+	}();
+	return on;
+}
+
 bool Enabled() {
-	static const bool on = IndirectLoadFast::Mode() == 3;
+	static const bool on = IndirectLoadFast::Mode() == 3 || BvhPageMemoLive();
 	return on;
 }
 
@@ -73,6 +81,9 @@ uint32_t Flags() {
 	uint32_t flags = 0;
 	if (IndirectLoadFast::Mode() == 3 && Common::LiveAb::Gate(Common::LiveAb::Switch::IndirectLoadFast, 1u) != 0u) {
 		flags |= FlagIndirectLoadFast;
+	}
+	if (BvhPageMemoLive() && Common::LiveAb::Gate(Common::LiveAb::Switch::BvhPageMemo, 1u) != 0u) {
+		flags |= FlagBvhPageMemo;
 	}
 	return flags;
 }

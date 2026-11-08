@@ -58,6 +58,7 @@ inline constexpr const char* Names[] = {
     "KYTY_PERF_BDA_ENTRY_SHARE",
     "KYTY_PERF_BDA_ENTRY_SHARE_HASHES",
     "KYTY_PERF_BINDLESS_CLASSES",
+    "KYTY_PERF_BVH_PAGE_MEMO",
     "KYTY_PERF_F16_CVT_PLAIN",
     "KYTY_PERF_SPIRV_STORE_OUTLINE",
     // pipelineCache.cpp: the driver cache's signature (the warm list file is dropped with it).
