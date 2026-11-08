@@ -28,6 +28,13 @@ inline constexpr uint32_t DiagWord = 20544;
 [[nodiscard]] int  Mode();
 [[nodiscard]] bool Listed(uint64_t shader_hash);
 
+// KYTY_DIAG_INDIRECT_FORMAT_CENSUS=1 (diagnostic, default off; changes translated shader code): every formatted load
+// through a GPU-selected V# adds 1 per wave (its elected lane's V#) to diag word CensusWord + 4 * FORMAT + channels - 1;
+// faultManager.cpp prints the totals (PERF indirect_format_census).
+inline constexpr uint32_t CensusWord  = 20608;
+inline constexpr uint32_t CensusWords = 512;
+[[nodiscard]] bool CensusEnabled();
+
 } // namespace IndirectLoadFast
 
 // Live shader flags: one word of the fault buffer, after the diagnostic tail (BufferCache::FAULT_DIAG_BASE +

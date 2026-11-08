@@ -116,6 +116,8 @@ static_assert(ShaderRecompiler::IR::BindlessCensusWord >= IndirectLoadFast::Diag
               ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords <= BufferCache::FAULT_DIAG_WORDS);
 static_assert(ShaderRecompiler::IR::WaterfallRecord0CensusWord >= ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords &&
               ShaderRecompiler::IR::WaterfallRecord0CensusWord + ShaderRecompiler::IR::WaterfallRecord0CensusWords <= BufferCache::FAULT_DIAG_WORDS);
+static_assert(IndirectLoadFast::CensusWord >= IndirectLoadFast::DiagWord + 8 &&
+              IndirectLoadFast::CensusWord + IndirectLoadFast::CensusWords <= ShaderRecompiler::IR::BindlessCensusWord);
 
 // KYTY_DIAG_RT_TRIPS: one fault pass's copy of the diagnostic tail (layout: BufferCache::FAULT_DIAG_*).
 void FaultManager::ReportDiagTail(const uint32_t* tail) {
@@ -163,6 +165,22 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 			             "other_sel_x=%08x\n",
 			             static_cast<unsigned long long>(checks), static_cast<unsigned long long>(mismatches),
 			             static_cast<unsigned long long>(others), formats[3], formats[2], formats[1], formats[0], selectors);
+		}
+	}
+	if (IndirectLoadFast::CensusEnabled()) { // KYTY_DIAG_INDIRECT_FORMAT_CENSUS: totals by FORMAT and channel count
+		static uint64_t counts[IndirectLoadFast::CensusWords] {}, passes = 0;
+		for (uint32_t i = 0; i < IndirectLoadFast::CensusWords; i++) counts[i] += tail[IndirectLoadFast::CensusWord + i];
+		if ((++passes % 512u) == 0u) {
+			std::string line;
+			uint64_t    total = 0;
+			for (uint32_t i = 0; i < IndirectLoadFast::CensusWords; i++) total += counts[i];
+			for (uint32_t i = 0; i < IndirectLoadFast::CensusWords; i++) {
+				if (counts[i] == 0u) continue;
+				char item[64];
+				std::snprintf(item, sizeof(item), " f%u.c%u=%llu", i / 4u, i % 4u + 1u, static_cast<unsigned long long>(counts[i]));
+				line += item;
+			}
+			std::fprintf(stderr, "PERF indirect_format_census total=%llu%s\n", static_cast<unsigned long long>(total), line.c_str());
 		}
 	}
 	if (ShaderRecompiler::IR::BindlessPlaceholderCensus()) { // KYTY_DIAG_BINDLESS_PLACEHOLDER_CENSUS: lanes by slot read
@@ -346,7 +364,7 @@ void FaultManager::ProcessFaultBuffer() {
 	const auto diag_offset = MaxPendingFaults * PageFaultAreaSize * 2 + m_current_area * DiagAreaSize;
 	if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
-	    ShaderRecompiler::IR::WaterfallRecord0Census()) { // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+	    ShaderRecompiler::IR::WaterfallRecord0Census() || IndirectLoadFast::CensusEnabled()) { // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 		const auto tail_offset = uint64_t {BufferCache::FAULT_DIAG_BASE} * sizeof(uint32_t);
 		vk::BufferMemoryBarrier2 to_copy {};
 		to_copy.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -399,7 +417,7 @@ void FaultManager::ProcessFaultBuffer() {
 		if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    ShaderRecompiler::IR::ClampNanMode() == 2 ||
 	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
-		    ShaderRecompiler::IR::WaterfallRecord0Census()) { // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
+		    ShaderRecompiler::IR::WaterfallRecord0Census() || IndirectLoadFast::CensusEnabled()) { // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 			m_download_buffer.Invalidate(diag_offset, DiagAreaSize);
 			ReportDiagTail(std::bit_cast<const uint32_t*>(m_download_buffer.Mapped().data() + diag_offset));
 		}

@@ -22,6 +22,16 @@ int Mode() {
 	return mode;
 }
 
+bool CensusEnabled() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_INDIRECT_FORMAT_CENSUS");
+		const bool  b     = value != nullptr && value[0] == '1';
+		if (b) std::fprintf(stderr, "DIAG_INDIRECT_FORMAT_CENSUS enabled\n");
+		return b;
+	}();
+	return on;
+}
+
 bool Listed(uint64_t shader_hash) {
 	// Default: the probe-evaluation shaders of "Deferred Ambient>Eval non-RT Probes" (2.65 ms of GPU time per frame at
 	// the torii gate).

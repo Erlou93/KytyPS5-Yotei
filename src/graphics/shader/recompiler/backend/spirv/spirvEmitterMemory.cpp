@@ -2365,6 +2365,18 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 	auto&       state  = ctx.state;
 	const auto& handle = *inst.Arg(0).ResolveInstruction();
 	const auto  word3  = ctx.Arg(handle, 3);
+	if (IndirectLoadFast::CensusEnabled() && state.fault_buffer_variable != 0u) { // KYTY_DIAG_INDIRECT_FORMAT_CENSUS
+		const auto elected = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformElect, TypeBool(state), elected, ConstantU32(state, spv::ScopeSubgroup));
+		EmitIfCondition(state, elected, [&]() {
+			const auto format = EmitBitFieldUExtract(state, word3, ConstantU32(state, 12), ConstantU32(state, 7));
+			const auto word   = Binary(state, spv::OpIAdd, TypeU32(state),
+			                           Binary(state, spv::OpShiftLeftLogical, TypeU32(state), format, ConstantU32(state, 2)),
+			                           ConstantU32(state, BufferCache::FAULT_DIAG_BASE + IndirectLoadFast::CensusWord + channels - 1u));
+			state.builder.AddFunction(spv::OpAtomicIAdd, TypeU32(state), state.builder.AllocateId(), FaultElementPointer(state, word),
+			                          ConstantU32(state, spv::ScopeDevice), ConstantU32(state, 0), ConstantU32(state, 1));
+		});
+	}
 	const auto  found  = state.indirect_formatted_load_functions.find(IndirectFormattedLoadKey(channels, components, d16));
 	if (found == state.indirect_formatted_load_functions.end() || found->second == 0u) {
 		return LoadIndirectFormattedVector(ctx, PrepareIndirectBuffer(ctx, inst), word3, channels, components, d16);
