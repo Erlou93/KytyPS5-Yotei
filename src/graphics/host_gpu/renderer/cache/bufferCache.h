@@ -236,7 +236,7 @@ public:
 	[[nodiscard]] static bool UploadClobberCheck() { return D6C0Mode() >= 2u; }
 	void                      NoteGuestWriteFault(uint64_t vaddr);
 	// KYTY_DIAG_GPU_DELAY_HASHES=<hex,...> KYTY_DIAG_GPU_DELAY_COPIES=<n> (measurement only, sensitivity test): after each
-	// dispatch of a listed compute shader, n copies of 128 MiB inside a scratch device buffer, ordered after the dispatch
+	// dispatch of a listed compute shader, n copies of 128 MiB (KYTY_DIAG_GPU_DELAY_KB=<size of one copy>) inside a scratch device buffer, ordered after the dispatch
 	// and before everything recorded later - pure extra GPU time at that place; the game's data is not touched.
 	void DiagGpuDelayAfter(vk::CommandBuffer cmd, uint64_t shader_hash);
 	std::unique_ptr<Buffer> m_diag_delay_buffer;

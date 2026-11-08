@@ -26,6 +26,7 @@ void BufferCache::DiagGpuDelayAfter(vk::CommandBuffer cmd, uint64_t shader_hash)
 	struct Config {
 		std::vector<uint64_t> hashes;
 		uint32_t              copies = 0;
+		uint64_t              bytes  = 128ull << 20u; // KYTY_DIAG_GPU_DELAY_KB: size of one copy (default 128 MiB)
 	};
 	static const Config config = [] {
 		Config c;
@@ -39,8 +40,12 @@ void BufferCache::DiagGpuDelayAfter(vk::CommandBuffer cmd, uint64_t shader_hash)
 			}
 		}
 		if (const char* n = std::getenv("KYTY_DIAG_GPU_DELAY_COPIES"); n != nullptr) c.copies = static_cast<uint32_t>(std::strtoul(n, nullptr, 10));
+		if (const char* kb = std::getenv("KYTY_DIAG_GPU_DELAY_KB"); kb != nullptr) {
+			c.bytes = std::clamp<uint64_t>(std::strtoull(kb, nullptr, 10), 4u, 128u << 10u) << 10u;
+		}
 		if (!c.hashes.empty() && c.copies != 0) {
-			std::fprintf(stderr, "DIAG_GPU_DELAY hashes=%zu copies=%u (measurement only)\n", c.hashes.size(), c.copies);
+			std::fprintf(stderr, "DIAG_GPU_DELAY hashes=%zu copies=%u bytes=%llu (measurement only)\n", c.hashes.size(), c.copies,
+			             static_cast<unsigned long long>(c.bytes));
 		}
 		return c;
 	}();
@@ -55,7 +60,7 @@ void BufferCache::DiagGpuDelayAfter(vk::CommandBuffer cmd, uint64_t shader_hash)
 	before.dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite;
 	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0, nullptr);
 	for (uint32_t i = 0; i < config.copies; ++i) {
-		const vk::BufferCopy copy {(i % 2u) * Half, ((i + 1u) % 2u) * Half, Half};
+		const vk::BufferCopy copy {(i % 2u) * Half, ((i + 1u) % 2u) * Half, config.bytes};
 		cmd.copyBuffer(m_diag_delay_buffer->Handle(), m_diag_delay_buffer->Handle(), 1, &copy);
 		vk::MemoryBarrier between {};
 		between.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
