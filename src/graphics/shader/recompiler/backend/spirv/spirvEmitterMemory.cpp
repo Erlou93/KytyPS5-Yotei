@@ -2882,17 +2882,34 @@ void DefineIndirectFormattedLoadFunctions(ValueEmitContext& ctx) {
 // (bounds check + BDA translation + load) is emitted once as a non-inlined function and called per
 // component, instead of being expanded at every load. Same result; much smaller SPIR-V for shaders
 // with hundreds of such loads (driver compile time and memory).
-// KYTY_PERF_INDIRECT_RAW_INLINE (test switch, 0 = off, 1 = on): the raw-load functions are marked Inline instead of
-// DontInline - the same code, the driver may expand it at the calls. Profile 8.11 (Nsight, cutscene CS b0c4f2a6, one
-// wave per dispatch, ~400 dispatches per frame): 21% of its samples on indirect_raw_x3's return (Branch Resolving).
-static spv::FunctionControlMask IndirectRawControl() {
+// KYTY_PERF_INDIRECT_RAW_INLINE (test switch, 0 = off, 1 = on): in a program with at most RawInlineMaxLoads raw loads
+// through GPU-selected descriptors, the raw-load functions are marked Inline instead of DontInline - the same code, the
+// driver may expand it at the calls. Profile 8.11 (Nsight, cutscene CS b0c4f2a6, one wave per dispatch, ~400 dispatches
+// per frame, 11 such loads): 21% of its samples on indirect_raw_x3's return (Branch Resolving). Inline in every program
+// ran the driver's compiler out of memory (CS fbdb4e82: 41 s, then "LLVM ERROR: out of memory"), hence the limit.
+static constexpr uint32_t RawInlineMaxLoads = 16;
+static spv::FunctionControlMask IndirectRawControl(const EmitterState& state) {
 	static const bool inline_raw = [] {
 		const char* value = std::getenv("KYTY_PERF_INDIRECT_RAW_INLINE");
 		const bool  on    = value != nullptr && value[0] == '1';
-		if (on) std::fprintf(stderr, "PERF_INDIRECT_RAW_INLINE on\n");
+		if (on) std::fprintf(stderr, "PERF_INDIRECT_RAW_INLINE on (programs with <= %u raw loads)\n", RawInlineMaxLoads);
 		return on;
 	}();
-	return inline_raw ? spv::FunctionControlInlineMask : spv::FunctionControlDontInlineMask;
+	if (!inline_raw) return spv::FunctionControlDontInlineMask;
+	uint32_t loads = 0;
+	for (const auto* block: state.program.blocks) {
+		for (const auto& inst: *block) {
+			const auto op = inst.GetOpcode();
+			if (op != IR::ValueOpcode::LoadBufferU32 && op != IR::ValueOpcode::LoadBufferU32x2 &&
+			    op != IR::ValueOpcode::LoadBufferU32x3 && op != IR::ValueOpcode::LoadBufferU32x4)
+				continue;
+			const auto index = inst.Flags<IR::MemoryFlags>().index;
+			if (index >= state.program.memory_info.size()) continue;
+			const auto& mem = state.program.memory_info[index];
+			if (mem.kind == IR::ResourceKind::IndirectBuffer && !mem.formatted) ++loads;
+		}
+	}
+	return loads <= RawInlineMaxLoads ? spv::FunctionControlInlineMask : spv::FunctionControlDontInlineMask;
 }
 
 void DefineIndirectRawDword(ValueEmitContext& ctx) {
@@ -2912,7 +2929,7 @@ void DefineIndirectRawDword(ValueEmitContext& ctx) {
 		auto&      function      = coherent ? state.indirect_raw_coherent_function : state.indirect_raw_function;
 		function                 = state.builder.AllocateId();
 		state.builder.AddName(function, coherent ? "indirect_raw_dword_coherent" : "indirect_raw_dword");
-		state.builder.AddFunction(spv::OpFunction, u32, function, IndirectRawControl(), function_type);
+		state.builder.AddFunction(spv::OpFunction, u32, function, IndirectRawControl(state), function_type);
 		const auto parameter = [&](uint32_t type) {
 			const auto id = state.builder.AllocateId();
 			state.builder.AddFunction(spv::OpFunctionParameter, type, id);
@@ -2991,7 +3008,7 @@ void DefineIndirectRawDword(ValueEmitContext& ctx) {
 		std::string name = "indirect_raw_x" + std::to_string(components);
 		if (coherent) name += "_coherent";
 		state.builder.AddName(function, name.c_str());
-		state.builder.AddFunction(spv::OpFunction, result_type, function, IndirectRawControl(), function_type);
+		state.builder.AddFunction(spv::OpFunction, result_type, function, IndirectRawControl(state), function_type);
 		const auto parameter = [&]() {
 			const auto id = state.builder.AllocateId();
 			state.builder.AddFunction(spv::OpFunctionParameter, u32, id);
