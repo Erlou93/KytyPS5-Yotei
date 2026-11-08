@@ -1780,8 +1780,7 @@ void GuestGpu::Enqueue(Submission submission) {
 		const int64_t  now   = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		const int      frame = m_done_num;
 		if ((frame >= 3000 && frame <= 3003) || (frame >= 6000 && frame <= 6003)) {
-			std::fprintf(stderr, "DIAG_RING_ORDER frame=%d type=%d queue=%u dw=%zu us_after_sp=%lld
-", frame, static_cast<int>(submission.type),
+			std::fprintf(stderr, "DIAG_RING_ORDER frame=%d type=%d queue=%u dw=%zu us_after_sp=%lld\n", frame, static_cast<int>(submission.type),
 			             submission.queue_id, submission.commands.size(), static_cast<long long>(now - sp_ns));
 		}
 		if (submission.type == SubmissionType::SuspendPoint) sp_ns = now;
