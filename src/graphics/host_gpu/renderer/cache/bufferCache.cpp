@@ -253,11 +253,16 @@ void BufferCache::DiagBdaPoolsPrint() {
 	}
 	if (sum == last_sum) return;
 	last_sum = sum;
-	std::fprintf(stderr, "BDA_POOLS_MAPPED_MiB live/peak a1=%lld/%lld a2=%lld/%lld tex=%lld/%lld other=%lld/%lld\n",
-	             static_cast<long long>(g_bda_map_live[0].load() >> 20), static_cast<long long>(g_bda_map_peak[0].load() >> 20),
-	             static_cast<long long>(g_bda_map_live[1].load() >> 20), static_cast<long long>(g_bda_map_peak[1].load() >> 20),
-	             static_cast<long long>(g_bda_map_live[2].load() >> 20), static_cast<long long>(g_bda_map_peak[2].load() >> 20),
-	             static_cast<long long>(g_bda_map_live[3].load() >> 20), static_cast<long long>(g_bda_map_peak[3].load() >> 20));
+	{
+		std::scoped_lock lock(g_bda_map_mutex);
+		std::string      line;
+		for (size_t b = 0; b < 256; b++) {
+			if (g_bda_map_peak[b] == 0) continue;
+			line += " " + std::to_string(b) + ":" + std::to_string(g_bda_map_live[b] / 64) + "/" +
+			        std::to_string(g_bda_map_peak[b] / 64);
+		}
+		std::fprintf(stderr, "BDA_POOLS_MAPPED_MiB by 4GiB (decimal index, live/peak):%s\n", line.c_str());
+	}
 	std::fprintf(stderr,
 	             "BDA_POOLS frame=%u import(list/zero/dl) a1=%llu/%llu/%llu a2=%llu/%llu/%llu tex=%llu/%llu/%llu other=%llu/%llu/%llu "
 	             "pages(served/zero) a1=%llu/%llu a2=%llu/%llu tex=%llu/%llu other=%llu/%llu\n",
