@@ -318,8 +318,7 @@ void DefineBvhIntersect(EmitterState& s) {
 		           ConstantU64(s, BdaPageBytes - 64u)),
 		    Binary(s, spv::OpINotEqual, b, first, ConstantU64(s, 0)));
 		if (SpirvLive::BvhOneLookupLive() && s.fault_buffer_variable != 0u) { // KYTY_PERF_BVH_ONE_LOOKUP=3 (test only)
-			const auto flags = Unary(s, spv::OpLoad, u,
-			                         FaultElementPointer(s, ConstantU32(s, BufferCache::FAULT_DIAG_BASE + BufferCache::FAULT_DIAG_WORDS)));
+			const auto flags = LoadSpirvLiveFlags(s);
 			same_page = Binary(s, spv::OpLogicalAnd, b, same_page,
 			                   Binary(s, spv::OpINotEqual, b, Binary(s, spv::OpBitwiseAnd, u, flags, ConstantU32(s, SpirvLive::FlagBvhOneLookup)),
 			                          ConstantU32(s, 0)));
