@@ -950,6 +950,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelEnd(vk_buffer);
 	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1);
+	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
 	m_context.GetBufferCache().NoteCommandEmitted();
 	GpuCheckpoints::Mark(vk_buffer, ~input_info.stage.program->shader_hash);
 	if (twin_open) TwinDispatch::End(m_context, vk_buffer, program.shader_hash); // KYTY_DIAG_TWIN_DISPATCH: A's copy
