@@ -49,6 +49,61 @@ constexpr uint64_t REGION_COUNT = ADDRESS_SIZE / REGION_SIZE;
 
 constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 
+// KYTY_TRACE_PROTECT_SITES=1 (diagnostic, default off; 9.11 cutscene night): the tracker's protection calls of the GPU
+// thread by call stack (8 return addresses as module offsets), with their count and bytes; printed every ~5 s as
+// "PROTECT_SITE n=<calls> kb=<KiB> rva=<a>,<b>,..." for the 16 largest (resolve with the link map).
+namespace ProtectSites {
+struct Site {
+	std::array<uint64_t, 8> rva {};
+	uint64_t                calls = 0, bytes = 0;
+};
+inline bool On() {
+	static const bool on = [] {
+		const char* v = std::getenv("KYTY_TRACE_PROTECT_SITES");
+		return v != nullptr && v[0] == '1';
+	}();
+	return on;
+}
+inline void Note(uint64_t size) {
+	if (!On() || !PerfIsGpuThread()) return;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	static std::mutex                        mutex;
+	static std::vector<Site>                 sites;
+	static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+	static const uint64_t                    base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+	void*                                    frames[9] {};
+	const USHORT                             got = RtlCaptureStackBackTrace(1, 9, frames, nullptr);
+	Site                                     key;
+	for (USHORT i = 0; i < got && i < 8; i++) {
+		const auto a = reinterpret_cast<uint64_t>(frames[i]);
+		key.rva[i]   = a >= base && a - base < (uint64_t {1} << 32u) ? a - base : 0;
+	}
+	std::scoped_lock lock(mutex);
+	auto it = std::find_if(sites.begin(), sites.end(), [&](const Site& s) { return s.rva == key.rva; });
+	if (it == sites.end()) {
+		sites.push_back(key);
+		it = sites.end() - 1;
+	}
+	it->calls++;
+	it->bytes += size;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - last < std::chrono::seconds(5)) return;
+	last = now;
+	std::sort(sites.begin(), sites.end(), [](const Site& a, const Site& b) { return a.calls > b.calls; });
+	for (size_t i = 0; i < sites.size() && i < 16; i++) {
+		std::fprintf(stderr, "PROTECT_SITE n=%llu kb=%llu rva=", static_cast<unsigned long long>(sites[i].calls),
+		             static_cast<unsigned long long>(sites[i].bytes >> 10u));
+		for (const uint64_t a: sites[i].rva) std::fprintf(stderr, "%llx,", static_cast<unsigned long long>(a));
+		std::fprintf(stderr, "\n");
+	}
+	std::fprintf(stderr, "PROTECT_SITE end sites=%zu\n", sites.size());
+	sites.clear();
+#else
+	(void)size;
+#endif
+}
+} // namespace ProtectSites
+
 [[noreturn]] void FailFast(const char* reason = nullptr) noexcept {
 	std::fputs("PageManager fail-fast: ", stderr);
 	std::fputs(reason != nullptr ? reason : "invalid page state", stderr);
@@ -246,6 +301,7 @@ struct PageManager::Impl {
 	}
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
+		ProtectSites::Note(size); // KYTY_TRACE_PROTECT_SITES
 		// KYTY_TRACE_PERF: tracker protections by thread kind (PERF locks).
 		struct ProtectTimer {
 			bool                                  on = PerfEnabled();
