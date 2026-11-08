@@ -93,6 +93,7 @@ public:
 		}
 		[[nodiscard]] size_t size() const { return m_heap.empty() ? m_count : m_heap.size(); }
 		[[nodiscard]] bool   empty() const { return size() == 0; }
+		[[nodiscard]] const vk::ImageMemoryBarrier2& operator[](size_t i) const { return data()[i]; }
 		[[nodiscard]] const vk::ImageMemoryBarrier2* begin() const { return data(); }
 		[[nodiscard]] const vk::ImageMemoryBarrier2* end() const { return data() + size(); }
 
