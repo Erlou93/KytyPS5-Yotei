@@ -200,8 +200,7 @@ bool BufferCache::DiagBdaPools() {
 	static const bool on = [] {
 		const char* value = std::getenv("KYTY_DIAG_BDA_POOLS");
 		const bool  b     = value != nullptr && value[0] == '1';
-		if (b) std::fprintf(stderr, "DIAG_BDA_POOLS enabled
-");
+		if (b) std::fprintf(stderr, "DIAG_BDA_POOLS enabled\n");
 		return b;
 	}();
 	return on;
@@ -226,8 +225,7 @@ void BufferCache::DiagBdaPoolsPrint() {
 	last_sum = sum;
 	std::fprintf(stderr,
 	             "BDA_POOLS frame=%u import(list/zero/dl) a1=%llu/%llu/%llu a2=%llu/%llu/%llu tex=%llu/%llu/%llu other=%llu/%llu/%llu "
-	             "pages(served/zero) a1=%llu/%llu a2=%llu/%llu tex=%llu/%llu other=%llu/%llu
-",
+	             "pages(served/zero) a1=%llu/%llu a2=%llu/%llu tex=%llu/%llu other=%llu/%llu\n",
 	             DebugPresentCount().load(), static_cast<unsigned long long>(v[0][0]), static_cast<unsigned long long>(v[1][0]),
 	             static_cast<unsigned long long>(v[2][0]), static_cast<unsigned long long>(v[0][1]),
 	             static_cast<unsigned long long>(v[1][1]), static_cast<unsigned long long>(v[2][1]),
@@ -345,8 +343,7 @@ Buffer* BufferCache::FallbackChunk(size_t chunk, bool want, uint64_t diag_vaddr,
 		m_fallback_stats.chunks++;
 		if (DiagBdaPools()) {
 			g_bda_pools[diag_reason][BdaPoolOf(diag_vaddr)].fetch_add(1, std::memory_order_relaxed);
-			std::fprintf(stderr, "BDA_POOL_IMPORT frame=%u chunk=%zu vaddr=0x%llx reason=%d us=%llu
-", DebugPresentCount().load(),
+			std::fprintf(stderr, "BDA_POOL_IMPORT frame=%u chunk=%zu vaddr=0x%llx reason=%d us=%llu\n", DebugPresentCount().load(),
 			             chunk, static_cast<unsigned long long>(diag_vaddr), diag_reason,
 			             static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(
 			                                                 std::chrono::steady_clock::now() - t0)
