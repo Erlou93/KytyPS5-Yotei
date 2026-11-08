@@ -3597,8 +3597,57 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	return result;
 }
 
+// Word `index` of the flat SRT buffer (a constant index below IR::SrtFlatWords).
+static uint32_t FlatSrtWord(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t index) {
+	auto& state = ctx.state;
+	if (state.flattened_srt_uniform_variable != 0) {
+		return LoadUniformDword(state, state.flattened_srt_uniform_variable, index);
+	}
+	if (state.flattened_srt_variable == 0) {
+		ctx.Fail(inst, "requires the flattened SRT descriptor");
+	}
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer,
+	                          state.flattened_srt_variable, ConstantU32(state, 0), ConstantU32(state, index));
+	return EmitNative<spv::OpLoad, IR::Type::U32>(state, pointer);
+}
+
+// KYTY_PERF_SRT_GPU_WORDS: a shader-only SRT word read from GPU memory. The flat words hold the device address the host
+// put in place of the guest address (0: the word reads zero, as the null page does). With KYTY_PERF_SRT_GPU_WORDS_VERIFY
+// the value the CPU read as before is used, and the two are compared (fault diag words FAULT_DIAG_SRT_GPU_WORDS +0
+// checks, +1 mismatches).
+static uint32_t EmitReadGpuWord(ValueEmitContext& ctx, const IR::Inst& inst, const IR::ShaderInfo::SrtGpuWord& word) {
+	auto&      state   = ctx.state;
+	const auto low     = Unary(state, spv::OpUConvert, TypeU64(state), FlatSrtWord(ctx, inst, word.slot));
+	const auto high    = Unary(state, spv::OpUConvert, TypeU64(state), FlatSrtWord(ctx, inst, word.hi));
+	const auto address = Binary(state, spv::OpBitwiseOr, TypeU64(state), low,
+	                            Binary(state, spv::OpShiftLeftLogical, TypeU64(state), high, ConstantU64(state, 32)));
+	const auto present = Binary(state, spv::OpINotEqual, TypeBool(state), address, ConstantU64(state, 0));
+	const auto value   = EmitValueOrZeroIfCondition(state, present, [&]() {
+        const auto         pointer   = BdaDwordPointer(state, address, false);
+        const auto         loaded    = state.builder.AllocateId();
+        constexpr uint32_t alignment = sizeof(uint32_t);
+        state.builder.AddFunction(spv::OpLoad, TypeU32(state), loaded, pointer, BdaDwordAccess(false), alignment);
+        return loaded;
+    });
+	if (word.verify == UINT32_MAX) return value;
+	const auto cpu     = FlatSrtWord(ctx, inst, word.verify);
+	const auto differs = Binary(state, spv::OpINotEqual, TypeBool(state), value, cpu);
+	(void)FaultDiagAdd(state, BufferCache::FAULT_DIAG_SRT_GPU_WORDS, ConstantU32(state, 1));
+	(void)FaultDiagAdd(state, BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 1,
+	                   Select(state, TypeU32(state), differs, ConstantU32(state, 1), ConstantU32(state, 0)));
+	return cpu;
+}
+
 uint32_t EmitReadConst(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
+	if (const auto& words = state.program.info.srt_gpu_words; !words.empty()) {
+		const auto slot = inst.Arg(1).Resolve();
+		if (slot.IsImmediate()) {
+			const auto found = std::ranges::find(words, slot.U32(), &IR::ShaderInfo::SrtGpuWord::slot);
+			if (found != words.end()) return EmitReadGpuWord(ctx, inst, *found);
+		}
+	}
 	if (state.flattened_srt_uniform_variable != 0) {
 		// Uniform const buffers (ShaderIR.h): the slot is an immediate below srt_reads.size() (ValidateNativeProgram),
 		// and the host's flat buffer holds at least srt_reads.size() words.

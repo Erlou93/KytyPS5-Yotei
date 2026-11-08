@@ -495,6 +495,10 @@ private:
 	uint64_t                              m_bindless_frame = UINT64_MAX;
 	std::vector<uint32_t>                 m_bindless_requests;
 		static inline thread_local std::vector<uint32_t> m_bindless_srt;
+	// KYTY_PERF_SRT_GPU_WORDS (RebindBuffers): flat SRT words holding the device addresses of shader-only words, as
+	// {flat index, value}, and the guest addresses sorted into ranges.
+	static inline thread_local std::vector<std::pair<uint32_t, uint32_t>> m_gpu_word_patches;
+	static inline thread_local std::vector<std::pair<uint64_t, uint32_t>> m_gpu_word_addresses;
 	// The last bindless image lists CommitBindings walked, with the epochs of that walk.
 	struct BindlessLayoutMemo {
 		std::vector<ImageId> ids;

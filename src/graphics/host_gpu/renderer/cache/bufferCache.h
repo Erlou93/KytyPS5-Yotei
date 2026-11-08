@@ -298,7 +298,10 @@ public:
 	// Verify counts checks / mismatches in fault-buffer diag words FAULT_DIAG_ENTRY_SHARE (+0, +1).
 	[[nodiscard]] static int BdaEntryShareMode();
 	static constexpr uint32_t FAULT_DIAG_ENTRY_SHARE = 4;
-	// (Words 8, 9, 12 and 13 are free.)
+	// (Words 8, 9 and 13 are free.)
+	// KYTY_PERF_SRT_GPU_WORDS_VERIFY (SrtTape.cpp PlanSrtGpuWords, spirvEmitterMemory.cpp EmitReadGpuWord): shader-only SRT
+	// words read from GPU memory compared with the CPU's value: checks / mismatches in diag words +0, +1.
+	static constexpr uint32_t FAULT_DIAG_SRT_GPU_WORDS = 12;
 	void QueueFallbackMap(uint64_t vaddr, uint64_t size); // any thread (RenderContext::MapMemory)
 	void ApplyFallbackMaps();                             // GPU thread (RenderContext::PrepareBda)
 	void ClearFallback(uint64_t vaddr, uint64_t size);    // GPU thread (unmap, after InvalidateMemory)

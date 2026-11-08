@@ -188,6 +188,20 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 			             static_cast<unsigned long long>(differ));
 		}
 	}
+	// KYTY_PERF_SRT_GPU_WORDS_VERIFY=1: shader-only SRT words read on the GPU against the CPU's value (mismatches must stay 0).
+	static const bool gpu_words_verify = [] {
+		const char* value = std::getenv("KYTY_PERF_SRT_GPU_WORDS_VERIFY");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (gpu_words_verify) {
+		static uint64_t checks = 0, mismatches = 0, passes = 0;
+		checks += tail[BufferCache::FAULT_DIAG_SRT_GPU_WORDS];
+		mismatches += tail[BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 1];
+		if ((++passes % 256u) == 0u || tail[BufferCache::FAULT_DIAG_SRT_GPU_WORDS + 1] != 0u) {
+			std::fprintf(stderr, "PERF srt_gpu_words verify frame=%u checks=%llu mismatches=%llu\n", DebugPresentCount().load(),
+			             static_cast<unsigned long long>(checks), static_cast<unsigned long long>(mismatches));
+		}
+	}
 	const uint32_t trips = tail[0], misses = tail[2];
 	if (FaultDiagTripsEnabled()) { // KYTY_TRACE_PERF: PERF workaround_hits watchdog_trips=<trips>/<passes>
 		Common::WorkaroundHits::Add(Common::WorkaroundHits::Hit::WatchdogTrips, trips);
