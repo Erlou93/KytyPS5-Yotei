@@ -1899,8 +1899,7 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 			             static_cast<unsigned long long>(g_ring_age_upper.unknown.exchange(0)));
 			for (size_t k = 0; k < g_ring_arm_stats.size(); k++) {
 				auto& st = g_ring_arm_stats[k];
-				std::fprintf(stderr, "DIAG_RING_ARM %s sp=%llu flips=%llu extra_pages=%llu upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]
-",
+				std::fprintf(stderr, "DIAG_RING_ARM %s sp=%llu flips=%llu extra_pages=%llu upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]\n",
 				             k == 0 ? "gfx" : "flip", static_cast<unsigned long long>(k == 0 ? g_ring_sp_count.load() : g_ring_sp_count.exchange(0)),
 				             static_cast<unsigned long long>(k == 0 ? g_ring_flip_count.load() : g_ring_flip_count.exchange(0)),
 				             static_cast<unsigned long long>(st.extra.exchange(0)), static_cast<unsigned long long>(st.b30.exchange(0)),
