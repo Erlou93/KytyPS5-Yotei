@@ -2279,9 +2279,13 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 			                     ConstantU32(state, static_cast<uint32_t>(fast[k]))),
 			              ConstantU32(state, k + 1u), pick);
 		}
+		// KYTY_DIAG_INDIRECT_FORMAT_CENSUS: every invocation's load (word + 2) and those through the table (word + 3).
+		const bool census = IndirectLoadFast::CensusFor(state.program.shader_hash) && state.fault_buffer_variable != 0u;
+		if (census) (void)FaultDiagAdd(state, IndirectLoadFast::CensusMixedWord + 2u, ConstantU32(state, 1));
 		return EmitIndexSwitch(state, pick, static_cast<uint32_t>(std::size(fast)) + 1u, TypeU32Composite(state, channels),
 		                       [&](uint32_t item) {
 			                       if (item == 0u) {
+				                       if (census) (void)FaultDiagAdd(state, IndirectLoadFast::CensusMixedWord + 3u, ConstantU32(state, 1));
 				                       return LoadIndirectFormattedTable(ctx, buffer, channels, selector, memory, one, d16);
 			                       }
 			                       const auto info = Format::GetFormatInfo(fast[item - 1u]);

@@ -116,7 +116,7 @@ static_assert(ShaderRecompiler::IR::BindlessCensusWord >= IndirectLoadFast::Diag
               ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords <= BufferCache::FAULT_DIAG_WORDS);
 static_assert(ShaderRecompiler::IR::WaterfallRecord0CensusWord >= ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords &&
               ShaderRecompiler::IR::WaterfallRecord0CensusWord + ShaderRecompiler::IR::WaterfallRecord0CensusWords <= BufferCache::FAULT_DIAG_WORDS);
-static_assert(IndirectLoadFast::CensusMixedWord >= IndirectLoadFast::DiagWord + 8 && IndirectLoadFast::CensusMixedWord + 2 <= IndirectLoadFast::CensusWord);
+static_assert(IndirectLoadFast::CensusMixedWord >= IndirectLoadFast::DiagWord + 8 && IndirectLoadFast::CensusMixedWord + 4 <= IndirectLoadFast::CensusWord);
 static_assert(IndirectLoadFast::CensusWord >= IndirectLoadFast::DiagWord + 8 &&
               IndirectLoadFast::CensusWord + IndirectLoadFast::CensusWords <= ShaderRecompiler::IR::BindlessCensusWord);
 
@@ -169,7 +169,9 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 		}
 	}
 	if (IndirectLoadFast::CensusEnabled()) { // KYTY_DIAG_INDIRECT_FORMAT_CENSUS: totals by FORMAT and channel count
-		static uint64_t counts[IndirectLoadFast::CensusWords] {}, passes = 0, waves = 0, mixed = 0;
+		static uint64_t counts[IndirectLoadFast::CensusWords] {}, passes = 0, waves = 0, mixed = 0, loads = 0, table = 0;
+		loads += tail[IndirectLoadFast::CensusMixedWord + 2u];
+		table += tail[IndirectLoadFast::CensusMixedWord + 3u];
 		for (uint32_t i = 0; i < IndirectLoadFast::CensusWords; i++) counts[i] += tail[IndirectLoadFast::CensusWord + i];
 		waves += tail[IndirectLoadFast::CensusMixedWord];
 		mixed += tail[IndirectLoadFast::CensusMixedWord + 1u];
@@ -183,9 +185,10 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 				std::snprintf(item, sizeof(item), " f%u.c%u=%llu", i / 4u, i % 4u + 1u, static_cast<unsigned long long>(counts[i]));
 				line += item;
 			}
-			std::fprintf(stderr, "PERF indirect_format_census total=%llu waves=%llu mixed_format_waves=%llu%s\n",
+			std::fprintf(stderr, "PERF indirect_format_census total=%llu waves=%llu mixed_format_waves=%llu lane_loads=%llu table_loads=%llu%s\n",
 			             static_cast<unsigned long long>(total), static_cast<unsigned long long>(waves),
-			             static_cast<unsigned long long>(mixed), line.c_str());
+			             static_cast<unsigned long long>(mixed), static_cast<unsigned long long>(loads),
+			             static_cast<unsigned long long>(table), line.c_str());
 		}
 	}
 	if (ShaderRecompiler::IR::BindlessPlaceholderCensus()) { // KYTY_DIAG_BINDLESS_PLACEHOLDER_CENSUS: lanes by slot read
