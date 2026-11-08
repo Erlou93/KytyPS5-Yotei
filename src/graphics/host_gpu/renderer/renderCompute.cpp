@@ -4,7 +4,6 @@
 #include "graphics/host_gpu/renderer/refCapture.h"
 #include "graphics/host_gpu/renderer/renderComputeTrace.h"
 #include "graphics/host_gpu/renderer/twinDispatch.h"
-#include "common/liveAb.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/gpuCheckpoints.h"
 #include "common/assert.h"
@@ -289,13 +288,6 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 }
 
 // Names the game pass (debug marker) of a skipped compute dispatch, once per marker.
-// Test only (KYTY_PERF_SCC_NO_VOTE=3 live A/B): the live phase in the GPU timing key (GPUTIME_TOP b bit 4 = SCC without
-// the vote), so one run times each phase's dispatches apart.
-static uint64_t LivePhaseKey() {
-	if (!Common::LiveAb::Enabled()) return 0;
-	return Common::LiveAb::Gate(Common::LiveAb::Switch::SccNoVote, 0u) != 0u ? 1u << 4u : 0u;
-}
-
 static void LogSkippedDispatch(const char* kind) {
 	static std::mutex               mutex;
 	static std::vector<std::string> seen;
@@ -800,7 +792,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}();
 		const uint64_t b = program.shader_hash == watch_hash
 		                       ? (uint64_t {thread_group_x} * thread_group_y * thread_group_z) << 4u | 2u
-		                       : LivePhaseKey();
+		                       : 0u;
 		GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, b);
 	}
 	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
@@ -957,7 +949,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelEnd(vk_buffer);
-	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1u | LivePhaseKey());
+	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1);
 	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
 	m_context.GetBufferCache().NoteCommandEmitted();
 	GpuCheckpoints::Mark(vk_buffer, ~input_info.stage.program->shader_hash);

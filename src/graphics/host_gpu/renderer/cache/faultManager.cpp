@@ -167,15 +167,6 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 			             static_cast<unsigned long long>(others), formats[3], formats[2], formats[1], formats[0], selectors);
 		}
 	}
-	if (SccNoVote::Mode() == 2) { // KYTY_PERF_SCC_NO_VOTE=2: SCC branches checked against the vote (mismatches must stay 0)
-		static uint64_t checks = 0, mismatches = 0, passes = 0;
-		checks += tail[SccNoVote::DiagWord];
-		mismatches += tail[SccNoVote::DiagWord + 1];
-		if ((++passes % 256u) == 0u || tail[SccNoVote::DiagWord + 1] != 0u) {
-			std::fprintf(stderr, "PERF scc_no_vote verify checks=%llu mismatches=%llu\n", static_cast<unsigned long long>(checks),
-			             static_cast<unsigned long long>(mismatches));
-		}
-	}
 	if (IndirectLoadFast::CensusEnabled()) { // KYTY_DIAG_INDIRECT_FORMAT_CENSUS: totals by FORMAT and channel count
 		static uint64_t counts[IndirectLoadFast::CensusWords] {}, passes = 0;
 		for (uint32_t i = 0; i < IndirectLoadFast::CensusWords; i++) counts[i] += tail[IndirectLoadFast::CensusWord + i];
@@ -372,7 +363,7 @@ void FaultManager::ProcessFaultBuffer() {
 	// KYTY_DIAG_RT_TRIPS: the tail of the work recorded so far goes to this area's diagnostic copy and starts over.
 	const auto diag_offset = MaxPendingFaults * PageFaultAreaSize * 2 + m_current_area * DiagAreaSize;
 	if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
-	    IndirectLoadFast::Mode() == 2 || SccNoVote::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
+	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
 	    ShaderRecompiler::IR::WaterfallRecord0Census() || IndirectLoadFast::CensusEnabled()) { // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 		const auto tail_offset = uint64_t {BufferCache::FAULT_DIAG_BASE} * sizeof(uint32_t);
 		vk::BufferMemoryBarrier2 to_copy {};
@@ -425,7 +416,7 @@ void FaultManager::ProcessFaultBuffer() {
 		m_download_buffer.Invalidate(offset, PageFaultAreaSize);
 		if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    ShaderRecompiler::IR::ClampNanMode() == 2 ||
-	    IndirectLoadFast::Mode() == 2 || SccNoVote::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
+	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
 		    ShaderRecompiler::IR::WaterfallRecord0Census() || IndirectLoadFast::CensusEnabled()) { // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 			m_download_buffer.Invalidate(diag_offset, DiagAreaSize);
 			ReportDiagTail(std::bit_cast<const uint32_t*>(m_download_buffer.Mapped().data() + diag_offset));
