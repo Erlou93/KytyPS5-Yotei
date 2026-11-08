@@ -235,6 +235,11 @@ public:
 	// PERF d6_c0 counts pages checked, pages and bytes clobbered, pages without a copy (unchecked).
 	[[nodiscard]] static bool UploadClobberCheck() { return D6C0Mode() >= 2u; }
 	void                      NoteGuestWriteFault(uint64_t vaddr);
+	// KYTY_DIAG_GPU_DELAY_HASHES=<hex,...> KYTY_DIAG_GPU_DELAY_COPIES=<n> (measurement only, sensitivity test): after each
+	// dispatch of a listed compute shader, n copies of 128 MiB inside a scratch device buffer, ordered after the dispatch
+	// and before everything recorded later - pure extra GPU time at that place; the game's data is not touched.
+	void DiagGpuDelayAfter(vk::CommandBuffer cmd, uint64_t shader_hash);
+	std::unique_ptr<Buffer> m_diag_delay_buffer;
 	// D6 step C0: a written record-keyed range of the frames first..last lies on the 16 KiB store page and no call of
 	// those frames (or later) had an incomplete listing; false when the frames are no longer kept.
 	[[nodiscard]] bool BdaStoreListed(uint64_t page_address, uint64_t first_frame, uint64_t last_frame) const;

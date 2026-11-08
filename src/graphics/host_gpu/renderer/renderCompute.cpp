@@ -795,6 +795,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		                       : 0u;
 		GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, b);
 	}
+	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
 	{
 		const DispatchSubTimer emitted_timer(DispatchSub::TailEmitted); // KYTY_TRACE_DISPATCH_CENSUS
 		m_context.GetBufferCache().NoteCommandEmitted();

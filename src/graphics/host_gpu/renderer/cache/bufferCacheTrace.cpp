@@ -12,6 +12,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,52 @@
 
 // BufferCache's verify tools and the logs that stay (bufferCacheTrace.h): nothing here runs unless its name is set.
 namespace Libs::Graphics {
+
+void BufferCache::DiagGpuDelayAfter(vk::CommandBuffer cmd, uint64_t shader_hash) {
+	struct Config {
+		std::vector<uint64_t> hashes;
+		uint32_t              copies = 0;
+	};
+	static const Config config = [] {
+		Config c;
+		if (const char* list = std::getenv("KYTY_DIAG_GPU_DELAY_HASHES"); list != nullptr) {
+			for (const char* p = list; *p != 0;) {
+				char*          end   = nullptr;
+				const uint64_t value = std::strtoull(p, &end, 16);
+				if (end == p) break;
+				c.hashes.push_back(value);
+				p = (*end == ',') ? end + 1 : end;
+			}
+		}
+		if (const char* n = std::getenv("KYTY_DIAG_GPU_DELAY_COPIES"); n != nullptr) c.copies = static_cast<uint32_t>(std::strtoul(n, nullptr, 10));
+		if (!c.hashes.empty() && c.copies != 0) {
+			std::fprintf(stderr, "DIAG_GPU_DELAY hashes=%zu copies=%u (measurement only)\n", c.hashes.size(), c.copies);
+		}
+		return c;
+	}();
+	if (config.copies == 0 || std::ranges::find(config.hashes, shader_hash) == config.hashes.end()) return;
+	constexpr uint64_t Half = 128ull << 20u;
+	if (m_diag_delay_buffer == nullptr) {
+		m_diag_delay_buffer = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0,
+		                                               vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst, 2 * Half);
+	}
+	vk::MemoryBarrier before {};
+	before.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+	before.dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite;
+	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0, nullptr);
+	for (uint32_t i = 0; i < config.copies; ++i) {
+		const vk::BufferCopy copy {(i % 2u) * Half, ((i + 1u) % 2u) * Half, Half};
+		cmd.copyBuffer(m_diag_delay_buffer->Handle(), m_diag_delay_buffer->Handle(), 1, &copy);
+		vk::MemoryBarrier between {};
+		between.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		between.dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite;
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, 1, &between, 0, nullptr, 0, nullptr);
+	}
+	vk::MemoryBarrier after {};
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands, {}, 1, &after, 0, nullptr, 0, nullptr);
+}
 
 namespace DownloadWaitTrace {
 static const char* const Names[Count] = {"bar_no_tick", "bar_open", "bar_pending", "large_submitted", "large_open",
