@@ -734,6 +734,7 @@ private:
 		bool                                                 stop = false;
 		std::atomic<uint64_t>                                zero {0};
 		uint64_t imports = 0, import_us = 0, refused = 0, installed = 0, dropped = 0, released = 0, released_bytes = 0;
+		uint64_t overmaps = 0;
 	} m_maptime;
 	std::vector<std::unique_ptr<Buffer>>              m_fallback_chunks; // imported backing per granule, null: not yet
 	std::vector<uint8_t>                              m_fallback_chunk_failed;

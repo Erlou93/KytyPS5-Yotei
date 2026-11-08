@@ -433,7 +433,10 @@ void BufferCache::MapTimeMap(uint64_t vaddr, uint64_t size) {
 			uint32_t&    slot    = m_maptime.page_granule[static_cast<size_t>((page - BdaMapTimePoolStart) / CACHING_PAGESIZE)];
 			if (slot != 0) {
 				if (slot - 1u == granule) continue; // mapped again over itself
-				m_maptime.granule_pages[slot - 1u]--; // a map over another granule's page (its unmap may follow)
+				// A map over another granule's page without the unmap before it (the kernel unmaps what a map replaces,
+				// so not seen): the old granule keeps this page's count - its entry may still be in the table, so it must
+				// never be released under it. Counted (PERF bda_maptime overmaps=).
+				m_maptime.overmaps++;
 			}
 			slot = static_cast<uint32_t>(granule + 1u);
 			m_maptime.granule_pages[granule]++;
@@ -650,7 +653,7 @@ void BufferCache::ApplyFallbackMaps() {
 				std::scoped_lock lock(m_maptime.mutex);
 				std::fprintf(stderr,
 				             "PERF bda_maptime zero=%llu imports=%llu import_ms=%llu refused=%llu installed=%llu dropped=%llu "
-				             "released=%llu released_MiB=%llu queued=%zu live_MiB=%llu\n",
+				             "released=%llu released_MiB=%llu queued=%zu live_MiB=%llu overmaps=%llu\n",
 				             static_cast<unsigned long long>(m_maptime.zero.load()),
 				             static_cast<unsigned long long>(m_maptime.imports),
 				             static_cast<unsigned long long>(m_maptime.import_us / 1000u),
@@ -659,7 +662,8 @@ void BufferCache::ApplyFallbackMaps() {
 				             static_cast<unsigned long long>(m_maptime.dropped),
 				             static_cast<unsigned long long>(m_maptime.released),
 				             static_cast<unsigned long long>(m_maptime.released_bytes >> 20u), m_maptime.queue.size(),
-				             static_cast<unsigned long long>(m_fallback_stats.imported_bytes >> 20u));
+				             static_cast<unsigned long long>(m_fallback_stats.imported_bytes >> 20u),
+				             static_cast<unsigned long long>(m_maptime.overmaps));
 			}
 		}
 	}
