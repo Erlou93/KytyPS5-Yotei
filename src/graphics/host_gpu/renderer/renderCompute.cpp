@@ -443,6 +443,15 @@ const PipelineCache::Pipeline& Choose(RenderContext& context, const Variant* var
 
 } // namespace ReadonlyNoncoherent
 
+// Test only (KYTY_PERF_WIDE_BUFFER_LOAD / KYTY_PERF_READONLY_NONCOHERENT live A/B): the live phase in the GPU timing key
+// (GPUTIME_TOP b bits 4.. = 1 wide loads, 2 read-only non-coherent), so one run times each phase's dispatches apart.
+static uint64_t LivePhaseKey() {
+	if (!Common::LiveAb::Enabled()) return 0;
+	const uint64_t wide = Common::LiveAb::Gate(Common::LiveAb::Switch::WideBufferLoad, 0u) != 0u ? 1u : 0u;
+	const uint64_t ro   = Common::LiveAb::Gate(Common::LiveAb::Switch::ReadonlyNoncoherent, 0u) != 0u ? 2u : 0u;
+	return (wide | ro) << 4u;
+}
+
 static void LogSkippedDispatch(const char* kind) {
 	static std::mutex               mutex;
 	static std::vector<std::string> seen;
@@ -957,7 +966,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}();
 		const uint64_t b = program.shader_hash == watch_hash
 		                       ? (uint64_t {thread_group_x} * thread_group_y * thread_group_z) << 4u | 2u
-		                       : 0u;
+		                       : LivePhaseKey();
 		GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, b);
 	}
 	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
@@ -1126,7 +1135,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelEnd(vk_buffer);
-	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1);
+	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1u | LivePhaseKey());
 	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
 	m_context.GetBufferCache().NoteCommandEmitted();
 	GpuCheckpoints::Mark(vk_buffer, ~input_info.stage.program->shader_hash);
