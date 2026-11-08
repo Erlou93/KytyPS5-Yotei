@@ -2270,6 +2270,19 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 	using F = Prospero::BufferFormat;
 	static constexpr F fast[] = {F::k16_16_16_16Float, F::k8UNorm, F::k8SInt, F::k16UInt, F::k16_16Float,
 	                             F::k10_10_10_2SNorm, F::k16_16_16_16SNorm};
+	// KYTY_PERF_FORMATTED_NULL_CASE (test switch, 0 = off, 1 = on): FORMAT 0 as a case of its own giving 0 - what the
+	// format switch gives for it (an Unknown format: ConstantU32CompositeZero). An inactive lane of a guarded call passes
+	// word 3 = 0 (IndirectCallWord3), and without the case it took the table: in the cutscene's paired 4ca0cf7e 98% of
+	// the lanes' formatted loads went through LoadIndirectFormattedTable while the active lanes took their case (census
+	// 8.11: lane_loads 119.8M, table_loads 117.8M, formats only k16UInt / k16_16Float / k10_10_10_2SNorm /
+	// k16_16_16_16SNorm), so every load ran the table's decode as well.
+	static const bool null_case = [] {
+		const char* value = std::getenv("KYTY_PERF_FORMATTED_NULL_CASE");
+		const bool  on    = value != nullptr && value[0] == '1';
+		if (on) std::fprintf(stderr, "PERF_FORMATTED_NULL_CASE on\n");
+		return on;
+	}();
+	const uint32_t null_item = static_cast<uint32_t>(std::size(fast)) + 1u;
 	const auto cases = [&]() {
 		const auto u32  = TypeU32(state);
 		auto       pick = ConstantU32(state, 0);
@@ -2279,11 +2292,16 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 			                     ConstantU32(state, static_cast<uint32_t>(fast[k]))),
 			              ConstantU32(state, k + 1u), pick);
 		}
+		if (null_case) {
+			pick = Select(state, u32, Binary(state, spv::OpIEqual, TypeBool(state), buffer.format, ConstantU32(state, 0)),
+			              ConstantU32(state, null_item), pick);
+		}
 		// KYTY_DIAG_INDIRECT_FORMAT_CENSUS: every invocation's load (word + 2) and those through the table (word + 3).
 		const bool census = IndirectLoadFast::CensusFor(state.program.shader_hash) && state.fault_buffer_variable != 0u;
 		if (census) (void)FaultDiagAdd(state, IndirectLoadFast::CensusMixedWord + 2u, ConstantU32(state, 1));
-		return EmitIndexSwitch(state, pick, static_cast<uint32_t>(std::size(fast)) + 1u, TypeU32Composite(state, channels),
+		return EmitIndexSwitch(state, pick, null_item + (null_case ? 1u : 0u), TypeU32Composite(state, channels),
 		                       [&](uint32_t item) {
+			                       if (item == null_item) return ConstantU32CompositeZero(state, channels);
 			                       if (item == 0u) {
 				                       if (census) (void)FaultDiagAdd(state, IndirectLoadFast::CensusMixedWord + 3u, ConstantU32(state, 1));
 				                       return LoadIndirectFormattedTable(ctx, buffer, channels, selector, memory, one, d16);
