@@ -3,6 +3,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtTape.h"
 
 #include <xxhash.h>
+#include <zstd.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -29,9 +30,10 @@ int ShaderReuseDiskMode() {
 namespace {
 
 constexpr uint32_t FileMagic    = 0x5552594bu; // "KYRU"
-constexpr uint32_t FileVersion  = 2u;
+constexpr uint32_t FileVersion  = 3u;
 constexpr uint32_t FrameMagic   = 0x45525546u; // "FURE"
 constexpr uint32_t MaxWords     = 64u << 20u;  // 256 MiB per frame: a damaged size field
+constexpr uint32_t HeadBytes    = 40u;         // {magic, key (2), bytes, program (2), flags, words, hash (2)}
 constexpr uint32_t MaxContainer = 1u << 16u;
 
 class Out {
@@ -831,26 +833,29 @@ ReuseDisk::ReuseDisk(std::filesystem::path path, uint64_t identity): m_path(std:
 	}
 	size_t damaged = 0;
 	if (!fresh) {
-		// Index the frames: {magic, key (2), words, program (2), flags, hash (2)} then the payload.
+		// Index the frames: {magic, key (2), stored bytes, program (2), flags, payload words, hash (2)} then the payload
+		// (zstd-compressed, padded to 4 bytes).
 		uint64_t pos = 16;
 		for (;;) {
-			uint32_t head[9] {};
-			if (_fseeki64(m_file, static_cast<int64_t>(pos), SEEK_SET) != 0 || std::fread(head, 4, 9, m_file) != 9) break;
+			uint32_t head[10] {};
+			if (_fseeki64(m_file, static_cast<int64_t>(pos), SEEK_SET) != 0 || std::fread(head, 4, 10, m_file) != 10) break;
 			const uint64_t key     = head[1] | (static_cast<uint64_t>(head[2]) << 32u);
-			const uint32_t count   = head[3];
+			const uint32_t bytes   = head[3];
 			const uint64_t program = head[4] | (static_cast<uint64_t>(head[5]) << 32u);
-			if (head[0] != FrameMagic || count == 0 || count > MaxWords) {
+			const uint32_t count   = head[7];
+			if (head[0] != FrameMagic || bytes == 0 || bytes > MaxWords * 4u || count == 0 || count > MaxWords) {
 				damaged++;
 				break;
 			}
-			const uint64_t payload = pos + 36;
-			const uint64_t end     = payload + uint64_t {count} * 4u;
+			const uint64_t payload = pos + HeadBytes;
+			const uint64_t end     = payload + ((uint64_t {bytes} + 3u) & ~uint64_t {3});
 			if (_fseeki64(m_file, static_cast<int64_t>(end - 1), SEEK_SET) != 0 || std::fgetc(m_file) == EOF) {
 				damaged++; // a torn tail
 				break;
 			}
-			m_index[key] = {payload, count};
-			if ((head[6] & 1u) != 0u) m_plans.try_emplace(program, Frame {payload, count});
+			const Frame frame {payload, bytes, count};
+			m_index[key] = frame;
+			if ((head[6] & 1u) != 0u) m_plans.try_emplace(program, frame);
 			pos = end;
 		}
 		m_end = pos;
@@ -899,13 +904,16 @@ size_t ReuseDisk::Plans() const {
 }
 
 bool ReuseDisk::ReadPayload(const Frame& frame, std::vector<uint32_t>& payload) {
-	uint64_t hash = 0;
-	payload.resize(frame.words);
+	uint64_t             hash = 0;
+	std::vector<uint8_t> stored(frame.bytes);
 	if (m_file == nullptr || _fseeki64(m_file, static_cast<int64_t>(frame.offset - 8), SEEK_SET) != 0 ||
-	    std::fread(&hash, 8, 1, m_file) != 1 || std::fread(payload.data(), 4, payload.size(), m_file) != payload.size()) {
+	    std::fread(&hash, 8, 1, m_file) != 1 || std::fread(stored.data(), 1, stored.size(), m_file) != stored.size()) {
 		return false;
 	}
-	return XXH3_64bits(payload.data(), payload.size() * 4u) == hash;
+	if (XXH3_64bits(stored.data(), stored.size()) != hash) return false;
+	payload.resize(frame.words);
+	const size_t size = ZSTD_decompress(payload.data(), payload.size() * 4u, stored.data(), stored.size());
+	return !ZSTD_isError(size) && size == payload.size() * 4u;
 }
 
 bool ReuseDisk::SplitPayload(std::span<const uint32_t> payload, Payload& out) {
@@ -965,11 +973,17 @@ void ReuseDisk::Store(uint64_t key, uint64_t program, std::span<const uint32_t> 
 	o.Words(plan_words);
 	o.U32(static_cast<uint32_t>(translate_ms * 1000.0));
 	o.U32(static_cast<uint32_t>(compile_ms * 1000.0));
-	const uint64_t hash    = XXH3_64bits(payload.data(), payload.size() * 4u);
+	// zstd level 3 on the worker (outside the lock): SPIR-V and the serialized structures shrink several times.
+	std::vector<uint8_t> stored(ZSTD_compressBound(payload.size() * 4u) + 4u);
+	const size_t         bytes = ZSTD_compress(stored.data(), stored.size(), payload.data(), payload.size() * 4u, 3);
+	if (ZSTD_isError(bytes)) return;
+	stored.resize((bytes + 3u) & ~size_t {3});
+	const uint64_t hash     = XXH3_64bits(stored.data(), bytes);
 	const bool     has_plan = !plan_words.empty();
-	uint32_t       head[7] {FrameMagic, static_cast<uint32_t>(key), static_cast<uint32_t>(key >> 32u),
-	                        static_cast<uint32_t>(payload.size()), static_cast<uint32_t>(program),
-	                        static_cast<uint32_t>(program >> 32u), has_plan ? 1u : 0u};
+	uint32_t       head[8] {FrameMagic, static_cast<uint32_t>(key), static_cast<uint32_t>(key >> 32u),
+	                        static_cast<uint32_t>(bytes), static_cast<uint32_t>(program),
+	                        static_cast<uint32_t>(program >> 32u), has_plan ? 1u : 0u,
+	                        static_cast<uint32_t>(payload.size())};
 	std::lock_guard lock(m_mutex);
 	if (m_file == nullptr) return;
 	if (m_index.contains(key)) {
@@ -981,13 +995,13 @@ void ReuseDisk::Store(uint64_t key, uint64_t program, std::span<const uint32_t> 
 		head[2] = static_cast<uint32_t>(key >> 32u);
 	}
 	if (_fseeki64(m_file, static_cast<int64_t>(m_end), SEEK_SET) != 0) return;
-	const bool ok = std::fwrite(head, 4, 7, m_file) == 7 && std::fwrite(&hash, 8, 1, m_file) == 1 &&
-	                std::fwrite(payload.data(), 4, payload.size(), m_file) == payload.size();
+	const bool ok = std::fwrite(head, 4, 8, m_file) == 8 && std::fwrite(&hash, 8, 1, m_file) == 1 &&
+	                std::fwrite(stored.data(), 1, stored.size(), m_file) == stored.size();
 	if (!ok) return;
-	const Frame frame {m_end + 36, static_cast<uint32_t>(payload.size())};
+	const Frame frame {m_end + HeadBytes, static_cast<uint32_t>(bytes), static_cast<uint32_t>(payload.size())};
 	m_index[key] = frame;
 	if (has_plan) m_plans.try_emplace(program, frame);
-	m_end += 36 + uint64_t {payload.size()} * 4u;
+	m_end += HeadBytes + stored.size();
 	std::fflush(m_file); // the normal quit (std::quick_exit) closes no file
 }
 

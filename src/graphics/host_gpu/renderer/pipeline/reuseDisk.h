@@ -62,8 +62,9 @@ public:
 
 private:
 	struct Frame {
-		uint64_t offset = 0; // of the payload
-		uint32_t words  = 0;
+		uint64_t offset = 0; // of the stored (zstd-compressed) payload
+		uint32_t bytes  = 0; // stored bytes
+		uint32_t words  = 0; // payload words once decompressed
 	};
 	// The payload words of `frame` (checked), under m_mutex.
 	bool ReadPayload(const Frame& frame, std::vector<uint32_t>& payload);
