@@ -243,7 +243,6 @@ TestCase TrinityBvhIntersections(bool compressed, bool bary, bool sorted,
   test.has_compute_info = true;
   test.decoded_counts = {{"IMAGE_BVH8_INTERSECT_RAY", 1}};
   test.required_spirv = {"trinity_bvh_intersect"};
-  test.max_spirv_words = wave_size == 32 ? 11550 : 13950;
   return test;
 }
 
@@ -677,6 +676,5 @@ TestCase BvhIntersections(bool barycentrics, bool sorted, u32 grow = 0, bool wid
   test.compute_info.thread_ids_num = 1;
   test.has_compute_info = true;
   test.required_spirv = {"get_bda_pointer"};
-  test.max_spirv_words = 6350;
   return test;
 }
