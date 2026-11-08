@@ -55,6 +55,12 @@ public:
 
 	bool operator==(const Value& other) const;
 
+	// The saved resource plans (host renderer's reuseDisk.cpp): the stored type tag and an immediate's bits (only its
+	// width; registers as their index), and the value back from them.
+	[[nodiscard]] Type     RawType() const { return type; }
+	[[nodiscard]] uint64_t ImmediateBits() const;
+	[[nodiscard]] static Value FromImmediateBits(Type type, uint64_t bits) { return Value(type, bits); }
+
 private:
 	Type type = Type::Void;
 	union {

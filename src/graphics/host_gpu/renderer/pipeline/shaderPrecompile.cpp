@@ -972,6 +972,9 @@ struct ReuseStats {
 	// KYTY_PERF_SHADER_REUSE_DISK: permutations read from disk instead of translated, written to disk, the =2 checks.
 	std::atomic<uint64_t> disk_hits {0};
 	std::atomic<uint64_t> disk_plan_translations {0}; // found on disk but translated for the program's resource plan
+	std::atomic<uint64_t> disk_plan_hits {0};         // found on disk with its program's plan: nothing translated
+	std::atomic<uint64_t> disk_plan_checks {0};       // =2: a fresh plan compared with the disk's
+	std::atomic<uint64_t> disk_plan_mismatches {0};
 	std::atomic<uint64_t> disk_stores {0};
 	std::atomic<uint64_t> disk_load_failed {0};
 	std::atomic<uint64_t> disk_checks {0};
@@ -2282,14 +2285,17 @@ void ShaderPrecompiler::Worker(uint32_t index) {
 		             static_cast<unsigned long long>(g_reuse.compile_us.load() / 1000u));
 		if (m_disk != nullptr) {
 			std::fprintf(stderr,
-			             "PERF shader_reuse_disk entries=%zu hits=%llu plan_translations=%llu stores=%llu load_failed=%llu "
-			             "checks=%llu mismatches=%llu\n",
-			             m_disk->Entries(), static_cast<unsigned long long>(g_reuse.disk_hits.load()),
+			             "PERF shader_reuse_disk entries=%zu plans=%zu hits=%llu plan_hits=%llu plan_translations=%llu stores=%llu "
+			             "load_failed=%llu checks=%llu mismatches=%llu plan_checks=%llu plan_mismatches=%llu\n",
+			             m_disk->Entries(), m_disk->Plans(), static_cast<unsigned long long>(g_reuse.disk_hits.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_plan_hits.load()),
 			             static_cast<unsigned long long>(g_reuse.disk_plan_translations.load()),
 			             static_cast<unsigned long long>(g_reuse.disk_stores.load()),
 			             static_cast<unsigned long long>(g_reuse.disk_load_failed.load()),
 			             static_cast<unsigned long long>(g_reuse.disk_checks.load()),
-			             static_cast<unsigned long long>(g_reuse.disk_mismatches.load()));
+			             static_cast<unsigned long long>(g_reuse.disk_mismatches.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_plan_checks.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_plan_mismatches.load()));
 		}
 		std::fflush(stderr);
 	}
@@ -2348,10 +2354,17 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 		if (!disk_hit) g_reuse.disk_load_failed.fetch_add(1, std::memory_order_relaxed);
 	}
 	if (disk_hit && disk_mode == 1) {
-		if (keep && ReusePlanWanted(program)) {
+		// Z2: the program's resource plan from the disk too, when this permutation is to carry it.
+		std::optional<ShaderRecompiler::IR::ResourcePlan> disk_plan;
+		const bool plan_wanted = keep && ReusePlanWanted(program);
+		if (plan_wanted && m_disk->ContainsPlan(program)) {
+			disk_plan.emplace();
+			if (!m_disk->LoadPlan(program, *disk_plan)) disk_plan.reset();
+		}
+		if (plan_wanted && !disk_plan.has_value()) {
 			g_reuse.disk_plan_translations.fetch_add(1, std::memory_order_relaxed);
 		} else {
-			g_reuse.disk_hits.fetch_add(1, std::memory_order_relaxed);
+			(disk_plan.has_value() ? g_reuse.disk_plan_hits : g_reuse.disk_hits).fetch_add(1, std::memory_order_relaxed);
 			spirv_words = disk_spirv.size();
 			if (need_module) {
 				module = TryCompileSPV(disk_spirv, m_graphics.device);
@@ -2361,7 +2374,7 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 			}
 			info = disk_info;
 			if (keep) {
-				StoreReuse(record, key, program, std::nullopt, std::move(disk_spirv), info, disk_translate_ms,
+				StoreReuse(record, key, program, std::move(disk_plan), std::move(disk_spirv), info, disk_translate_ms,
 				           disk_compile_ms);
 			}
 			return true;
@@ -2454,6 +2467,10 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 			}
 		}
 		info = disk_info;
+		// The plan this translation made goes to the disk too (a frame of its own: the permutation's is there).
+		if (plan.has_value()) {
+			m_disk->Store(key, program, disk_spirv, info, &*plan, translate_ms, disk_compile_ms);
+		}
 		if (keep) {
 			StoreReuse(record, key, program, std::move(plan), std::move(disk_spirv), info, translate_ms, disk_compile_ms);
 		}
@@ -2501,9 +2518,28 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 	info = std::move(result.program).TakeCompiledInfo();
 	if (disk_mode != 0) {
 		if (!disk_hit) {
-			m_disk->Store(key, result.spirv, info, translate_ms, compile_ms);
+			m_disk->Store(key, program, result.spirv, info, plan.has_value() ? &*plan : nullptr, translate_ms, compile_ms);
 			g_reuse.disk_stores.fetch_add(1, std::memory_order_relaxed);
 		} else if (disk_mode == 2) {
+			// The plan: the fresh one against the disk's (both serialized), when both exist.
+			if (plan.has_value() && m_disk->ContainsPlan(program)) {
+				ShaderRecompiler::IR::ResourcePlan stored_plan;
+				std::vector<uint32_t>              fresh_words, stored_words;
+				const bool loaded    = m_disk->LoadPlan(program, stored_plan);
+				const bool fresh_ok  = SerializePlan(*plan, fresh_words);
+				const bool stored_ok = loaded && SerializePlan(stored_plan, stored_words);
+				g_reuse.disk_plan_checks.fetch_add(1, std::memory_order_relaxed);
+				if (!fresh_ok || !stored_ok || fresh_words != stored_words) {
+					g_reuse.disk_plan_mismatches.fetch_add(1, std::memory_order_relaxed);
+					static std::atomic_uint logged {0};
+					if (logged.fetch_add(1) < 16u) {
+						std::fprintf(stderr,
+						             "SHADER_REUSE_DISK_PLAN_MISMATCH hash=0x%016llx program=%s loaded=%d words=%zu/%zu\n",
+						             static_cast<unsigned long long>(record.shader_hash), HexKey(program).c_str(),
+						             loaded ? 1 : 0, stored_words.size(), fresh_words.size());
+					}
+				}
+			}
 			// The check: the disk's translation against this one, word for word (SPIR-V and the serialized info).
 			std::vector<uint32_t> fresh_info, stored_info;
 			SerializeCompiledInfo(info, fresh_info);

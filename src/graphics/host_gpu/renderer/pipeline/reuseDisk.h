@@ -24,6 +24,12 @@ namespace Libs::Graphics {
 // CompiledShaderInfo as words (every field; the round trip is checked against operator== in the compute tests).
 void SerializeCompiledInfo(const ShaderRecompiler::IR::CompiledShaderInfo& info, std::vector<uint32_t>& out);
 [[nodiscard]] bool DeserializeCompiledInfo(std::span<const uint32_t> words, ShaderRecompiler::IR::CompiledShaderInfo& info);
+// A program's resource plan as words (project step Z2): every retained field, its value graph (value_storage) numbered
+// in list order and rebuilt in two passes (instructions first, then their arguments; phis through AddPhiOperand), the SRT
+// tape built again (BuildSrtTape), evaluation scratch fresh. False when the plan holds what has no saved form (a value of
+// an instruction outside its storage, control_phi_predecessors): it is then not saved.
+[[nodiscard]] bool SerializePlan(const ShaderRecompiler::IR::ResourcePlan& plan, std::vector<uint32_t>& out);
+[[nodiscard]] bool DeserializePlan(std::span<const uint32_t> words, ShaderRecompiler::IR::ResourcePlan& plan);
 
 // The file: a header (magic, version, identity) and frames {magic, key, payload words, XXH3 of the payload, payload}.
 // The identity covers what makes a translation: the emulator executable itself (its bytes: two uncommitted builds have
@@ -38,12 +44,17 @@ public:
 	ReuseDisk& operator=(const ReuseDisk&) = delete;
 
 	[[nodiscard]] bool   Contains(uint64_t key) const;
+	[[nodiscard]] bool   ContainsPlan(uint64_t program) const;
 	[[nodiscard]] size_t Entries() const;
+	[[nodiscard]] size_t Plans() const;
 	// False when the frame is unreadable or damaged (the caller translates as before).
 	bool Load(uint64_t key, std::vector<uint32_t>& spirv, ShaderRecompiler::IR::CompiledShaderInfo& info,
 	          double& translate_ms, double& compile_ms);
-	// Appends a frame unless the key is already in the file.
-	void Store(uint64_t key, std::span<const uint32_t> spirv, const ShaderRecompiler::IR::CompiledShaderInfo& info,
+	// The saved plan of `program` (the frame of whichever permutation carried it); false: none or damaged.
+	bool LoadPlan(uint64_t program, ShaderRecompiler::IR::ResourcePlan& plan);
+	// Appends a frame unless the key is already in the file; `plan`: the program's plan when this permutation carries it.
+	void Store(uint64_t key, uint64_t program, std::span<const uint32_t> spirv,
+	           const ShaderRecompiler::IR::CompiledShaderInfo& info, const ShaderRecompiler::IR::ResourcePlan* plan,
 	           double translate_ms, double compile_ms);
 
 	// The identity of this executable (XXH3 of its file), computed once.
@@ -54,11 +65,20 @@ private:
 		uint64_t offset = 0; // of the payload
 		uint32_t words  = 0;
 	};
+	// The payload words of `frame` (checked), under m_mutex.
+	bool ReadPayload(const Frame& frame, std::vector<uint32_t>& payload);
+	// payload: program (2), SPIR-V, info, plan (empty: none), translate us, compile us.
+	struct Payload {
+		std::span<const uint32_t> spirv, info, plan;
+		uint32_t                  translate_us = 0, compile_us = 0;
+	};
+	static bool SplitPayload(std::span<const uint32_t> payload, Payload& out);
 	std::filesystem::path                  m_path;
 	mutable std::mutex                     m_mutex;
 	std::FILE*                             m_file = nullptr;
 	uint64_t                               m_end  = 0;
 	std::unordered_map<uint64_t, Frame>    m_index;
+	std::unordered_map<uint64_t, Frame>    m_plans; // program -> the frame carrying its plan
 };
 
 } // namespace Libs::Graphics
