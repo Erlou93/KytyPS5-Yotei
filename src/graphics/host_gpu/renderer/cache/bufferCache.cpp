@@ -280,6 +280,9 @@ void BufferCache::DiagBdaPoolsPrint() {
 
 void BufferCache::QueueFallbackMap(uint64_t vaddr, uint64_t size) {
 	if (size == 0) return;
+	if (BdaMapTimeMode() != 0 && vaddr < BdaMapTimePoolStart + BdaMapTimePoolSize && vaddr + size > BdaMapTimePoolStart) {
+		MapTimeMap(vaddr, size);
+	}
 	std::scoped_lock lock(m_fallback_pending_mutex);
 	m_fallback_pending.emplace_back(vaddr, size);
 }
@@ -308,6 +311,7 @@ void BufferCache::LoadFallbackList() {
 	m_fallback_chunks.resize(count);
 	m_fallback_chunk_failed.resize(count, 0);
 	m_fallback_wanted.resize(count, 0);
+	if (BdaMapTimeMode() != 0) return; // KYTY_FIX_BDA_MAPTIME: no granule list (the pool is imported at map time)
 	std::string title, version;
 	if (!::Loader::SystemContentParamSfoGetString("TITLE_ID", &title) || title.empty() ||
 	    !std::ranges::all_of(title, [](unsigned char c) { return std::isalnum(c) != 0; }))
@@ -394,10 +398,180 @@ Buffer* BufferCache::FallbackChunk(size_t chunk, bool want, uint64_t diag_vaddr,
 	return m_fallback_chunks[chunk].get();
 }
 
+int BufferCache::BdaMapTimeMode() {
+	static const int mode = [] {
+		const char* value = std::getenv("KYTY_FIX_BDA_MAPTIME");
+		const int   m     = value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
+		if (m != 0) std::fprintf(stderr, "FIX_BDA_MAPTIME enabled mode=%d\n", m);
+		return m;
+	}();
+	return mode;
+}
+
+// KYTY_FIX_BDA_MAPTIME: a map of the pool (game thread). Each page notes its granule; a granule's first mapped page asks
+// the worker to import it. The entries are written by ApplyFallbackMaps (QueueFallbackMap) for granules already
+// imported, and by MapTimeInstall for the rest once the worker finished them.
+void BufferCache::MapTimeMap(uint64_t vaddr, uint64_t size) {
+	const uint64_t total = LibKernel::Memory::GuestBackingSize();
+	if (LibKernel::Memory::GuestBackingBase() == 0 || total == 0) return;
+	const size_t granules = static_cast<size_t>((total + FallbackChunkBytes - 1) / FallbackChunkBytes);
+	bool         wake     = false;
+	{
+		std::scoped_lock lock(m_maptime.mutex);
+		if (m_maptime.page_granule.empty()) {
+			m_maptime.page_granule.resize(static_cast<size_t>(BdaMapTimePoolSize / CACHING_PAGESIZE), 0);
+			m_maptime.granule_pages.resize(granules, 0);
+			m_maptime.granule_vaddr.resize(granules, 0);
+			m_maptime.requested.resize(granules, 0);
+		}
+		const uint64_t end = std::min(vaddr + size, BdaMapTimePoolStart + BdaMapTimePoolSize);
+		for (uint64_t page = std::max(vaddr, BdaMapTimePoolStart) & ~(CACHING_PAGESIZE - 1); page < end;
+		     page += CACHING_PAGESIZE) {
+			uint64_t offset = 0;
+			if (!LibKernel::Memory::GuestBackingOffset(page, CACHING_PAGESIZE, &offset) || offset >= total) continue;
+			const size_t granule = static_cast<size_t>(offset / FallbackChunkBytes);
+			uint32_t&    slot    = m_maptime.page_granule[static_cast<size_t>((page - BdaMapTimePoolStart) / CACHING_PAGESIZE)];
+			if (slot != 0) {
+				if (slot - 1u == granule) continue; // mapped again over itself
+				m_maptime.granule_pages[slot - 1u]--; // a map over another granule's page (its unmap may follow)
+			}
+			slot = static_cast<uint32_t>(granule + 1u);
+			m_maptime.granule_pages[granule]++;
+			m_maptime.granule_vaddr[granule] = page - offset % FallbackChunkBytes;
+			if (m_maptime.requested[granule] == 0) {
+				m_maptime.requested[granule] = 1;
+				m_maptime.queue.push_back(granule);
+				wake = true;
+			}
+		}
+	}
+	if (wake) m_maptime.wake.notify_one();
+}
+
+// The worker: imports the asked granules (the driver's host-pointer import pins the pages; 2-30 ms each).
+void BufferCache::MapTimeWorker() {
+	KYTY_PROFILER_THREAD("BdaMapTime"); // (no priority change: the imports must be ready before the GPU reads)
+	const uint64_t base  = LibKernel::Memory::GuestBackingBase();
+	const uint64_t total = LibKernel::Memory::GuestBackingSize();
+	for (;;) {
+		size_t granule = 0;
+		{
+			std::unique_lock lock(m_maptime.mutex);
+			m_maptime.wake.wait(lock, [&] { return m_maptime.stop || !m_maptime.queue.empty(); });
+			if (m_maptime.stop) return;
+			granule = m_maptime.queue.front();
+			m_maptime.queue.pop_front();
+			if (m_maptime.granule_pages[granule] == 0) { // unmapped before its turn
+				m_maptime.requested[granule] = 0;
+				continue;
+			}
+		}
+		const uint64_t start  = static_cast<uint64_t>(granule) * FallbackChunkBytes;
+		const uint64_t bytes  = std::min(FallbackChunkBytes, total - start) & ~uint64_t {0xfff};
+		const auto     t0     = std::chrono::steady_clock::now();
+		bool           failed = bytes == 0 || !Buffer::CanImportGuestMemory(m_graphics, base + start, bytes);
+		std::unique_ptr<Buffer> import;
+		if (!failed) import = std::make_unique<Buffer>(m_graphics, m_scheduler, GuestDirectTag {&failed}, base + start, bytes);
+		const auto us = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+		std::scoped_lock lock(m_maptime.mutex);
+		m_maptime.import_us += us;
+		if (failed) {
+			m_maptime.refused++; // the pages then miss as without the fallback (counted; the fault pass may import)
+			m_maptime.requested[granule] = 0;
+			continue;
+		}
+		m_maptime.imports++;
+		m_maptime.ready.emplace_back(granule, std::move(import));
+	}
+}
+
+// GPU thread: the worker's imports become the granules' fallback chunks and their mapped pages get entries.
+void BufferCache::MapTimeInstall() {
+	if (!m_fallback_list_loaded) LoadFallbackList();
+	std::vector<std::pair<size_t, std::unique_ptr<Buffer>>> ready;
+	std::vector<uint64_t>                                   ranges;
+	{
+		std::scoped_lock lock(m_maptime.mutex);
+		if (m_maptime.ready.empty()) return;
+		ready.swap(m_maptime.ready);
+		for (auto& [granule, import]: ready) {
+			if (m_maptime.granule_pages[granule] == 0 || m_fallback_chunks[granule]) {
+				// Unmapped meanwhile (never in a table: destroyed at once), or a download imported it first.
+				if (m_maptime.granule_pages[granule] == 0) m_maptime.requested[granule] = 0;
+				m_maptime.dropped++;
+				import.reset();
+				continue;
+			}
+			ranges.push_back(m_maptime.granule_vaddr[granule]);
+		}
+	}
+	for (auto& [granule, import]: ready) {
+		if (!import) continue;
+		m_fallback_stats.chunks++;
+		m_fallback_stats.imported_bytes += import->Size();
+		m_fallback_wanted[granule] = 1;
+		m_fallback_chunks[granule] = std::move(import);
+		m_maptime.installed++;
+	}
+	// The entries of each installed granule's pages where it was mapped last (WriteFallbackRange takes every page's
+	// current backing, so a page mapped elsewhere since gets the entry of its own granule or none).
+	for (const uint64_t vaddr: ranges) {
+		WriteFallbackRange(vaddr, FallbackChunkBytes);
+	}
+}
+
+// GPU thread (ClearFallback, the unmap): the pool's pages leave their granules; a granule no page maps any more is
+// released once the GPU finished the work recorded before the unmap (its entries were cleared by then).
+void BufferCache::MapTimeUnmap(uint64_t vaddr, uint64_t size) {
+	std::vector<size_t> empty;
+	{
+		std::scoped_lock lock(m_maptime.mutex);
+		if (m_maptime.page_granule.empty()) return;
+		const uint64_t end = std::min(vaddr + size, BdaMapTimePoolStart + BdaMapTimePoolSize);
+		for (uint64_t page = std::max(vaddr, BdaMapTimePoolStart) & ~(CACHING_PAGESIZE - 1); page < end;
+		     page += CACHING_PAGESIZE) {
+			uint32_t& slot = m_maptime.page_granule[static_cast<size_t>((page - BdaMapTimePoolStart) / CACHING_PAGESIZE)];
+			if (slot == 0) continue;
+			const size_t granule = slot - 1u;
+			slot                 = 0;
+			if (--m_maptime.granule_pages[granule] == 0) empty.push_back(granule);
+		}
+	}
+	for (const size_t granule: empty) {
+		const auto release = [this, granule] {
+			{
+				std::scoped_lock lock(m_maptime.mutex);
+				if (m_maptime.granule_pages[granule] != 0) return; // mapped again: kept
+				m_maptime.requested[granule] = 0;
+			}
+			if (!m_fallback_chunks[granule]) return;
+			m_fallback_stats.chunks--;
+			m_fallback_stats.imported_bytes -= m_fallback_chunks[granule]->Size();
+			m_maptime.released++;
+			m_maptime.released_bytes += m_fallback_chunks[granule]->Size();
+			m_fallback_wanted[granule] = 0;
+			m_fallback_chunks[granule].reset();
+		};
+		if (m_scheduler.Active()) {
+			m_scheduler.DeferOperation([release] { release(); });
+		} else {
+			release();
+		}
+	}
+}
+
 void BufferCache::WantFallback(uint64_t page) {
 	page            = page & ~(CACHING_PAGESIZE - 1);
 	uint64_t offset = 0;
 	if (!LibKernel::Memory::GuestBackingOffset(page, CACHING_PAGESIZE, &offset)) return;
+	if (BdaMapTimeMode() != 0 && InBdaMapTimePool(page)) {
+		// The pool's granules are imported at map time: a read as 0 means the import was late (=2 counts it; the entries
+		// follow when the worker's import is installed).
+		NoteBdaMapTimeZero();
+		std::scoped_lock lock(m_maptime.mutex);
+		if (!m_maptime.requested.empty() && m_maptime.requested[static_cast<size_t>(offset / FallbackChunkBytes)] != 0) return;
+	}
 	if (FallbackChunk(static_cast<size_t>(offset / FallbackChunkBytes), true, page, 1) == nullptr) return;
 	// The guest range that maps the granule where `page` maps it (WriteFallbackRange checks each page's own granule;
 	// another view of the granule gets its entries when it is mapped again or faults itself).
@@ -441,6 +615,7 @@ bool BufferCache::WasFallbackPage(uint64_t address, uint32_t frames) const {
 }
 
 void BufferCache::ApplyFallbackMaps() {
+	if (BdaMapTimeMode() != 0) MapTimeInstall();
 	std::vector<std::pair<uint64_t, uint64_t>> pending;
 	{
 		std::scoped_lock lock(m_fallback_pending_mutex);
@@ -471,6 +646,21 @@ void BufferCache::ApplyFallbackMaps() {
 			             static_cast<unsigned long long>(f.imported_bytes >> 20u),
 			             static_cast<unsigned long long>(f.import_us / 1000u), static_cast<unsigned long long>(f.clear_fills),
 			             static_cast<unsigned long long>(f.clear_us / 1000u));
+			if (BdaMapTimeMode() != 0) {
+				std::scoped_lock lock(m_maptime.mutex);
+				std::fprintf(stderr,
+				             "PERF bda_maptime zero=%llu imports=%llu import_ms=%llu refused=%llu installed=%llu dropped=%llu "
+				             "released=%llu released_MiB=%llu queued=%zu live_MiB=%llu\n",
+				             static_cast<unsigned long long>(m_maptime.zero.load()),
+				             static_cast<unsigned long long>(m_maptime.imports),
+				             static_cast<unsigned long long>(m_maptime.import_us / 1000u),
+				             static_cast<unsigned long long>(m_maptime.refused),
+				             static_cast<unsigned long long>(m_maptime.installed),
+				             static_cast<unsigned long long>(m_maptime.dropped),
+				             static_cast<unsigned long long>(m_maptime.released),
+				             static_cast<unsigned long long>(m_maptime.released_bytes >> 20u), m_maptime.queue.size(),
+				             static_cast<unsigned long long>(m_fallback_stats.imported_bytes >> 20u));
+			}
 		}
 	}
 }
@@ -481,6 +671,14 @@ void BufferCache::ApplyFallbackMaps() {
 // (nothing was recorded between the per-page Fills either); checked: 0 mismatches at the gate, open world (also walking),
 // night, night RT, the Atsu house and a run from the start.
 void BufferCache::ClearFallback(uint64_t vaddr, uint64_t size) {
+	// KYTY_FIX_BDA_MAPTIME: after the entries below are cleared (the release waits for the GPU work before it).
+	struct MapTimeAfter {
+		BufferCache* cache;
+		uint64_t     vaddr, size;
+		~MapTimeAfter() {
+			if (BdaMapTimeMode() != 0) cache->MapTimeUnmap(vaddr, size);
+		}
+	} const after {this, vaddr, size};
 	if (m_fallback_pages.empty()) return;
 	const auto     t0   = std::chrono::steady_clock::now();
 	uint64_t   run_first = 0, run_count = 0;
@@ -999,6 +1197,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	    m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
 	EXIT_IF(null_id != NULL_BUFFER_ID);
 	SetVulkanObjectNameF(m_graphics.device, GetBuffer(null_id).Handle(), "Kyty.NullBuffer");
+	if (BdaMapTimeMode() != 0) m_maptime.worker = std::thread([this] { MapTimeWorker(); });
 	if (!m_graphics.CanReportMemoryUsage()) {
 		return;
 	}
@@ -1014,6 +1213,14 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (m_maptime.worker.joinable()) {
+		{
+			std::scoped_lock lock(m_maptime.mutex);
+			m_maptime.stop = true;
+		}
+		m_maptime.wake.notify_all();
+		m_maptime.worker.join();
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}

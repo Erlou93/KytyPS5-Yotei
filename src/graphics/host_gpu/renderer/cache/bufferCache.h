@@ -15,8 +15,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
+#include <thread>
 #include <functional>
 #include <map>
 #include <optional>
@@ -327,6 +330,19 @@ public:
 	static void DiagBdaPoolRead(uint64_t address, bool served);
 	// RenderContext::MapMemory / UnmapMemory: GPU-visible mapped bytes by pool (live, peak).
 	static void DiagBdaPoolMap(uint64_t vaddr, uint64_t size, bool map);
+	// KYTY_FIX_BDA_MAPTIME (AGENTS 19, notes\PROJEKT-BDA-2026-11-08.md; 0 = the granule list as before, 1 = map time, 2 = map
+	// time + check): the game's general GPU allocator (fixed 2 MiB maps at 0x80_..., prot 0xD3; 626 of 632 fallback reads
+	// of an entry into the game) is visible to the GPU from the moment it is mapped, as on the console: a worker imports
+	// the backing granules a map covers, the GPU thread only installs them and writes their entries, a granule no page maps
+	// any more is released after the GPU work before the unmap. No granule list. =2 counts the pool's pages the fault pass
+	// saw read as 0 (PERF bda_maptime zero=, must stay 0).
+	[[nodiscard]] static int BdaMapTimeMode();
+	[[nodiscard]] static bool InBdaMapTimePool(uint64_t vaddr) {
+		return vaddr >= BdaMapTimePoolStart && vaddr < BdaMapTimePoolStart + BdaMapTimePoolSize;
+	}
+	static constexpr uint64_t BdaMapTimePoolStart = 0x8000000000ull;
+	static constexpr uint64_t BdaMapTimePoolSize  = uint64_t {16} << 30u; // the allocator holds ~3.9 GiB on a base PS5
+	void NoteBdaMapTimeZero() { m_maptime.zero.fetch_add(1, std::memory_order_relaxed); }
 
 	// KYTY_TRACE_PERF: the PERF fault_wait_on_caller line (the caller wait's counters).
 	void ReportCallerWaitPerf();
@@ -699,6 +715,26 @@ private:
 	void    DiagBdaPoolsPrint();
 	void    LoadFallbackList();
 	void    WriteFallbackRange(uint64_t vaddr, uint64_t size);
+	// KYTY_FIX_BDA_MAPTIME: the pool's pages (granule + 1 per 16 KiB page, 0: not mapped), mapped pages per granule, the
+	// granules asked of the worker, the worker's queue and its finished imports.
+	void MapTimeMap(uint64_t vaddr, uint64_t size);   // RenderContext::MapMemory (game threads)
+	void MapTimeUnmap(uint64_t vaddr, uint64_t size); // GPU thread (ClearFallback)
+	void MapTimeInstall();                            // GPU thread (ApplyFallbackMaps)
+	void MapTimeWorker();
+	struct MapTimeState {
+		std::mutex                                           mutex;
+		std::condition_variable                              wake;
+		std::vector<uint32_t>                                page_granule;
+		std::vector<uint32_t>                                granule_pages;
+		std::vector<uint64_t>                                granule_vaddr; // where a page of the granule was mapped last
+		std::vector<uint8_t>                                 requested;
+		std::deque<size_t>                                   queue;
+		std::vector<std::pair<size_t, std::unique_ptr<Buffer>>> ready;
+		std::thread                                          worker;
+		bool                                                 stop = false;
+		std::atomic<uint64_t>                                zero {0};
+		uint64_t imports = 0, import_us = 0, refused = 0, installed = 0, dropped = 0, released = 0, released_bytes = 0;
+	} m_maptime;
 	std::vector<std::unique_ptr<Buffer>>              m_fallback_chunks; // imported backing per granule, null: not yet
 	std::vector<uint8_t>                              m_fallback_chunk_failed;
 	std::vector<uint8_t>                              m_fallback_wanted; // granules the GPU used (now or in the list)
