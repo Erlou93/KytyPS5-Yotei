@@ -1417,6 +1417,18 @@ struct RingAgeStats {
 	std::atomic<uint64_t> faults {0}, extra_pages {0}, b30 {0}, b60 {0}, b100 {0}, b200 {0}, bmore {0}, min_us {~0ull};
 };
 RingAgeStats g_ring_age;
+// Upper bound of a page's write age: the time of the first GPU write noted under the same tick (the write is not older).
+struct RingTickTime { uint64_t tick = 0; int64_t ns = 0; };
+std::array<RingTickTime, 4096> g_ring_tick_first {};
+struct RingAgeUpper { std::atomic<uint64_t> b30 {0}, b60 {0}, b100 {0}, bmore {0}, unknown {0}; };
+RingAgeUpper g_ring_age_upper;
+bool RingAgeDiag() {
+	static const bool on = [] {
+		const char* v = std::getenv("KYTY_DIAG_RING_ONE_FRAME_AGE");
+		return v != nullptr && v[0] == '1';
+	}();
+	return on;
+}
 uint64_t                 g_ring_frames = 0;
 } // namespace
 
@@ -1783,23 +1795,30 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 	const uint64_t back       = Common::LiveAb::Gate(Common::LiveAb::Switch::DiagCeilingRingOneFrame, one_frame_fixed) != 0u ? 1u : 2u;
 	const uint64_t prev_start = g_ring_frame_ticks[(g_ring_frames - back) % g_ring_frame_ticks.size()];
 	// KYTY_DIAG_RING_ONE_FRAME_AGE (diagnostic): see RingAgeStats.
-	static const bool age_diag = [] {
-		const char* v = std::getenv("KYTY_DIAG_RING_ONE_FRAME_AGE");
-		return v != nullptr && v[0] == '1';
-	}();
+	const bool age_diag = RingAgeDiag();
 	if (age_diag) {
 		const uint64_t lo_tick = g_ring_frame_ticks[(g_ring_frames - 2) % g_ring_frame_ticks.size()];
 		const uint64_t hi_tick = g_ring_frame_ticks[(g_ring_frames - 1) % g_ring_frame_ticks.size()];
 		bool           extra   = false;
+		uint64_t       newest  = 0;
 		m_gpu_modified_ranges.ForEachInRange(page, 4096, [&](uint64_t start, uint64_t end) {
 			const uint64_t tick = QueryWriteTick(start, end);
-			if (tick != 0 && tick >= lo_tick && tick < hi_tick) extra = true;
+			if (tick != 0 && tick >= lo_tick && tick < hi_tick) {
+				extra  = true;
+				newest = std::max(newest, tick);
+			}
 		});
 		g_ring_age.faults.fetch_add(1, std::memory_order_relaxed);
 		if (extra) {
 			const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 			const auto    age_us = static_cast<uint64_t>(std::max<int64_t>(0, now_ns - g_ring_frame_ns[(g_ring_frames - 1) % g_ring_frame_ns.size()]) / 1000);
 			g_ring_age.extra_pages.fetch_add(1, std::memory_order_relaxed);
+			if (const auto& t = g_ring_tick_first[newest % g_ring_tick_first.size()]; t.tick == newest) {
+				const auto up_us = static_cast<uint64_t>(std::max<int64_t>(0, now_ns - t.ns) / 1000);
+				(up_us < 30000 ? g_ring_age_upper.b30 : up_us < 60000 ? g_ring_age_upper.b60 : up_us < 100000 ? g_ring_age_upper.b100 : g_ring_age_upper.bmore).fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_ring_age_upper.unknown.fetch_add(1, std::memory_order_relaxed);
+			}
 			(age_us < 30000 ? g_ring_age.b30 : age_us < 60000 ? g_ring_age.b60 : age_us < 100000 ? g_ring_age.b100 : age_us < 200000 ? g_ring_age.b200 : g_ring_age.bmore).fetch_add(1, std::memory_order_relaxed);
 			uint64_t prev = g_ring_age.min_us.load(std::memory_order_relaxed);
 			while (age_us < prev && !g_ring_age.min_us.compare_exchange_weak(prev, age_us, std::memory_order_relaxed)) {
@@ -1845,6 +1864,10 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 			             static_cast<unsigned long long>(g_ring_age.b30.exchange(0)), static_cast<unsigned long long>(g_ring_age.b60.exchange(0)),
 			             static_cast<unsigned long long>(g_ring_age.b100.exchange(0)), static_cast<unsigned long long>(g_ring_age.b200.exchange(0)),
 			             static_cast<unsigned long long>(g_ring_age.bmore.exchange(0)), static_cast<double>(g_ring_age.min_us.exchange(~0ull)) / 1000.0);
+			std::fprintf(stderr, "DIAG_RING_ONE_FRAME_AGE upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]\n",
+			             static_cast<unsigned long long>(g_ring_age_upper.b30.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.b60.exchange(0)),
+			             static_cast<unsigned long long>(g_ring_age_upper.b100.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.bmore.exchange(0)),
+			             static_cast<unsigned long long>(g_ring_age_upper.unknown.exchange(0)));
 		}
 	}
 	return !live;
@@ -2987,6 +3010,11 @@ void BufferCache::NoteObtainedWrite(uint64_t vaddr, uint64_t size) {
 	std::optional<DispatchSubTimer> observer_timer(std::in_place, DispatchSub::OwObserver); // KYTY_TRACE_DISPATCH_CENSUS
 	{ // The per-range write ticks (DropDeadRingBytes, the readback queue, KYTY_TRACE_SYNC_TIMELINE).
 		NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick());
+		if (RingAgeDiag()) { // KYTY_DIAG_RING_ONE_FRAME_AGE
+			const uint64_t tick = m_scheduler.CurrentTick();
+			auto&          slot = g_ring_tick_first[tick % g_ring_tick_first.size()];
+			if (slot.tick != tick) slot = {tick, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()};
+		}
 	}
 	if (m_gpu_write_observer) m_gpu_write_observer(vaddr, size);
 	BumpHotGeneration(vaddr, size);
@@ -3497,6 +3525,11 @@ void BufferCache::NoteCommandEmitted() {
 		// KYTY_TRACE_SYNC_TIMELINE: the final tick for its per-range write ticks too.
 		if (SyncTimeline::Enabled()) {
 			NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick());
+		if (RingAgeDiag()) { // KYTY_DIAG_RING_ONE_FRAME_AGE
+			const uint64_t tick = m_scheduler.CurrentTick();
+			auto&          slot = g_ring_tick_first[tick % g_ring_tick_first.size()];
+			if (slot.tick != tick) slot = {tick, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()};
+		}
 		}
 	}
 	m_bar_pending_writes.clear();
