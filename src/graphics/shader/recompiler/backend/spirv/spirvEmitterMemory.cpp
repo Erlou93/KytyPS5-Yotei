@@ -2267,30 +2267,17 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 	// k8SInt 1.6%, k16UInt 1.0%, k16_16Float XY 1.0%, k10_10_10_2SNorm and k16_16_16_16SNorm XYZ < 0.01%; nothing else.
 	// The 78-case switch is the reference the compute test checks the cases and the table against
 	// (SetSpirvFormattedSwitchReference).
-	// Cutscene after the Snake (8.11, KYTY_DIAG_INDIRECT_FORMAT_CENSUS on CS 91451da6, 6-19 ms per call on the frame's
-	// critical path): its XY loads are k16_16UNorm in ~95% of the waves (k16_16Float the rest), its D16_X loads
-	// k16UInt - so k16_16UNorm joins the cases.
 	using F = Prospero::BufferFormat;
 	static constexpr F fast[] = {F::k16_16_16_16Float, F::k8UNorm, F::k8SInt, F::k16UInt, F::k16_16Float,
-	                             F::k10_10_10_2SNorm, F::k16_16_16_16SNorm, F::k16_16UNorm};
+	                             F::k10_10_10_2SNorm, F::k16_16_16_16SNorm};
 	const auto cases = [&]() {
 		const auto u32  = TypeU32(state);
 		auto       pick = ConstantU32(state, 0);
-		// KYTY_DIAG_FORMATTED_CASE_LIVE (measurement only): the k16_16UNorm case only while the live flag is set.
-		uint32_t live_on = 0;
-		if (SpirvLive::FormattedCaseLive() && state.fault_buffer_variable != 0u) {
-			const auto flags = Unary(state, spv::OpLoad, u32,
-			                         FaultElementPointer(state, ConstantU32(state, BufferCache::FAULT_DIAG_BASE +
-			                                                                           BufferCache::FAULT_DIAG_WORDS)));
-			live_on = Binary(state, spv::OpINotEqual, TypeBool(state),
-			                 Binary(state, spv::OpBitwiseAnd, u32, flags, ConstantU32(state, SpirvLive::FlagFormattedCase)),
-			                 ConstantU32(state, 0));
-		}
 		for (uint32_t k = 0; k < std::size(fast); ++k) {
-			auto match = Binary(state, spv::OpIEqual, TypeBool(state), buffer.format,
-			                    ConstantU32(state, static_cast<uint32_t>(fast[k])));
-			if (live_on != 0u && fast[k] == F::k16_16UNorm) match = Binary(state, spv::OpLogicalAnd, TypeBool(state), match, live_on);
-			pick = Select(state, u32, match, ConstantU32(state, k + 1u), pick);
+			pick = Select(state, u32,
+			              Binary(state, spv::OpIEqual, TypeBool(state), buffer.format,
+			                     ConstantU32(state, static_cast<uint32_t>(fast[k]))),
+			              ConstantU32(state, k + 1u), pick);
 		}
 		return EmitIndexSwitch(state, pick, static_cast<uint32_t>(std::size(fast)) + 1u, TypeU32Composite(state, channels),
 		                       [&](uint32_t item) {
@@ -2302,12 +2289,7 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 			                                                           any_memory, d16);
 		                       });
 	};
-	// KYTY_DIAG_INDIRECT_FIXED_FORMAT (measurement only, APPROXIMATION): one fixed format, no switch, no table.
-	const int  fixed  = IndirectLoadFast::DiagFixedFormat(state.program.shader_hash, channels);
-	const auto values = fixed > 0 ? LoadIndirectFormattedElement(ctx, buffer, Format::GetFormatInfo(static_cast<F>(fixed)), channels,
-	                                                             selector, memory, one, any_memory, d16)
-	                    : SpirvFormattedSwitchReference() ? format_switch()
-	                                                      : cases();
+	const auto values = SpirvFormattedSwitchReference() ? format_switch() : cases();
 	if (!d16) return values;
 	std::array<uint32_t, 4> channel_values {values};
 	for (uint32_t channel = 0; channel < channels && channels > 1u; ++channel) {

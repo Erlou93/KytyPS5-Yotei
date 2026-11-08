@@ -35,7 +35,6 @@ inline constexpr uint32_t CensusWord  = 20608;
 inline constexpr uint32_t CensusWords = 512;
 [[nodiscard]] bool CensusEnabled();
 [[nodiscard]] bool CensusFor(uint64_t shader_hash); // KYTY_DIAG_INDIRECT_FORMAT_CENSUS_HASHES (default all)
-[[nodiscard]] int  DiagFixedFormat(uint64_t shader_hash, uint32_t channels); // KYTY_DIAG_INDIRECT_FIXED_FORMAT, -1 = off
 
 } // namespace IndirectLoadFast
 
@@ -48,11 +47,6 @@ namespace SpirvLive {
 
 inline constexpr uint32_t LiveWordsBytes      = 256;
 inline constexpr uint32_t FlagIndirectLoadFast = 1u << 0u;
-inline constexpr uint32_t FlagFormattedCase    = 1u << 1u; // KYTY_DIAG_FORMATTED_CASE_LIVE
-
-// KYTY_DIAG_FORMATTED_CASE_LIVE=1 (measurement only): the k16_16UNorm case of GPU-selected formatted loads is taken
-// only while FlagFormattedCase is set (KYTY_LIVE_AB=KYTY_DIAG_FORMATTED_CASE_LIVE toggles it), else the table.
-[[nodiscard]] bool FormattedCaseLive();
 
 // Whether any switch is in its live mode (the fault buffer then has the flags word and Update writes it).
 [[nodiscard]] bool Enabled();

@@ -48,9 +48,6 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
-    // Measurement only: whether GPU-selected formatted loads of format k16_16UNorm take their own case (1) or the
-    // 78-entry table (0); both paths are compiled in and give the same values (spirvEmitterMemory.cpp).
-    {Switch::DiagFormattedCaseLive, "KYTY_DIAG_FORMATTED_CASE_LIVE", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
