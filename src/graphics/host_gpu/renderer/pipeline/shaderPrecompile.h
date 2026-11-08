@@ -388,7 +388,7 @@ private:
 	std::filesystem::path  m_suspects_path;
 	std::atomic<uint32_t>& m_created;
 	PrecompileWarmList*    m_warm = nullptr;
-	// KYTY_PERF_SHADER_REUSE_DISK (reuseDisk.h): the reuse store's translations on disk (null: off).
+	// The shader reuse disk (reuseDisk.h): the reuse store's translations on disk (null: the store is off).
 	std::unique_ptr<ReuseDisk> m_disk;
 
 	mutable std::mutex                     m_mutex;

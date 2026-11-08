@@ -19,10 +19,10 @@ namespace IR = ShaderRecompiler::IR;
 
 int ShaderReuseDiskMode() {
 	static const int mode = [] {
-		const char* value = std::getenv("KYTY_PERF_SHADER_REUSE_DISK");
-		const int   m     = value != nullptr ? std::atoi(value) : 0;
-		if (m != 0) std::fprintf(stderr, "PERF_SHADER_REUSE_DISK mode=%d\n", m);
-		return m;
+		const char* value = std::getenv("KYTY_DIAG_SHADER_REUSE_DISK_CHECK");
+		const bool  check = value != nullptr && value[0] == '1';
+		if (check) std::fprintf(stderr, "DIAG_SHADER_REUSE_DISK_CHECK on (every disk entry translated again and compared)\n");
+		return check ? 2 : 1;
 	}();
 	return mode;
 }

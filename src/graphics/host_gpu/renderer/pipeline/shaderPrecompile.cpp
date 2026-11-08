@@ -969,7 +969,7 @@ struct ReuseStats {
 	std::atomic<uint64_t> plan_us {0};      // ExtractResourcePlan
 	std::atomic<uint64_t> plans {0};
 	std::atomic<uint64_t> compile_us {0};   // CompileProgram (SPIR-V emission)
-	// KYTY_PERF_SHADER_REUSE_DISK: permutations read from disk instead of translated, written to disk, the =2 checks.
+	// The shader reuse disk (reuseDisk.h): permutations read from disk instead of translated, written to disk, the =2 checks.
 	std::atomic<uint64_t> disk_hits {0};
 	std::atomic<uint64_t> disk_plan_translations {0}; // found on disk but translated for the program's resource plan
 	std::atomic<uint64_t> disk_plan_hits {0};         // found on disk with its program's plan: nothing translated
@@ -2338,7 +2338,7 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 	// Wanted but for the budget: not kept (counted, full_start).
 	const bool     over_budget     = reuse && !keep && ReuseWanted(key, true);
 	const uint64_t program         = keep ? ProgramKey(RecordIdentity(record)) : 0u;
-	// KYTY_PERF_SHADER_REUSE_DISK: the permutation's translation from an earlier start. =1: used instead of
+	// The shader reuse disk: the permutation's translation from an earlier start, used instead of
 	// translating, unless the program's resource plan is still wanted (that needs the translation; project step Z2).
 	// A disk entry whose SPIR-V is not the one the GPU thread recorded for this build is not trusted.
 	const int                                disk_mode = m_disk != nullptr ? ShaderReuseDiskMode() : 0;
@@ -2452,7 +2452,7 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 		g_reuse.plans.fetch_add(1, std::memory_order_relaxed);
 	}
 	const double translate_ms  = MillisecondsSince(translate_begin);
-	// KYTY_PERF_SHADER_REUSE_DISK=1 with the permutation on disk: translated only for its program's resource plan; the
+	// The permutation on disk: translated only for its program's resource plan; the
 	// SPIR-V and info come from the disk (no CompileProgram).
 	if (disk_hit && disk_mode == 1) {
 		g_reuse.jobs.fetch_add(1, std::memory_order_relaxed);

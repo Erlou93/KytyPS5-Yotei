@@ -13,12 +13,13 @@
 
 namespace Libs::Graphics {
 
-// KYTY_PERF_SHADER_REUSE_DISK (test switch of the "zapis tłumaczeń" project, AGENTS 18; 0 = off, 1 = on, 2 = check):
-// the background precompiler's translations (the shader reuse store: SPIR-V and program info of each recorded
-// permutation) are kept in _PipelineCache/<title>.reuse, so a later start reads them instead of translating and
-// compiling the same permutations again (31-38 s on 8 threads every start before). =2: every permutation found on
-// disk is also translated and compiled as before; the fresh result is used and compared word for word with the disk's
-// (PERF shader_reuse_disk checks= mismatches=; must stay 0).
+// The "zapis tłumaczeń" project (AGENTS 18): the background precompiler's translations (the shader reuse store: SPIR-V,
+// program info and each program's resource plan) are kept in _PipelineCache/<title>.reuse (zstd frames), so a later start
+// reads them instead of translating and compiling the same permutations again (8.11: start 33-35 s on 8 threads -> 3-4 s;
+// file ~416 MB; 9,760 permutations and 8,908 plans compared word for word, 0 differences). Returns 1, or 2 with
+// KYTY_DIAG_SHADER_REUSE_DISK_CHECK=1 (diagnostic): every permutation found on disk is also translated and compiled as
+// before, the fresh result is used and compared word for word (PERF shader_reuse_disk mismatches= plan_mismatches=;
+// must stay 0).
 [[nodiscard]] int ShaderReuseDiskMode();
 
 // CompiledShaderInfo as words (every field; the round trip is checked against operator== in the compute tests).
