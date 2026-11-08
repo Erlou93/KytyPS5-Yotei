@@ -35,6 +35,7 @@ enum class Switch : uint32_t {
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
 	DiagCeilingRingOneFrame,   // KYTY_DIAG_CEILING_RING_ONE_FRAME (measurement only, APPROXIMATION)
+	RingFrameRule,             // KYTY_PERF_RING_FRAME_RULE
 	Count
 };
 

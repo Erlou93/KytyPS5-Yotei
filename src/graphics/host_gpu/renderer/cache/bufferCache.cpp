@@ -1456,16 +1456,24 @@ void RingExecDataFrame(uint64_t frame) {
 
 // KYTY_PERF_RING_FRAME_RULE=1 (test switch): ring bytes are dead by the game frame of the work that wrote them (frame
 // <= W-2, W: the frame whose ring half the game writes now) instead of by execution-thread SuspendPoint ticks.
-bool RingFrameRule() {
-	static const bool on = [] {
+uint32_t RingFrameRuleFixed() {
+	static const uint32_t on = [] {
 		const char* v = std::getenv("KYTY_PERF_RING_FRAME_RULE");
-		return v != nullptr && v[0] == '1';
+		return v != nullptr && v[0] == '1' ? 1u : 0u;
 	}();
 	return on;
 }
 
+bool RingFrameRule() {
+	return Common::LiveAb::Gate(Common::LiveAb::Switch::RingFrameRule, RingFrameRuleFixed()) != 0u;
+}
+
 bool RingFrameArmWanted() {
-	return RingAgeDiag() || RingFrameRule();
+	static const bool listed = [] { // live A/B: the tags are kept in both phases
+		const char* v = std::getenv("KYTY_LIVE_AB");
+		return v != nullptr && std::strstr(v, "KYTY_PERF_RING_FRAME_RULE") != nullptr;
+	}();
+	return RingAgeDiag() || RingFrameRuleFixed() != 0u || listed;
 }
 
 void RingFrameArm(int kind) {
