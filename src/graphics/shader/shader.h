@@ -210,9 +210,6 @@ struct ShaderVertexInputInfo {
 
 inline constexpr uint8_t ComputeVariantPairOff     = 2u;
 inline constexpr uint8_t ComputeVariantPairSpin    = 4u; // KYTY_DIAG_TWIN_DISPATCH: spin exchanges
-// KYTY_PERF_READONLY_NONCOHERENT (renderCompute.cpp): the module whose non-GLC reads of the buffers the shader never
-// writes are not Coherent (spirvEmitterModule.cpp, PlanReadonlyPlain); also KYTY_DIAG_TWIN_DISPATCH=<hash>:<n>:8.
-inline constexpr uint8_t ComputeVariantReadonlyPlain = 8u;
 
 struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 	bool               async_compute              = false;

@@ -38,31 +38,6 @@ inline constexpr uint32_t CensusWords = 512;
 
 } // namespace IndirectLoadFast
 
-// KYTY_PERF_WIDE_BUFFER_LOAD (test switch, default 0 = today; 1 on, 2 check, 3 live) with
-// KYTY_PERF_WIDE_BUFFER_LOAD_HASHES=<hex,...>|all (default: c2a548aaae05d492, the skinning and cloth compute shader of
-// the characters, 3.2 ms of GPU time per frame in the town walk at 23.6 dispatches of one 1024-thread workgroup): a raw
-// BUFFER_LOAD_DWORDX4 of a direct buffer in a compute shader is today four dword reads, each with its own address, wrap
-// and bounds selects (~17 SPIR-V instructions per dword; Volatile for GLC, so the driver keeps four separate reads).
-// With the switch it reads its 16 bytes as one uvec4 element of a buffers_u128 alias of the same binding when its first
-// dword's byte address is a multiple of 16 and all four dwords are in the binding; any other X4 load takes the four
-// dword reads as before (spirvEmitterMemory.cpp, LoadBufferWide). The skinning loops of c2a548aa read the bone
-// matrices this way: 12 X4 loads per four influences, 48 -> 12 reads per lane.
-// =2 reads both ways and returns today's values, counting in fault-buffer diag words DiagWord + 0/1/2 the X4 loads that
-// would take the wide read and those whose element indices / values differ from today's (PERF wide_buffer_load verify;
-// indices must stay 0; values can differ only where another invocation wrote the bytes between the two reads).
-// =3 compiles both paths and takes the wide one while bit 1 of the live shader flags is set (SpirvLive below): by
-// default always; KYTY_LIVE_AB=KYTY_PERF_WIDE_BUFFER_LOAD toggles it per phase. =2 and =3 need the fault buffer in the
-// shader (every shader that loads through BDA has it, c2a548aa does); without it a listed shader keeps today's reads.
-namespace WideBufferLoad {
-
-// After IndirectLoadFast's words (checked in faultManager.cpp).
-inline constexpr uint32_t DiagWord = IndirectLoadFast::DiagWord + 8u;
-
-[[nodiscard]] int  Mode();
-[[nodiscard]] bool Listed(uint64_t shader_hash);
-
-} // namespace WideBufferLoad
-
 // Live shader flags: one word of the fault buffer, after the diagnostic tail (BufferCache::FAULT_DIAG_BASE +
 // FAULT_DIAG_WORDS; the fault buffer has LiveWordsBytes more for it), which shaders compiled with a switch's live mode
 // read before taking the switch's path. The GPU thread rewrites it at frame boundaries when a live A/B phase changes
@@ -72,7 +47,6 @@ namespace SpirvLive {
 
 inline constexpr uint32_t LiveWordsBytes      = 256;
 inline constexpr uint32_t FlagIndirectLoadFast = 1u << 0u;
-inline constexpr uint32_t FlagWideBufferLoad   = 1u << 1u;
 
 // Whether any switch is in its live mode (the fault buffer then has the flags word and Update writes it).
 [[nodiscard]] bool Enabled();

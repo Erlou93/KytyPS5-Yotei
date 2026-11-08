@@ -11,7 +11,6 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/envRead.h"
-#include "common/liveAb.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
 #include "common/profiler.h"
@@ -46,11 +45,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
-#include <cstdio>
-#include <cstdlib>
 #include <span>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -293,165 +288,6 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 }
 
 // Names the game pass (debug marker) of a skipped compute dispatch, once per marker.
-// KYTY_PERF_READONLY_NONCOHERENT (test switch, default 0 = today; 1 on, 2 check) with
-// KYTY_PERF_READONLY_NONCOHERENT_HASHES=<hex,...>|all (default c2a548aaae05d492, the character skinning compute shader): a
-// compute shader with a GLC access that writes buffers has every buffer alias Coherent (spirvEmitterModule.cpp), so on
-// NVIDIA every read of it bypasses L1, also the reads of the bindings it never writes. With the switch a listed dispatch
-// binds the variant program (ComputeVariantReadonlyPlain: the same resources, descriptors and push data) whose non-GLC
-// reads of the never-written bindings are plain, while every never-written binding's guest range is disjoint from every
-// written binding's range and the program writes nothing else (no address or record-keyed write, no written image);
-// otherwise today's program. Exact: no invocation of the dispatch writes the bytes those reads see; the work before it
-// is visible to plain reads after the guest's barriers (RecordGlobalBarrier, a full MemoryWrite -> MemoryRead|MemoryWrite
-// dependency); work running at the same time without a guest barrier is a race whose outcome a non-GLC read on the PS5
-// does not fix either (its GL0/GL1 lines are not coherent). GLC reads keep Coherent and Volatile (KYTY_DIAG_READONLY_GLC_PLAIN
-// measures the further step). =2 binds today's program and counts what =1 would do (PERF readonly_noncoherent); the
-// variant is checked on the GPU with KYTY_DIAG_TWIN_DISPATCH=<hash>:<n>:8. Live: KYTY_LIVE_AB=KYTY_PERF_READONLY_NONCOHERENT
-// (per dispatch). A variant compiles on the GPU thread at its first use (one hitch per variant of a giant).
-namespace ReadonlyNoncoherent {
-
-int Mode() {
-	static const int mode = [] {
-		const char* value = std::getenv("KYTY_PERF_READONLY_NONCOHERENT");
-		const int   m     = value != nullptr ? std::atoi(value) : 0;
-		const int   valid = m == 1 || m == 2 ? m : 0;
-		if (valid != 0) std::fprintf(stderr, "PERF_READONLY_NONCOHERENT mode=%d\n", valid);
-		return valid;
-	}();
-	return mode;
-}
-
-bool Listed(uint64_t shader_hash) {
-	static const std::string list = [] {
-		const char* value = std::getenv("KYTY_PERF_READONLY_NONCOHERENT_HASHES");
-		return value != nullptr ? std::string(value) : std::string("c2a548aaae05d492");
-	}();
-	if (list == "all") return true;
-	char text[17];
-	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(shader_hash));
-	return list.find(text) != std::string::npos;
-}
-
-// A dispatch of this shader may bind the variant at some time of the run (=1, or listed for a live A/B).
-bool Wanted(uint64_t shader_hash) {
-	static const bool possible = Mode() == 1 || Common::LiveAb::Listed(Common::LiveAb::Switch::ReadonlyNoncoherent);
-	return possible && Listed(shader_hash);
-}
-
-struct Variant {
-	ShaderProgram          program;
-	ShaderComputeInputInfo info {};
-	bool                   usable = false; // the same resources and binding layout as the base program
-};
-
-// The variant of the base program a dispatch has just looked up, made once per base program (GPU thread; program modules
-// live as long as the program cache). Null when it cannot run with the base program's bindings.
-const Variant* LookUp(RenderContext& context, const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
-                      const ShaderProgram& base, const ShaderComputeInputInfo& base_info) {
-	static std::unordered_map<uint64_t, Variant> variants;
-	if (const auto found = variants.find(base.id); found != variants.end()) {
-		return found->second.usable ? &found->second : nullptr;
-	}
-	Variant variant;
-	variant.info.async_compute              = base_info.async_compute;
-	variant.info.dispatch_thread_dimensions = base_info.dispatch_thread_dimensions;
-	std::ranges::copy(base_info.workgroup_counts, variant.info.workgroup_counts);
-	variant.program = context.GetPipelineCache().GetComputeProgramTwin(regs, sh, variant.info, ComputeVariantReadonlyPlain);
-	const auto* a = base_info.stage.program;
-	const auto* b = variant.info.stage.program;
-	variant.usable = static_cast<bool>(variant.program) && a != nullptr && b != nullptr &&
-	                 a->shader_hash == b->shader_hash && a->bindings.descriptor_mask == b->bindings.descriptor_mask &&
-	                 a->bindings.descriptor_counts == b->bindings.descriptor_counts &&
-	                 a->bindings.push_data_start_dword == b->bindings.push_data_start_dword &&
-	                 a->bindings.dispatch_thread_dword == b->bindings.dispatch_thread_dword &&
-	                 a->bindings.memory_offset_dword == b->bindings.memory_offset_dword &&
-	                 a->bindings.memory_stride_dword == b->bindings.memory_stride_dword &&
-	                 a->info.buffers == b->info.buffers && a->info.images == b->info.images &&
-	                 a->info.samplers == b->info.samplers;
-	// The pipeline creation reads only the program; this lookup's snapshot is not kept (as TableCompileJob's no_resources).
-	static const ShaderRecompiler::IR::ResourceSnapshot no_resources;
-	variant.info.stage.resources     = &no_resources;
-	variant.info.stage.stagef_record = nullptr;
-	std::fprintf(stderr, "READONLY_NONCOHERENT variant shader=%016llx base=%llu variant=%llu usable=%d\n",
-	             static_cast<unsigned long long>(a != nullptr ? a->shader_hash : 0u), static_cast<unsigned long long>(base.id),
-	             static_cast<unsigned long long>(variant.program.id), variant.usable ? 1 : 0);
-	const auto [iter, inserted] = variants.emplace(base.id, std::move(variant));
-	EXIT_IF(!inserted);
-	return iter->second.usable ? &iter->second : nullptr;
-}
-
-// True when the program writes some buffer binding and reads another, and every never-written binding's guest range
-// (PreparedBindings::buffer_sources, by descriptor index) is disjoint from every written binding's range.
-bool ReadOnlyDisjoint(const ShaderRecompiler::IR::CompiledShaderInfo& program, const PreparedBindings& bindings) {
-	constexpr uint32_t    max = ShaderRecompiler::IR::ShaderInfo::MaxBuffers;
-	std::array<bool, max> written {};
-	for (const auto& buffer: program.info.buffers) {
-		if (buffer.written && buffer.descriptor_index < max) written[buffer.descriptor_index] = true;
-	}
-	const auto& sources     = bindings.buffer_sources;
-	const auto  count       = std::min<size_t>(sources.size(), max);
-	bool        any_written = false;
-	bool        any_read    = false;
-	for (size_t w = 0; w < count; w++) {
-		if (!written[w] || sources[w].address == 0 || sources[w].size == 0) continue;
-		any_written      = true;
-		const auto w_end = sources[w].address + sources[w].size;
-		for (size_t r = 0; r < count; r++) {
-			if (written[r] || sources[r].address == 0 || sources[r].size == 0) continue;
-			any_read = true;
-			if (sources[r].address < w_end && sources[w].address < sources[r].address + sources[r].size) {
-				static uint32_t logged = 0;
-				if (logged++ < 8u) {
-					std::fprintf(stderr, "READONLY_NONCOHERENT overlap shader=%016llx read=%zu written=%zu\n",
-					             static_cast<unsigned long long>(program.shader_hash), r, w);
-				}
-				return false;
-			}
-		}
-	}
-	return any_written && any_read;
-}
-
-// The pipeline a listed dispatch binds: the variant's while =1 (or its live phase) allows it and the ranges are disjoint.
-const PipelineCache::Pipeline& Choose(RenderContext& context, const Variant* variant,
-                                      const ShaderRecompiler::IR::CompiledShaderInfo& program,
-                                      const ShaderRecompiler::IR::ResourceSnapshot& resources,
-                                      const PreparedBindings& bindings, const PipelineCache::Pipeline& base) {
-	if (!Listed(program.shader_hash)) return base;
-	static uint64_t dispatches = 0, disjoint = 0, used = 0;
-	dispatches++;
-	const bool other_writes = program.has_address_writes ||
-	                          std::ranges::any_of(resources.indirect_ranges, [](const auto& range) { return range.written; }) ||
-	                          std::ranges::any_of(program.info.images, [](const auto& image) { return image.written; });
-	const bool allowed = !other_writes && ReadOnlyDisjoint(program, bindings);
-	disjoint += allowed ? 1u : 0u;
-	const PipelineCache::Pipeline* chosen = &base;
-	if (allowed && variant != nullptr &&
-	    Common::LiveAb::Gate(Common::LiveAb::Switch::ReadonlyNoncoherent, Mode() == 1 ? 1u : 0u) != 0u) {
-		const auto& pipeline = context.GetPipelineCache().GetComputePipeline(variant->info, variant->program);
-		if (pipeline.uses_bindless == base.uses_bindless && pipeline.uses_push_descriptors == base.uses_push_descriptors) {
-			chosen = &pipeline;
-			used++;
-		}
-	}
-	if ((dispatches % 256u) == 0u) {
-		std::fprintf(stderr, "PERF readonly_noncoherent mode=%d dispatches=%llu disjoint=%llu variant=%llu\n", Mode(),
-		             static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(disjoint),
-		             static_cast<unsigned long long>(used));
-	}
-	return *chosen;
-}
-
-} // namespace ReadonlyNoncoherent
-
-// Test only (KYTY_PERF_WIDE_BUFFER_LOAD / KYTY_PERF_READONLY_NONCOHERENT live A/B): the live phase in the GPU timing key
-// (GPUTIME_TOP b bits 4.. = 1 wide loads, 2 read-only non-coherent), so one run times each phase's dispatches apart.
-static uint64_t LivePhaseKey() {
-	if (!Common::LiveAb::Enabled()) return 0;
-	const uint64_t wide = Common::LiveAb::Gate(Common::LiveAb::Switch::WideBufferLoad, 0u) != 0u ? 1u : 0u;
-	const uint64_t ro   = Common::LiveAb::Gate(Common::LiveAb::Switch::ReadonlyNoncoherent, 0u) != 0u ? 2u : 0u;
-	return (wide | ro) << 4u;
-}
-
 static void LogSkippedDispatch(const char* kind) {
 	static std::mutex               mutex;
 	static std::vector<std::string> seen;
@@ -591,11 +427,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		std::ranges::copy(input_info.workgroup_counts, twin_info.workgroup_counts);
 		twin = TwinDispatch::LookUp(m_context, cs_regs, sh_regs, input_info.stage.program->shader_hash, twin_info);
 	}
-	// KYTY_PERF_READONLY_NONCOHERENT: the variant program of a listed shader, before anything of the dispatch is recorded.
-	const ReadonlyNoncoherent::Variant* readonly_variant =
-	    ReadonlyNoncoherent::Wanted(input_info.stage.program->shader_hash)
-	        ? ReadonlyNoncoherent::LookUp(m_context, cs_regs, sh_regs, compute_program, input_info)
-	        : nullptr;
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
@@ -670,11 +501,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	sub_timer.emplace(DispatchSub::RebindBuffers);
 	RebindBuffers(bindings);
 	sub_timer.reset();
-	// KYTY_PERF_READONLY_NONCOHERENT: the variant's pipeline while its never-written bindings are disjoint from the written.
-	const PipelineCache::Pipeline* run_pipeline = &pipeline;
-	if (ReadonlyNoncoherent::Mode() != 0 || readonly_variant != nullptr) {
-		run_pipeline = &ReadonlyNoncoherent::Choose(m_context, readonly_variant, program, resources, bindings, pipeline);
-	}
 	census_timer.Mark(5);
 
 	auto              vk_buffer        = buffer.Handle();
@@ -928,7 +754,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		                        command.dispatch(x, y, z);
 	                        });
 	sub_timer.emplace(DispatchSub::Record);
-	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, run_pipeline->pipeline); // KYTY_PERF_READONLY_NONCOHERENT
+	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	GpuCheckpoints::Mark(vk_buffer, program.shader_hash);
 	if (BarrierEveryCmdEnabled()) FullMemoryBarrier(vk_buffer);
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelBegin(vk_buffer, 'c', program.shader_hash, 0);
@@ -966,7 +792,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}();
 		const uint64_t b = program.shader_hash == watch_hash
 		                       ? (uint64_t {thread_group_x} * thread_group_y * thread_group_z) << 4u | 2u
-		                       : LivePhaseKey();
+		                       : 0u;
 		GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, b);
 	}
 	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
@@ -1046,12 +872,6 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		twin = TwinDispatch::LookUp(m_context, cs_regs, buffer.GetRegisters().GetShaderRegisters(),
 		                            input_info.stage.program->shader_hash, twin_info);
 	}
-	// KYTY_PERF_READONLY_NONCOHERENT: the variant program of a listed shader, before anything of the dispatch is recorded.
-	const ReadonlyNoncoherent::Variant* readonly_variant =
-	    ReadonlyNoncoherent::Wanted(input_info.stage.program->shader_hash)
-	        ? ReadonlyNoncoherent::LookUp(m_context, cs_regs, buffer.GetRegisters().GetShaderRegisters(), compute_program,
-	                                      input_info)
-	        : nullptr;
 	if (ComputeTrace::ProxyPhaseOn()) ComputeTrace::ProxyPhaseNote(input_info.stage.program->shader_hash, input_info.stage.resources);
 	census_timer.Mark(2);
 	// KYTY_TRACE_REF_CAPTURE: claimed and its guest memory read before anything of the dispatch is recorded (see
@@ -1080,12 +900,6 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
-	// KYTY_PERF_READONLY_NONCOHERENT: the variant's pipeline while its never-written bindings are disjoint from the written.
-	const PipelineCache::Pipeline* run_pipeline = &pipeline;
-	if (ReadonlyNoncoherent::Mode() != 0 || readonly_variant != nullptr) {
-		run_pipeline = &ReadonlyNoncoherent::Choose(m_context, readonly_variant, program, *input_info.stage.resources,
-		                                              bindings, pipeline);
-	}
 	census_timer.Mark(5);
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
@@ -1127,7 +941,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                        [command = vk_buffer, args = args_buffer->Handle(), offset = args_offset] {
 		                        command.dispatchIndirect(args, offset);
 	                        });
-	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, run_pipeline->pipeline); // KYTY_PERF_READONLY_NONCOHERENT
+	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	GpuCheckpoints::Mark(vk_buffer, input_info.stage.program->shader_hash);
 	if (BarrierEveryCmdEnabled()) FullMemoryBarrier(vk_buffer);
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelBegin(vk_buffer, 'c', program.shader_hash, 1);
@@ -1135,7 +949,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelEnd(vk_buffer);
-	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1u | LivePhaseKey());
+	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1);
 	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
 	m_context.GetBufferCache().NoteCommandEmitted();
 	GpuCheckpoints::Mark(vk_buffer, ~input_info.stage.program->shader_hash);

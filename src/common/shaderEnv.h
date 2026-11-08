@@ -44,8 +44,6 @@ inline constexpr const char* Names[] = {
     "KYTY_DIAG_NULL_FORMATTED_STICKY",
     "KYTY_DIAG_PROBE",
     "KYTY_DIAG_PROBE_NTH",
-    // The KYTY_PERF_READONLY_NONCOHERENT variant module: GLC reads of never-written buffers plain too (APPROXIMATION).
-    "KYTY_DIAG_READONLY_GLC_PLAIN",
     "KYTY_DIAG_RT_TRIPS",
     // pipelineCache.cpp: the listed shader's SPIR-V is replaced from a file.
     "KYTY_DIAG_SPIRV_REPLACE",
@@ -62,9 +60,6 @@ inline constexpr const char* Names[] = {
     "KYTY_PERF_BINDLESS_CLASSES",
     "KYTY_PERF_F16_CVT_PLAIN",
     "KYTY_PERF_SPIRV_STORE_OUTLINE",
-    // indirectLoadFast.cpp (WideBufferLoad), read by the SPIR-V emitter: raw X4 loads of direct buffers as one uvec4 read.
-    "KYTY_PERF_WIDE_BUFFER_LOAD",
-    "KYTY_PERF_WIDE_BUFFER_LOAD_HASHES",
     // pipelineCache.cpp: the driver cache's signature (the warm list file is dropped with it).
     "KYTY_PIPELINE_CACHE_ANY_REVISION",
     "KYTY_RECORD_KEYED_VERIFY",

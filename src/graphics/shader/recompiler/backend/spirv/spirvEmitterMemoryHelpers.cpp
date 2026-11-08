@@ -348,33 +348,6 @@ MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
 	return access;
 }
 
-namespace {
-// KYTY_DIAG_READONLY_GLC_PLAIN=1 (measurement only, APPROXIMATION): in the KYTY_PERF_READONLY_NONCOHERENT variant module the
-// GLC reads of never-written buffers are plain too (no Coherent, no Volatile). Not exact: a GLC read is how RDNA2 code
-// sees another dispatch's stores without a cache flush; a loop that polls one would be served from L1 or hoisted and end
-// only at the loop cap, with old data. The ceiling of that further step.
-bool ReadonlyGlcPlainDiag() {
-	static const bool on = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_DIAG_READONLY_GLC_PLAIN");
-		const bool  v     = value != nullptr && value[0] == '1';
-		if (v) std::fprintf(stderr, "DIAG_READONLY_GLC_PLAIN APPROXIMATION enabled\n");
-		return v;
-	}();
-	return on;
-}
-} // namespace
-
-bool ReadonlyPlainAccess(const EmitterState& state, const IR::MemoryInfo& mem) {
-	if (!state.readonly_plain_active ||
-	    (mem.kind != IR::ResourceKind::Buffer && mem.kind != IR::ResourceKind::ScalarBuffer) ||
-	    mem.resource >= state.program.info.buffers.size()) {
-		return false;
-	}
-	const auto index = state.program.info.buffers[mem.resource].descriptor_index;
-	if (index >= state.readonly_plain.size() || !state.readonly_plain[index]) return false;
-	return !mem.coherent || ReadonlyGlcPlainDiag();
-}
-
 MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem) {
 	MemoryResourceAccess access {.kind = mem.kind};
 	switch (mem.kind) {
@@ -417,11 +390,7 @@ MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::
 			} else if (mem.coherent && state.coherent_buffers_alias.variable != 0) {
 				buffer = &state.coherent_buffers_alias; // only GLC accesses
 			}
-			// KYTY_PERF_READONLY_NONCOHERENT: a read of a never-written binding through the plain alias of its element size.
-			const bool plain = bits <= 32u && ReadonlyPlainAccess(state, mem);
-			if (plain) buffer = &state.plain_buffers[bits == 8u ? 0u : bits == 16u ? 1u : 2u];
 			access = PrepareStorageBufferResourceAccess(state, mem, *buffer);
-			if (plain) access.memory_access = spv::MemoryAccessMaskNone; // (GLC only under KYTY_DIAG_READONLY_GLC_PLAIN)
 			access.element_bits = bits;
 			return access;
 		}

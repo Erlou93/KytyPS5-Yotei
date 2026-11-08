@@ -1,7 +1,6 @@
 #include "graphics/host_gpu/renderer/indirectLoadFast.h"
 
 #include "common/liveAb.h"
-#include "common/shaderEnv.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
@@ -63,36 +62,10 @@ bool Listed(uint64_t shader_hash) {
 
 } // namespace IndirectLoadFast
 
-namespace WideBufferLoad {
-
-int Mode() {
-	static const int mode = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_PERF_WIDE_BUFFER_LOAD");
-		const int   m     = value != nullptr ? std::atoi(value) : 0; // test switch: default today's reads
-		const int   valid = m >= 0 && m <= 3 ? m : 0;
-		if (valid != 0) std::fprintf(stderr, "PERF_WIDE_BUFFER_LOAD mode=%d\n", valid);
-		return valid;
-	}();
-	return mode;
-}
-
-bool Listed(uint64_t shader_hash) {
-	static const std::string list = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_PERF_WIDE_BUFFER_LOAD_HASHES");
-		return value != nullptr ? std::string(value) : std::string("c2a548aaae05d492");
-	}();
-	if (list == "all") return true;
-	char text[17];
-	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(shader_hash));
-	return list.find(text) != std::string::npos;
-}
-
-} // namespace WideBufferLoad
-
 namespace SpirvLive {
 
 bool Enabled() {
-	static const bool on = IndirectLoadFast::Mode() == 3 || WideBufferLoad::Mode() == 3;
+	static const bool on = IndirectLoadFast::Mode() == 3;
 	return on;
 }
 
@@ -100,9 +73,6 @@ uint32_t Flags() {
 	uint32_t flags = 0;
 	if (IndirectLoadFast::Mode() == 3 && Common::LiveAb::Gate(Common::LiveAb::Switch::IndirectLoadFast, 1u) != 0u) {
 		flags |= FlagIndirectLoadFast;
-	}
-	if (WideBufferLoad::Mode() == 3 && Common::LiveAb::Gate(Common::LiveAb::Switch::WideBufferLoad, 1u) != 0u) {
-		flags |= FlagWideBufferLoad;
 	}
 	return flags;
 }
