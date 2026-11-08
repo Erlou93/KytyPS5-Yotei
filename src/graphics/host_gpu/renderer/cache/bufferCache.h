@@ -48,6 +48,9 @@ struct Request; // KYTY_TRACE_RING_CENSUS (ringCensus.h)
 // preparation (kind 1) after a SuspendPoint - candidate moments to arm a current-frame dead-bytes threshold.
 void RingFrameArm(int kind);
 bool RingFrameArmWanted();
+// The game frame whose ring half the game writes now (game threads) / the GPU work being recorded writes (execution thread).
+void RingGameWriteFrame(uint64_t frame);
+void RingExecDataFrame(uint64_t frame);
 
 // Counters of one SynchronizeBuffersInRange call (the BDA region pass's statistics).
 struct BufferSyncStats {
@@ -788,6 +791,7 @@ private:
 		uint64_t tick;
 	};
 	std::map<uint64_t, WriteTick> m_write_ticks;
+	std::map<uint64_t, WriteTick> m_write_frames; // KYTY_DIAG_RING_ONE_FRAME_AGE: game frame + 1 of the newest GPU write
 	static void InsertTickRange(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick);
 	// The same answers with fewer entries (an insert already held is skipped, equal-tick neighbours are joined).
 	static void InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick);

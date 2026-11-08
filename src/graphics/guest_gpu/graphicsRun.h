@@ -121,6 +121,7 @@ private:
 		bool                      constant_complete = false;
 		bool                      blocked           = false;
 		uint64_t                  flip_request_id   = 0;
+		uint64_t                  ring_data_frame   = 0; // KYTY_DIAG_RING_ONE_FRAME_AGE: the game frame whose ring half it writes
 	};
 
 	void              Enqueue(Submission submission);
@@ -175,6 +176,7 @@ private:
 
 	uint64_t        m_submit_id = 0;
 	std::atomic_int m_done_num  = 0;
+	bool            m_ring_after_sp = false; // KYTY_DIAG_RING_ONE_FRAME_AGE (m_queue_mutex): a SuspendPoint, not yet its graphics submission
 	uint64_t        m_emitted   = 0;
 	Common::ProgressCounter m_executed;
 	// The pipeline: operations ring from the command processor thread to the resolve thread and from there to the execution

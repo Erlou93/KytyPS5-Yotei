@@ -1787,6 +1787,21 @@ void GuestGpu::Enqueue(Submission submission) {
 	}
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
+	if (RingFrameArmWanted()) {
+		// KYTY_DIAG_RING_ONE_FRAME_AGE: the game frame each submission writes the ring half of. Frame F ends with its
+		// SuspendPoint (m_done_num becomes F+1), then the context kicks and the graphics submission of frame F (7.6
+		// steps 4-7); everything after that graphics submission is frame F+1.
+		const auto done = static_cast<uint64_t>(m_done_num.load(std::memory_order_relaxed));
+		if (submission.type == SubmissionType::SuspendPoint) {
+			submission.ring_data_frame = done;
+			m_ring_after_sp            = true;
+			RingGameWriteFrame(done);
+		} else {
+			submission.ring_data_frame = m_ring_after_sp ? done - 1u : done;
+			if (m_ring_after_sp && submission.type == SubmissionType::Graphics) m_ring_after_sp = false;
+			RingGameWriteFrame(m_ring_after_sp ? done - 1u : done);
+		}
+	}
 	m_queues[submission.queue_id].push_back(std::move(submission));
 	m_submission_count++;
 	m_work_epoch.fetch_add(1, std::memory_order_release);
@@ -2037,6 +2052,7 @@ bool GuestGpu::Process(Submission& submission) {
 		cp.SetFlip({});
 	}
 
+	if (RingFrameArmWanted()) cp.EmitCallback([frame = submission.ring_data_frame] { RingExecDataFrame(frame); }); // KYTY_DIAG_RING_ONE_FRAME_AGE
 	cp.BufferInit();
 	bool complete      = true;
 	m_slice_progressed = false; // the queue waits guard: whether this slice ran a packet

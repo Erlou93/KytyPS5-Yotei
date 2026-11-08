@@ -1436,7 +1436,23 @@ std::array<std::atomic<uint64_t>, 2> g_ring_armed {};
 std::atomic<uint64_t>                g_ring_sp_count {0}, g_ring_flip_count {0};
 struct RingArmStats { std::atomic<uint64_t> extra {0}, b30 {0}, b60 {0}, b100 {0}, bmore {0}, unknown {0}; };
 std::array<RingArmStats, 2> g_ring_arm_stats;
+// Game-frame rule: GPU bytes on a ring page written by work of game frame <= W-2 (W: the frame the game writes now)
+// are dead - the same ring half, two frames back (BAR-ODCZYTY 3.3, with frames of submissions instead of ticks).
+std::atomic<uint64_t> g_ring_game_write_frame {0};
+uint64_t              g_ring_exec_data_frame = 0; // execution thread
+struct RingFrameRuleStats {
+	std::atomic<uint64_t> extra {0}, freed {0}, today_freed {0}, conflict {0}, unknown {0}, b30 {0}, b60 {0}, b100 {0}, bmore {0}, age_unknown {0};
+};
+RingFrameRuleStats g_ring_frame_rule;
 } // namespace
+
+void RingGameWriteFrame(uint64_t frame) {
+	g_ring_game_write_frame.store(frame, std::memory_order_release);
+}
+
+void RingExecDataFrame(uint64_t frame) {
+	g_ring_exec_data_frame = frame;
+}
 
 bool RingFrameArmWanted() {
 	return RingAgeDiag();
@@ -1826,6 +1842,39 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 			}
 		});
 		g_ring_age.faults.fetch_add(1, std::memory_order_relaxed);
+		{ // the game-frame rule against today's, page by page
+			const uint64_t w          = g_ring_game_write_frame.load(std::memory_order_acquire);
+			const uint64_t today_from = g_ring_frame_ticks[(g_ring_frames - 2) % g_ring_frame_ticks.size()];
+			bool           rule_live = false, today_live = false, rule_extra = false, unknown = false;
+			uint64_t       newest_extra = 0;
+			m_gpu_modified_ranges.ForEachInRange(page, 4096, [&](uint64_t start, uint64_t end) {
+				const uint64_t tick    = QueryWriteTick(start, end);
+				const uint64_t frame1  = QueryTicks(m_write_frames, start, end); // frame + 1, 0 unknown
+				const bool     today_d = tick != 0 && tick < today_from;
+				const bool     rule_d  = frame1 != 0 && frame1 + 1u <= w; // frame <= w - 2
+				if (frame1 == 0) unknown = true;
+				if (!today_d) today_live = true;
+				if (!rule_d) rule_live = true;
+				if (rule_d && !today_d) {
+					rule_extra   = true;
+					newest_extra = std::max(newest_extra, tick);
+				}
+				if (today_d && !rule_d && frame1 != 0) g_ring_frame_rule.conflict.fetch_add(1, std::memory_order_relaxed);
+			});
+			if (unknown) g_ring_frame_rule.unknown.fetch_add(1, std::memory_order_relaxed);
+			if (!rule_live) g_ring_frame_rule.freed.fetch_add(1, std::memory_order_relaxed);
+			if (!today_live) g_ring_frame_rule.today_freed.fetch_add(1, std::memory_order_relaxed);
+			if (rule_extra) {
+				g_ring_frame_rule.extra.fetch_add(1, std::memory_order_relaxed);
+				const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+				if (const auto& t = g_ring_tick_first[newest_extra % g_ring_tick_first.size()]; t.tick == newest_extra) {
+					const auto up_us = static_cast<uint64_t>(std::max<int64_t>(0, now_ns - t.ns) / 1000);
+					(up_us < 30000 ? g_ring_frame_rule.b30 : up_us < 60000 ? g_ring_frame_rule.b60 : up_us < 100000 ? g_ring_frame_rule.b100 : g_ring_frame_rule.bmore).fetch_add(1, std::memory_order_relaxed);
+				} else {
+					g_ring_frame_rule.age_unknown.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
+		}
 		if (extra) {
 			const int64_t arm_now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 			for (size_t k = 0; k < g_ring_armed.size(); k++) {
@@ -1897,6 +1946,16 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 			             static_cast<unsigned long long>(g_ring_age_upper.b30.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.b60.exchange(0)),
 			             static_cast<unsigned long long>(g_ring_age_upper.b100.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.bmore.exchange(0)),
 			             static_cast<unsigned long long>(g_ring_age_upper.unknown.exchange(0)));
+			{
+				auto& r = g_ring_frame_rule;
+				std::fprintf(stderr, "DIAG_RING_FRAME_RULE game_frame=%llu freed=%llu today_freed=%llu extra_pages=%llu conflict_ranges=%llu unknown_pages=%llu upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]\n",
+				             static_cast<unsigned long long>(g_ring_game_write_frame.load()), static_cast<unsigned long long>(r.freed.exchange(0)),
+				             static_cast<unsigned long long>(r.today_freed.exchange(0)), static_cast<unsigned long long>(r.extra.exchange(0)),
+				             static_cast<unsigned long long>(r.conflict.exchange(0)), static_cast<unsigned long long>(r.unknown.exchange(0)),
+				             static_cast<unsigned long long>(r.b30.exchange(0)), static_cast<unsigned long long>(r.b60.exchange(0)),
+				             static_cast<unsigned long long>(r.b100.exchange(0)), static_cast<unsigned long long>(r.bmore.exchange(0)),
+				             static_cast<unsigned long long>(r.age_unknown.exchange(0)));
+			}
 			for (size_t k = 0; k < g_ring_arm_stats.size(); k++) {
 				auto& st = g_ring_arm_stats[k];
 				std::fprintf(stderr, "DIAG_RING_ARM %s sp=%llu flips=%llu extra_pages=%llu upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]\n",
@@ -3456,6 +3515,7 @@ void ReportObtainExact(uint64_t count) {
 void BufferCache::NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick) {
 	if (!SyncTimeline::Enabled() && (end <= 0x2002600000ull || start >= 0x2010000000ull)) return;
 	InsertTickRangeJoined(m_write_ticks, start, end, tick);
+	if (RingAgeDiag() && start < 0x2010000000ull && end > 0x2002600000ull) InsertTickRangeJoined(m_write_frames, start, end, g_ring_exec_data_frame + 1u);
 }
 
 void BufferCache::InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick) {
