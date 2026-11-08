@@ -1430,7 +1430,24 @@ bool RingAgeDiag() {
 	return on;
 }
 uint64_t                 g_ring_frames = 0;
+// Armed thresholds (KYTY_DIAG_RING_ONE_FRAME_AGE): g_ring_frames at the moment the execution thread reached the first
+// graphics submission (0) / flip preparation (1) after the latest SuspendPoint; equal to g_ring_frames = armed.
+std::array<std::atomic<uint64_t>, 2> g_ring_armed {};
+std::atomic<uint64_t>                g_ring_sp_count {0}, g_ring_flip_count {0};
+struct RingArmStats { std::atomic<uint64_t> extra {0}, b30 {0}, b60 {0}, b100 {0}, bmore {0}, unknown {0}; };
+std::array<RingArmStats, 2> g_ring_arm_stats;
 } // namespace
+
+bool RingFrameArmWanted() {
+	return RingAgeDiag();
+}
+
+void RingFrameArm(int kind) {
+	if (!RingAgeDiag() || kind < 0 || kind > 1) return;
+	if (kind == 1) g_ring_flip_count.fetch_add(1, std::memory_order_relaxed);
+	auto& armed = g_ring_armed[static_cast<size_t>(kind)];
+	if (armed.load(std::memory_order_relaxed) != g_ring_frames) armed.store(g_ring_frames, std::memory_order_release);
+}
 
 bool BufferCache::TryCpWriteThrough(uint64_t address, const void* data, uint64_t size) {
 	// KYTY_PERF_DIRECT_RANGES: a command-processor write into a direct range goes into the stream (the GPU work
@@ -1810,6 +1827,18 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 		});
 		g_ring_age.faults.fetch_add(1, std::memory_order_relaxed);
 		if (extra) {
+			const int64_t arm_now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+			for (size_t k = 0; k < g_ring_armed.size(); k++) {
+				if (g_ring_armed[k].load(std::memory_order_acquire) != g_ring_frames) continue; // not armed: today's threshold
+				auto& st = g_ring_arm_stats[k];
+				st.extra.fetch_add(1, std::memory_order_relaxed);
+				if (const auto& t = g_ring_tick_first[newest % g_ring_tick_first.size()]; t.tick == newest) {
+					const auto up_us = static_cast<uint64_t>(std::max<int64_t>(0, arm_now_ns - t.ns) / 1000);
+					(up_us < 30000 ? st.b30 : up_us < 60000 ? st.b60 : up_us < 100000 ? st.b100 : st.bmore).fetch_add(1, std::memory_order_relaxed);
+				} else {
+					st.unknown.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
 			const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 			const auto    age_us = static_cast<uint64_t>(std::max<int64_t>(0, now_ns - g_ring_frame_ns[(g_ring_frames - 1) % g_ring_frame_ns.size()]) / 1000);
 			g_ring_age.extra_pages.fetch_add(1, std::memory_order_relaxed);
@@ -1868,6 +1897,16 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 			             static_cast<unsigned long long>(g_ring_age_upper.b30.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.b60.exchange(0)),
 			             static_cast<unsigned long long>(g_ring_age_upper.b100.exchange(0)), static_cast<unsigned long long>(g_ring_age_upper.bmore.exchange(0)),
 			             static_cast<unsigned long long>(g_ring_age_upper.unknown.exchange(0)));
+			for (size_t k = 0; k < g_ring_arm_stats.size(); k++) {
+				auto& st = g_ring_arm_stats[k];
+				std::fprintf(stderr, "DIAG_RING_ARM %s sp=%llu flips=%llu extra_pages=%llu upper_ms[<30=%llu 30-60=%llu 60-100=%llu 100+=%llu unknown=%llu]
+",
+				             k == 0 ? "gfx" : "flip", static_cast<unsigned long long>(k == 0 ? g_ring_sp_count.load() : g_ring_sp_count.exchange(0)),
+				             static_cast<unsigned long long>(k == 0 ? g_ring_flip_count.load() : g_ring_flip_count.exchange(0)),
+				             static_cast<unsigned long long>(st.extra.exchange(0)), static_cast<unsigned long long>(st.b30.exchange(0)),
+				             static_cast<unsigned long long>(st.b60.exchange(0)), static_cast<unsigned long long>(st.b100.exchange(0)),
+				             static_cast<unsigned long long>(st.bmore.exchange(0)), static_cast<unsigned long long>(st.unknown.exchange(0)));
+			}
 		}
 	}
 	return !live;
@@ -4151,6 +4190,7 @@ void BufferCache::RunGarbageCollector() {
 	g_ring_frame_ns[g_ring_frames % g_ring_frame_ns.size()] =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 	g_ring_frames++;
+	g_ring_sp_count.fetch_add(1, std::memory_order_relaxed);
 	for (auto& range: m_direct_ranges) { // KYTY_PERF_DIRECT_RANGES: an image in a direct range ends it
 		if (range.active && m_texture_cache.IsRegionRegistered(range.start, range.end - range.start)) {
 			std::fprintf(stderr, "PERF_DIRECT_RANGES 0x%llx-0x%llx ended: an image was registered in it\n",

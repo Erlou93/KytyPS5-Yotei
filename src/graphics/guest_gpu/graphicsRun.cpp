@@ -1,6 +1,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/stallWatch.h"
 #include "graphics/guest_gpu/drawStateObserver.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cleanDraws.h"
 
 #include "common/assert.h"
@@ -2032,6 +2033,7 @@ bool GuestGpu::Process(Submission& submission) {
 
 	switch (submission.type) {
 		case SubmissionType::Graphics: {
+			if (first_slice && RingFrameArmWanted()) cp.EmitCallback([] { RingFrameArm(0); }); // KYTY_DIAG_RING_ONE_FRAME_AGE
 			bool progressed = false;
 			submission.constant_complete |= submission.constant_commands.empty();
 			for (;;) {
@@ -2085,6 +2087,7 @@ bool GuestGpu::Process(Submission& submission) {
 		}
 		case SubmissionType::FlipPreparation:
 			cp.PrepareCpuFlip(submission.flip_request_id);
+			if (RingFrameArmWanted()) cp.EmitCallback([] { RingFrameArm(1); }); // KYTY_DIAG_RING_ONE_FRAME_AGE
 			break;
 		case SubmissionType::SuspendPoint:
 			// Age caches at the frame boundary, not once per command list.

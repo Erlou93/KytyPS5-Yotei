@@ -44,6 +44,11 @@ namespace RingCensus {
 struct Request; // KYTY_TRACE_RING_CENSUS (ringCensus.h)
 } // namespace RingCensus
 
+// KYTY_DIAG_RING_ONE_FRAME_AGE: the execution thread reached the first graphics submission (kind 0) or the flip
+// preparation (kind 1) after a SuspendPoint - candidate moments to arm a current-frame dead-bytes threshold.
+void RingFrameArm(int kind);
+bool RingFrameArmWanted();
+
 // Counters of one SynchronizeBuffersInRange call (the BDA region pass's statistics).
 struct BufferSyncStats {
 	uint64_t buffers = 0;  // buffers visited
