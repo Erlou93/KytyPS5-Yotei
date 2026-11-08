@@ -1775,6 +1775,17 @@ void CommandProcessor::ExecuteDmaData(bool dst_gds, uint64_t dst_address_or_offs
 
 void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
+	if (RingFrameArmWanted()) { // KYTY_DIAG_RING_ONE_FRAME_AGE: the submission order around SuspendPoints (game frames 3000-3003, 6000-6003)
+		static int64_t sp_ns = 0;
+		const int64_t  now   = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		const int      frame = m_done_num;
+		if ((frame >= 3000 && frame <= 3003) || (frame >= 6000 && frame <= 6003)) {
+			std::fprintf(stderr, "DIAG_RING_ORDER frame=%d type=%d queue=%u dw=%zu us_after_sp=%lld
+", frame, static_cast<int>(submission.type),
+			             submission.queue_id, submission.commands.size(), static_cast<long long>(now - sp_ns));
+		}
+		if (submission.type == SubmissionType::SuspendPoint) sp_ns = now;
+	}
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	m_queues[submission.queue_id].push_back(std::move(submission));
