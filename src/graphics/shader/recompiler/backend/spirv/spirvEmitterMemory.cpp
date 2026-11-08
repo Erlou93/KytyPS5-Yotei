@@ -2267,9 +2267,12 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 	// k8SInt 1.6%, k16UInt 1.0%, k16_16Float XY 1.0%, k10_10_10_2SNorm and k16_16_16_16SNorm XYZ < 0.01%; nothing else.
 	// The 78-case switch is the reference the compute test checks the cases and the table against
 	// (SetSpirvFormattedSwitchReference).
+	// Cutscene after the Snake (8.11, KYTY_DIAG_INDIRECT_FORMAT_CENSUS on CS 91451da6, 6-19 ms per call on the frame's
+	// critical path): its XY loads are k16_16UNorm in ~95% of the waves (k16_16Float the rest), its D16_X loads
+	// k16UInt - so k16_16UNorm joins the cases.
 	using F = Prospero::BufferFormat;
 	static constexpr F fast[] = {F::k16_16_16_16Float, F::k8UNorm, F::k8SInt, F::k16UInt, F::k16_16Float,
-	                             F::k10_10_10_2SNorm, F::k16_16_16_16SNorm};
+	                             F::k10_10_10_2SNorm, F::k16_16_16_16SNorm, F::k16_16UNorm};
 	const auto cases = [&]() {
 		const auto u32  = TypeU32(state);
 		auto       pick = ConstantU32(state, 0);
