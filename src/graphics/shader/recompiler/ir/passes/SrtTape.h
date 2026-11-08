@@ -162,7 +162,7 @@ private:
 	bool Eval(uint32_t index, uint64_t& result);
 	bool Run(uint32_t index, const SrtNode& node, uint64_t& result);
 	bool ReadRaw(const SrtNode& node, uint64_t& result);
-	// KYTY_PERF_SRT_GPU_WORDS: the guest address a scalar (non-vector, non-buffer) RawRead reads, evaluated as ReadRaw
+	// KYTY_PERF_SRT_GPU_WORDS: the guest address a scalar (non-vector) RawRead reads, evaluated as ReadRaw
 	// does without reading it; 0 when ReadRaw would read zero without touching memory (the null page).
 	bool RawAddress(const SrtNode& node, uint64_t& address);
 	// The scalar RawRead node that evaluating `root` through this walker reads (the node itself, or the

@@ -151,13 +151,14 @@ void PlanSrtGpuWords(Program& program) {
 	std::vector<uint32_t> slots;
 	for (uint32_t slot = 0; slot < tape->slots.size(); ++slot) {
 		const auto& read = tape->slots[slot];
+		// Scalar reads through a pointer (LoadAddressU32) or through a V# (ReadConstBuffer: s_buffer_load, the range
+		// check evaluated on the CPU as ReadRaw does); not vector buffer loads.
 		if (read.root >= tape->nodes.size() || read.flat_clean || read.flat_offset != slot ||
-		    read.opcode != ValueOpcode::LoadAddressU32) {
+		    (read.opcode != ValueOpcode::LoadAddressU32 && read.opcode != ValueOpcode::ReadConstBuffer)) {
 			continue;
 		}
 		const auto& node = tape->nodes[read.root];
-		if (node.op != SrtOp::RawRead || (node.flags & (SrtNode::FlagVector | SrtNode::FlagBuffer)) != 0u ||
-		    cpu_needed[read.root] != 0u) {
+		if (node.op != SrtOp::RawRead || (node.flags & SrtNode::FlagVector) != 0u || cpu_needed[read.root] != 0u) {
 			continue;
 		}
 		slots.push_back(slot);
@@ -909,7 +910,7 @@ bool SrtTapeWalker::ReadRaw(const SrtNode& node, uint64_t& result) {
 }
 
 bool SrtTapeWalker::RawAddress(const SrtNode& node, uint64_t& address) {
-	if (node.op != SrtOp::RawRead || (node.flags & (SrtNode::FlagVector | SrtNode::FlagBuffer)) != 0u) return false;
+	if (node.op != SrtOp::RawRead || (node.flags & SrtNode::FlagVector) != 0u) return false;
 	const auto& handle = m_tape.nodes[node.args[0]];
 	uint64_t    low    = 0;
 	uint64_t    high   = 0;
@@ -919,9 +920,29 @@ bool SrtTapeWalker::RawAddress(const SrtNode& node, uint64_t& address) {
 	}
 	const auto base      = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
 	const auto immediate = static_cast<int64_t>(node.imm);
-	const auto relative  = (immediate & ~int64_t {3}) + static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
-	if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
-		return false;
+	if ((node.flags & SrtNode::FlagBuffer) != 0u) {
+		// The V# range check of ReadRaw: an out-of-range load reads zero (address 0).
+		uint64_t records = 0;
+		uint64_t word3   = 0;
+		if ((handle.flags & SrtNode::FlagHandle4) == 0u || !Eval(handle.args[2], records) ||
+		    !Eval(handle.args[3], word3) || immediate < 0) {
+			return false;
+		}
+		const auto byte_offset =
+		    (static_cast<uint64_t>(immediate) & ~uint64_t {3}) + (static_cast<uint32_t>(offset) & ~3u);
+		const auto stride = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
+		const auto size   = stride == 0u ? static_cast<uint64_t>(static_cast<uint32_t>(records))
+		                                 : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
+		if (byte_offset > size || size - byte_offset < sizeof(uint32_t)) {
+			address = 0u;
+			return true;
+		}
+		address = (base & ~uint64_t {3}) + byte_offset;
+	} else {
+		const auto relative = (immediate & ~int64_t {3}) + static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
+		if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
+			return false;
+		}
 	}
 	// ReadRaw reads zero from the null page without touching memory.
 	if (address < 0x10000u) address = 0u;
