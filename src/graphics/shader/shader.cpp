@@ -774,6 +774,8 @@ void BuildStageStaticKey(const ShaderComputeInputInfo& info, std::vector<uint32_
 	if ((info.compute_variant & ComputeVariantPairOff) != 0) key.push_back(0x9a1f0000u);
 	// ComputeVariantPairSpin (KYTY_DIAG_TWIN_DISPATCH): appended only when set.
 	if ((info.compute_variant & ComputeVariantPairSpin) != 0) key.push_back(0x9a1f0001u);
+	// ComputeVariantReadonlyPlain (KYTY_PERF_READONLY_NONCOHERENT): appended only when set.
+	if ((info.compute_variant & ComputeVariantReadonlyPlain) != 0) key.push_back(0x9a1f0002u);
 	// KYTY_FIX_CLAMP_NAN: the saturate translation depends on DX10_CLAMP; appended only when the switch is on and the
 	// bit is 0 (0xd10c tells it from the above).
 	if (ShaderRecompiler::IR::ClampNanMode() != 0 && !info.dx10_clamp) key.push_back(0xd10c0000u);

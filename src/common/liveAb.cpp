@@ -51,6 +51,9 @@ constexpr SwitchInfo Switches[] = {
     // Only which of two exact paths the listed shaders take per raw X4 buffer load (KYTY_PERF_WIDE_BUFFER_LOAD=3 compiles
     // both and reads the live shader flags word, rewritten at frame boundaries; indirectLoadFast.h).
     {Switch::WideBufferLoad, "KYTY_PERF_WIDE_BUFFER_LOAD", 1},
+    // Only which of two exact programs a listed compute dispatch binds (renderCompute.cpp, ReadonlyNoncoherent): the same
+    // descriptors and push data; the variant only while its never-written buffers are disjoint from its written ones.
+    {Switch::ReadonlyNoncoherent, "KYTY_PERF_READONLY_NONCOHERENT", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

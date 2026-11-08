@@ -218,6 +218,56 @@ void DefineImageArray(EmitterState& state, ImageDefinition& definition, const IR
 	definition.pointer_type = TypePointer(state, spv::StorageClassUniformConstant, definition.type);
 }
 
+// KYTY_PERF_READONLY_NONCOHERENT (renderCompute.cpp): the variant module (ComputeVariantReadonlyPlain) of a compute
+// shader whose buffer aliases are Coherent (a GLC access in a shader that writes buffers) reads the descriptor indices it
+// never writes (no store or atomic through any resource of that index) through plain aliases, when it writes guest
+// memory only through descriptor buffer bindings (and LDS, GDS, scratch): no IndirectBuffer or address store, no
+// written image, no cache invalidation. The host binds this module only while every never-written binding's guest
+// range is disjoint from every written one, so no invocation of the dispatch writes the bytes those reads see; the work
+// before the dispatch is visible to them after the guest's barriers (RecordGlobalBarrier: MemoryWrite ->
+// MemoryRead|MemoryWrite). Any other module, or a shader that does not qualify, is emitted as today.
+bool PlanReadonlyPlain(EmitterState& state, bool per_access_coherence) {
+	const auto& info    = state.program.info;
+	const auto* compute = state.input_info.compute;
+	if (state.program.stage != ShaderType::Compute || compute == nullptr ||
+	    (compute->compute_variant & ComputeVariantReadonlyPlain) == 0u || !info.coherent_buffers || per_access_coherence ||
+	    state.program.has_address_writes) {
+		return false;
+	}
+	if (std::ranges::any_of(info.images, [](const auto& image) { return image.written; })) return false;
+	for (const auto* block: state.program.blocks) {
+		for (const auto& inst: *block) {
+			const auto op = inst.GetOpcode();
+			if (op == IR::ValueOpcode::DataCacheInvalidate) return false;
+			const auto image_access = IR::ImageOpcodeInfoOf(op).access;
+			if (image_access == IR::ImageAccess::Write || image_access == IR::ImageAccess::Atomic) return false;
+			const auto buffer_access = IR::BufferAccessOf(op);
+			const bool buffer_write  = buffer_access == IR::BufferAccess::Write || buffer_access == IR::BufferAccess::Atomic;
+			const bool address_write = IR::AddressOpcodeInfoOf(op).access == IR::AddressAccess::Write;
+			if (!buffer_write && !address_write) continue;
+			const auto index = inst.Flags<IR::MemoryFlags>().index;
+			if (index >= state.program.memory_info.size()) return false;
+			const auto kind = state.program.memory_info[index].kind;
+			if (buffer_write && kind != IR::ResourceKind::Buffer) return false;
+			if (address_write && kind != IR::ResourceKind::Scratch && kind != IR::ResourceKind::FlatLocal) return false;
+		}
+	}
+	std::array<bool, IR::ShaderInfo::MaxBuffers> written {};
+	for (const auto& buffer: info.buffers) {
+		if (buffer.written && buffer.descriptor_index < written.size()) written[buffer.descriptor_index] = true;
+	}
+	bool any = false;
+	for (const auto& buffer: info.buffers) {
+		const auto index = buffer.descriptor_index;
+		if (index < written.size() && !written[index]) {
+			state.readonly_plain[index] = true;
+			any                         = true;
+		}
+	}
+	state.readonly_plain_active = any;
+	return any;
+}
+
 void DefineDescriptors(EmitterState& state) {
 	using Kind = IR::DescriptorBindingKind;
 	auto& info = state.program.info;
@@ -323,12 +373,14 @@ void DefineDescriptors(EmitterState& state) {
 				const bool per_access_coherence = info.coherent_buffers && !info.buffer_writes && !info.coherent_narrow &&
 				                                  !state.program.has_address_writes;
 				const bool wide = WideBufferLoadsWanted(state, per_access_coherence); // KYTY_PERF_WIDE_BUFFER_LOAD
+				const bool readonly = PlanReadonlyPlain(state, per_access_coherence); // KYTY_PERF_READONLY_NONCOHERENT
 				for (uint32_t alias = 0; alias < used.size(); ++alias) {
 					if (!used[alias]) continue;
 					auto& buffer = state.storage_buffers[alias];
 					const auto type = StorageBufferType(state, buffer, 8u << alias);
 					buffer.variable = Define(ArrayType(type), names[alias]);
-					if (info.buffer_u8 || info.buffer_u16 || info.buffer_int64_atomics || per_access_coherence || wide) {
+					if (info.buffer_u8 || info.buffer_u16 || info.buffer_int64_atomics || per_access_coherence || wide ||
+					    readonly) {
 						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationAliased);
 					}
 					// RDNA2 stores publish to L2 even without GLC; every alias of the buffer
@@ -359,6 +411,25 @@ void DefineDescriptors(EmitterState& state) {
 					state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationAliased);
 					if (info.coherent_buffers && !per_access_coherence) {
 						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationCoherent);
+					}
+				}
+				if (readonly) {
+					// KYTY_PERF_READONLY_NONCOHERENT: the same block types over the same binding, not Coherent.
+					constexpr std::array plain_names {"buffers_plain_u8", "buffers_plain_u16", "buffers_plain"};
+					for (uint32_t alias = 0; alias < state.plain_buffers.size(); ++alias) {
+						if (!used[alias]) continue;
+						auto& plain        = state.plain_buffers[alias];
+						plain              = state.storage_buffers[alias];
+						plain.pointer_type = plain.element_pointer_type = 0;
+						plain.variable     = Define(ArrayType(plain.type), plain_names[alias]);
+						state.builder.AddAnnotation(spv::OpDecorate, plain.variable, spv::DecorationAliased);
+					}
+					if (wide) {
+						auto& plain        = state.plain_wide_buffers_alias;
+						plain              = state.wide_buffers_alias;
+						plain.pointer_type = plain.element_pointer_type = 0;
+						plain.variable     = Define(ArrayType(plain.type), "buffers_plain_u128");
+						state.builder.AddAnnotation(spv::OpDecorate, plain.variable, spv::DecorationAliased);
 					}
 				}
 				break;

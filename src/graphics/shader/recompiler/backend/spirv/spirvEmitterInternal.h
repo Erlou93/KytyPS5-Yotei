@@ -142,6 +142,12 @@ struct EmitterState {
 	// KYTY_PERF_WIDE_BUFFER_LOAD (indirectLoadFast.h): the uvec4 alias of the buffers that raw X4 loads read (variable 0:
 	// not used).
 	BufferDefinition                                 wide_buffers_alias {};
+	// KYTY_PERF_READONLY_NONCOHERENT (ComputeVariantReadonlyPlain, spirvEmitterModule.cpp PlanReadonlyPlain): the
+	// descriptor indices the shader never writes, whose non-GLC reads go through the aliases below (not Coherent).
+	bool                                             readonly_plain_active = false;
+	std::array<bool, IR::ShaderInfo::MaxBuffers>     readonly_plain {};
+	std::array<BufferDefinition, 3>                  plain_buffers {}; // u8, u16, u32
+	BufferDefinition                                 plain_wide_buffers_alias {};
 	// KYTY_PERF_BDA_ENTRY_SHARE: per lane half, Function variables holding the page (u64, address >> page bits) and the
 	// page's base pointer (u64, 0 = none) of the last scalar load through a GPU-built V# (0: not declared).
 	std::array<uint32_t, 2>                          bda_memo_page {};
@@ -822,6 +828,9 @@ void DefineIndirectRawDword(ValueEmitContext& ctx);
 // KYTY_PERF_WIDE_BUFFER_LOAD (indirectLoadFast.h): the switch is on for this shader and one of its raw X4 loads may read
 // through the buffers_u128 alias (spirvEmitterMemory.cpp, WideBufferLoadCandidate).
 bool WideBufferLoadsWanted(const EmitterState& state, bool per_access_coherence);
+// KYTY_PERF_READONLY_NONCOHERENT: this buffer access goes through the plain aliases (a non-GLC read of a descriptor index
+// in state.readonly_plain; a GLC one too under KYTY_DIAG_READONLY_GLC_PLAIN, then without Volatile).
+bool ReadonlyPlainAccess(const EmitterState& state, const IR::MemoryInfo& mem);
 void DefineIndirectStoreFunctions(ValueEmitContext& ctx);
 void DefineBvhIntersect(EmitterState& state);
 // Upstream bfd4c34b8 / 5eab0ec73 (spirvEmitterTrinityBvh.cpp): BVH8 intersections and the BVH stack.

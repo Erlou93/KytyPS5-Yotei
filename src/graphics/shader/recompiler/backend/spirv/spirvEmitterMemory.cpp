@@ -2665,8 +2665,11 @@ uint32_t LoadBufferWide(ValueEmitContext& ctx, const IR::Inst& inst, const IR::M
         Binary(state, spv::OpIEqual, boolean, Binary(state, spv::OpBitwiseAnd, u32, address, ConstantU32(state, 15)), zero),
         Binary(state, spv::OpULessThan, boolean, EmitAddU32(state, first, ConstantU32(state, 3)), resource.length));
 	const auto wide_read = [&]() {
-		auto&      alias  = state.wide_buffers_alias;
-		const auto access = PrepareStorageBufferResourceAccess(state, mem, alias);
+		// KYTY_PERF_READONLY_NONCOHERENT: a never-written binding's read through the plain uvec4 alias.
+		const bool plain  = state.plain_wide_buffers_alias.variable != 0u && ReadonlyPlainAccess(state, mem);
+		auto&      alias  = plain ? state.plain_wide_buffers_alias : state.wide_buffers_alias;
+		auto       access = PrepareStorageBufferResourceAccess(state, mem, alias);
+		if (plain) access.memory_access = spv::MemoryAccessMaskNone; // (GLC only under KYTY_DIAG_READONLY_GLC_PLAIN)
 		if (alias.element_pointer_type == 0u) {
 			alias.element_pointer_type = TypePointer(state, spv::StorageClassStorageBuffer, alias.element_type);
 		}
