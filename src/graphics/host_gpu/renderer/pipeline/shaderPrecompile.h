@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_SHADERPRECOMPILE_H_
 
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/reuseDisk.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -386,6 +388,8 @@ private:
 	std::filesystem::path  m_suspects_path;
 	std::atomic<uint32_t>& m_created;
 	PrecompileWarmList*    m_warm = nullptr;
+	// KYTY_PERF_SHADER_REUSE_DISK (reuseDisk.h): the reuse store's translations on disk (null: off).
+	std::unique_ptr<ReuseDisk> m_disk;
 
 	mutable std::mutex                     m_mutex;
 	std::condition_variable                m_done; // a job or a stage compile finished

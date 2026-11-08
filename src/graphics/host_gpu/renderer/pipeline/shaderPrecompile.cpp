@@ -969,6 +969,13 @@ struct ReuseStats {
 	std::atomic<uint64_t> plan_us {0};      // ExtractResourcePlan
 	std::atomic<uint64_t> plans {0};
 	std::atomic<uint64_t> compile_us {0};   // CompileProgram (SPIR-V emission)
+	// KYTY_PERF_SHADER_REUSE_DISK: permutations read from disk instead of translated, written to disk, the =2 checks.
+	std::atomic<uint64_t> disk_hits {0};
+	std::atomic<uint64_t> disk_plan_translations {0}; // found on disk but translated for the program's resource plan
+	std::atomic<uint64_t> disk_stores {0};
+	std::atomic<uint64_t> disk_load_failed {0};
+	std::atomic<uint64_t> disk_checks {0};
+	std::atomic<uint64_t> disk_mismatches {0};
 };
 ReuseStats g_reuse;
 
@@ -1770,6 +1777,16 @@ ShaderPrecompiler::ShaderPrecompiler(GraphicContext& graphics, vk::PipelineCache
 	if (GraphicsEnabled()) {
 		LoadGraphics(skipped, graphics_jobs, stage_jobs);
 	}
+	if (ShaderReuseEnabled() && ShaderReuseDiskMode() != 0) {
+		auto path = m_journal_path;
+		auto name = path.filename().string();
+		if (const auto at = name.find(".classes"); at != std::string::npos) name.resize(at);
+		path.replace_filename(name + ".reuse");
+		const auto&    properties = m_graphics.GetPhysicalDeviceProperties();
+		const uint64_t identity[] = {Revision(), ReuseDisk::ExecutableHash(), EnvironmentFingerprint(),
+		                             DeviceFingerprint(m_graphics), properties.driverVersion};
+		m_disk = std::make_unique<ReuseDisk>(path, XXH3_64bits(identity, sizeof(identity)));
+	}
 	// The null share journal: the records are fixed now (m_stages is node-based).
 	for (const auto& record: m_compute_records) {
 		m_program_records[ProgramKey(RecordIdentity(record))].push_back(&record);
@@ -2263,6 +2280,17 @@ void ShaderPrecompiler::Worker(uint32_t index) {
 		             static_cast<unsigned long long>(g_reuse.plans.load()),
 		             static_cast<unsigned long long>(g_reuse.plan_us.load() / 1000u),
 		             static_cast<unsigned long long>(g_reuse.compile_us.load() / 1000u));
+		if (m_disk != nullptr) {
+			std::fprintf(stderr,
+			             "PERF shader_reuse_disk entries=%zu hits=%llu plan_translations=%llu stores=%llu load_failed=%llu "
+			             "checks=%llu mismatches=%llu\n",
+			             m_disk->Entries(), static_cast<unsigned long long>(g_reuse.disk_hits.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_plan_translations.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_stores.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_load_failed.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_checks.load()),
+			             static_cast<unsigned long long>(g_reuse.disk_mismatches.load()));
+		}
 		std::fflush(stderr);
 	}
 }
@@ -2304,6 +2332,41 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 	// Wanted but for the budget: not kept (counted, full_start).
 	const bool     over_budget     = reuse && !keep && ReuseWanted(key, true);
 	const uint64_t program         = keep ? ProgramKey(RecordIdentity(record)) : 0u;
+	// KYTY_PERF_SHADER_REUSE_DISK: the permutation's translation from an earlier start. =1: used instead of
+	// translating, unless the program's resource plan is still wanted (that needs the translation; project step Z2).
+	// A disk entry whose SPIR-V is not the one the GPU thread recorded for this build is not trusted.
+	const int                                disk_mode = m_disk != nullptr ? ShaderReuseDiskMode() : 0;
+	std::vector<uint32_t>                    disk_spirv;
+	ShaderRecompiler::IR::CompiledShaderInfo disk_info;
+	double                                   disk_translate_ms = 0.0;
+	double                                   disk_compile_ms   = 0.0;
+	bool                                     disk_hit          = false;
+	if (disk_mode != 0 && m_disk->Contains(key)) {
+		disk_hit = m_disk->Load(key, disk_spirv, disk_info, disk_translate_ms, disk_compile_ms) &&
+		           !(record.revision == Revision() &&
+		             XXH3_64bits(disk_spirv.data(), disk_spirv.size() * sizeof(uint32_t)) != record.spirv_hash);
+		if (!disk_hit) g_reuse.disk_load_failed.fetch_add(1, std::memory_order_relaxed);
+	}
+	if (disk_hit && disk_mode == 1) {
+		if (keep && ReusePlanWanted(program)) {
+			g_reuse.disk_plan_translations.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			g_reuse.disk_hits.fetch_add(1, std::memory_order_relaxed);
+			spirv_words = disk_spirv.size();
+			if (need_module) {
+				module = TryCompileSPV(disk_spirv, m_graphics.device);
+				if (module == nullptr) {
+					return false;
+				}
+			}
+			info = disk_info;
+			if (keep) {
+				StoreReuse(record, key, program, std::nullopt, std::move(disk_spirv), info, disk_translate_ms,
+				           disk_compile_ms);
+			}
+			return true;
+		}
+	}
 	const auto     translate_begin = std::chrono::steady_clock::now();
 	auto source = ShaderRecompiler::PrepareShaderSource(record.code, options);
 	if (!source.calls.empty() || source.unsupported_call_pc != UINT32_MAX) {
@@ -2416,6 +2479,28 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 		}
 	}
 	info = std::move(result.program).TakeCompiledInfo();
+	if (disk_mode != 0) {
+		if (!disk_hit) {
+			m_disk->Store(key, result.spirv, info, translate_ms, compile_ms);
+			g_reuse.disk_stores.fetch_add(1, std::memory_order_relaxed);
+		} else if (disk_mode == 2) {
+			// The check: the disk's translation against this one, word for word (SPIR-V and the serialized info).
+			std::vector<uint32_t> fresh_info, stored_info;
+			SerializeCompiledInfo(info, fresh_info);
+			SerializeCompiledInfo(disk_info, stored_info);
+			g_reuse.disk_checks.fetch_add(1, std::memory_order_relaxed);
+			if (disk_spirv != result.spirv || fresh_info != stored_info || !(disk_info.info == info.info) ||
+			    !(disk_info.bindings == info.bindings)) {
+				g_reuse.disk_mismatches.fetch_add(1, std::memory_order_relaxed);
+				static std::atomic_uint logged {0};
+				if (logged.fetch_add(1) < 16u) {
+					std::fprintf(stderr, "SHADER_REUSE_DISK_MISMATCH hash=0x%016llx key=%s spirv=%zu/%zu info=%zu/%zu\n",
+					             static_cast<unsigned long long>(record.shader_hash), HexKey(key).c_str(),
+					             disk_spirv.size(), result.spirv.size(), stored_info.size(), fresh_info.size());
+				}
+			}
+		}
+	}
 	if (keep) {
 		StoreReuse(record, key, program, std::move(plan), std::move(result.spirv), info, translate_ms, compile_ms);
 	} else if (over_budget) {
