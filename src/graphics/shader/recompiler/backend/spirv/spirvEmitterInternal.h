@@ -824,6 +824,8 @@ void DefineTrinityFunctions(EmitterState& state); // spirvEmitterTrinity.cpp: th
 uint32_t EmitBvhTriangle(EmitterState& state, const std::array<std::array<uint32_t, 3>, 3>& positions,
                          std::array<uint32_t, 3> origin, std::array<uint32_t, 3> direction,
                          uint32_t remap, uint32_t triangle_id, uint32_t bary);
+// The guest page of the BDA page table (== 1 << BufferCache::CACHING_PAGEBITS; checked in spirvEmitterMemory.cpp).
+inline constexpr uint64_t BdaPageBytes = 16384;
 uint32_t GetBdaPointer(EmitterState& state, uint32_t address);
 // KYTY_DIAG_RT_TRIPS (DiagRtTripsFor; needs state.fault_buffer_variable): the fault buffer's diagnostic tail
 // (BufferCache::FAULT_DIAG_*). FaultDiagAdd: atomic add of `value` to tail word `word`, returns the old value.

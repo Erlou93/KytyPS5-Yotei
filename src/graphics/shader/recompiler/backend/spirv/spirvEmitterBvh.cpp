@@ -1,5 +1,4 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/indirectLoadFast.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
@@ -315,8 +314,8 @@ void DefineBvhIntersect(EmitterState& s) {
 		// cutscene's BVH shader 91451da6 spent ~10% of its samples in this second lookup (Nsight, 8.11).
 		auto same_page = Binary(
 		    s, spv::OpLogicalAnd, b,
-		    Binary(s, spv::OpULessThan, b, Binary(s, spv::OpBitwiseAnd, wide, address, ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 1u)),
-		           ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 64u)),
+		    Binary(s, spv::OpULessThan, b, Binary(s, spv::OpBitwiseAnd, wide, address, ConstantU64(s, BdaPageBytes - 1u)),
+		           ConstantU64(s, BdaPageBytes - 64u)),
 		    Binary(s, spv::OpINotEqual, b, first, ConstantU64(s, 0)));
 		if (SpirvLive::BvhOneLookupLive() && s.fault_buffer_variable != 0u) { // KYTY_PERF_BVH_ONE_LOOKUP=3 (test only)
 			const auto flags = Unary(s, spv::OpLoad, u,

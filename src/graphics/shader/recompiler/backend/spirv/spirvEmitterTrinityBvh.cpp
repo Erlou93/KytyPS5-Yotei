@@ -1,5 +1,4 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
@@ -379,7 +378,7 @@ void Bvh8Emitter::DefineIntersect() {
 	const auto tail = [&](uint32_t at, uint32_t pointer) {
 		return EmitValueOrDefaultIfCondition(s, Both(full, present(pointer)), w, ConstantU64(s, 0), [&] {
 			const auto next_page = Not(Binary(s, spv::OpULessThan, b,
-			    Binary(s, spv::OpBitwiseAnd, w, at, ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 1u)), ConstantU64(s, (uint64_t {1} << BufferCache::CACHING_PAGEBITS) - 64u)));
+			    Binary(s, spv::OpBitwiseAnd, w, at, ConstantU64(s, BdaPageBytes - 1u)), ConstantU64(s, BdaPageBytes - 64u)));
 			return EmitValueOrDefaultIfCondition(s, next_page, w,
 			    Binary(s, spv::OpIAdd, w, pointer, ConstantU64(s, 64)),
 			    [&] { return GetBdaPointer(s, Binary(s, spv::OpIAdd, w, at, ConstantU64(s, 64))); });
