@@ -33,6 +33,8 @@ inline constexpr uint32_t DiagWord = 20544;
 // faultManager.cpp prints the totals (PERF indirect_format_census).
 inline constexpr uint32_t CensusWord  = 20608;
 inline constexpr uint32_t CensusWords = 512;
+// The census also counts its waves in DiagWord + 8 and, in DiagWord + 9, those whose active lanes read different FORMATs.
+inline constexpr uint32_t CensusMixedWord = 20552;
 [[nodiscard]] bool CensusEnabled();
 [[nodiscard]] bool CensusFor(uint64_t shader_hash); // KYTY_DIAG_INDIRECT_FORMAT_CENSUS_HASHES (default all)
 

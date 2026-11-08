@@ -2366,9 +2366,18 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 	const auto& handle = *inst.Arg(0).ResolveInstruction();
 	const auto  word3  = ctx.Arg(handle, 3);
 	if (IndirectLoadFast::CensusFor(state.program.shader_hash) && state.fault_buffer_variable != 0u) { // KYTY_DIAG_INDIRECT_FORMAT_CENSUS
+		// Also per wave: whether every active lane reads the same FORMAT (the census sees only the elected lane's).
+		state.builder.RequireCapability(spv::CapabilityGroupNonUniformVote);
+		const auto lane_format = EmitBitFieldUExtract(state, word3, ConstantU32(state, 12), ConstantU32(state, 7));
+		const auto uniform     = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformAllEqual, TypeBool(state), uniform, ConstantU32(state, spv::ScopeSubgroup),
+		                          lane_format);
 		const auto elected = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpGroupNonUniformElect, TypeBool(state), elected, ConstantU32(state, spv::ScopeSubgroup));
 		EmitIfCondition(state, elected, [&]() {
+			(void)FaultDiagAdd(state, IndirectLoadFast::CensusMixedWord, ConstantU32(state, 1));
+			(void)FaultDiagAdd(state, IndirectLoadFast::CensusMixedWord + 1u,
+			                   Select(state, TypeU32(state), uniform, ConstantU32(state, 0), ConstantU32(state, 1)));
 			const auto format = EmitBitFieldUExtract(state, word3, ConstantU32(state, 12), ConstantU32(state, 7));
 			const auto word   = Binary(state, spv::OpIAdd, TypeU32(state),
 			                           Binary(state, spv::OpShiftLeftLogical, TypeU32(state), format, ConstantU32(state, 2)),
