@@ -183,6 +183,36 @@ bool Buffer::CanImportGuestMemory(GraphicContext& graphics, uint64_t cpu_address
 	return HostPointerTypeBits(graphics, cpu_address) != 0;
 }
 
+vk::DeviceMemory Buffer::ImportGuestMemory(GraphicContext& graphics, uint64_t cpu_address, uint64_t size) {
+	if (!CanImportGuestMemory(graphics, cpu_address, size)) return nullptr;
+	// The memory type: one a buffer with the import's usage accepts (as the GuestDirectTag constructor picks it).
+	vk::ExternalMemoryBufferCreateInfo external {};
+	external.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
+	vk::BufferCreateInfo buffer_info {};
+	buffer_info.pNext = &external;
+	buffer_info.size  = size;
+	buffer_info.usage = AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress;
+	vk::Buffer probe  = nullptr;
+	if (graphics.device.createBuffer(&buffer_info, nullptr, &probe) != vk::Result::eSuccess) return nullptr;
+	vk::MemoryRequirements requirements {};
+	graphics.device.getBufferMemoryRequirements(probe, &requirements);
+	graphics.device.destroyBuffer(probe, nullptr);
+	const uint32_t types = HostPointerTypeBits(graphics, cpu_address) & requirements.memoryTypeBits;
+	if (types == 0) return nullptr;
+	vk::ImportMemoryHostPointerInfoEXT import {};
+	import.handleType   = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
+	import.pHostPointer = reinterpret_cast<void*>(cpu_address);
+	vk::MemoryAllocateFlagsInfo flags {};
+	flags.flags = vk::MemoryAllocateFlagBits::eDeviceAddress;
+	flags.pNext = &import;
+	vk::MemoryAllocateInfo allocate {};
+	allocate.pNext           = &flags;
+	allocate.allocationSize  = size;
+	allocate.memoryTypeIndex = static_cast<uint32_t>(std::countr_zero(types));
+	vk::DeviceMemory memory  = nullptr;
+	return graphics.device.allocateMemory(&allocate, nullptr, &memory) == vk::Result::eSuccess ? memory : nullptr;
+}
+
 Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, GuestDirectTag tag, uint64_t cpu_address,
                uint64_t size)
     : m_graphics(&graphics), m_scheduler(&scheduler), m_usage(MemoryUsage::DeviceLocal), m_cpu_address(cpu_address),
@@ -207,6 +237,19 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, GuestDirec
 	EXIT_NOT_IMPLEMENTED(!created);
 	vk::MemoryRequirements requirements {};
 	graphics.device.getBufferMemoryRequirements(m_buffer, &requirements);
+	if (tag.shared_memory) { // KYTY_FIX_BDA_MAPTIME: a view of an imported range
+		const bool bound = graphics.device.bindBufferMemory(m_buffer, tag.shared_memory, tag.memory_offset) == vk::Result::eSuccess;
+		if (refuse(!bound)) return;
+		EXIT_NOT_IMPLEMENTED(!bound);
+		m_direct_memory      = tag.shared_memory;
+		m_owns_direct_memory = false;
+		vk::BufferDeviceAddressInfo view_address {};
+		view_address.buffer = m_buffer;
+		m_device_address    = graphics.device.getBufferAddress(view_address);
+		EXIT_IF(m_device_address == 0);
+		m_coherent = true;
+		return;
+	}
 	const uint32_t types = HostPointerTypeBits(graphics, cpu_address) & requirements.memoryTypeBits;
 	if (refuse(types == 0 || requirements.size > size)) return;
 	EXIT_NOT_IMPLEMENTED(types == 0 || requirements.size > size);
@@ -241,7 +284,7 @@ Buffer::~Buffer() {
 	if (m_direct_memory != nullptr) {
 		CommandRecorder::DrainBeforeDestroy(); // (as below)
 		m_graphics->device.destroyBuffer(m_buffer, nullptr);
-		m_graphics->device.freeMemory(m_direct_memory, nullptr);
+		if (m_owns_direct_memory) m_graphics->device.freeMemory(m_direct_memory, nullptr);
 		return;
 	}
 	if (m_buffer != nullptr) {

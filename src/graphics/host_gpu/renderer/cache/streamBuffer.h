@@ -43,6 +43,10 @@ inline constexpr vk::BufferUsageFlags AllFlags =
 // an empty buffer (no handle) instead of stopping the emulator; the caller counts it and does without the import.
 struct GuestDirectTag {
 	bool* failed = nullptr;
+	// KYTY_FIX_BDA_MAPTIME: not null = a view: the buffer is bound at `memory_offset` of this imported guest memory
+	// (ImportGuestMemory; owned by the caller) instead of importing its own.
+	vk::DeviceMemory shared_memory = nullptr;
+	uint64_t         memory_offset = 0;
 };
 
 class Buffer {
@@ -52,6 +56,9 @@ public:
 	// CanImportGuestMemory() said yes for the same range.
 	Buffer(GraphicContext& graphics, CommandScheduler& scheduler, GuestDirectTag, uint64_t cpu_address, uint64_t size);
 	[[nodiscard]] static bool CanImportGuestMemory(GraphicContext& graphics, uint64_t cpu_address, uint64_t size);
+	// KYTY_FIX_BDA_MAPTIME: guest memory [cpu_address, cpu_address + size) imported as one Vulkan allocation (null: refused);
+	// buffers are bound to it through GuestDirectTag::shared_memory; the caller frees it after them.
+	[[nodiscard]] static vk::DeviceMemory ImportGuestMemory(GraphicContext& graphics, uint64_t cpu_address, uint64_t size);
 	[[nodiscard]] bool        IsDirect() const noexcept { return m_direct_memory != nullptr; }
 
 	// prefer_host: a MemoryUsage::Stream buffer lives in host memory (like Upload) instead of
@@ -112,6 +119,7 @@ private:
 	vk::Buffer                    m_buffer     = nullptr;
 	VmaAllocation                 m_allocation = nullptr;
 	vk::DeviceMemory              m_direct_memory = nullptr; // KYTY_PERF_DIRECT_RANGES: imported guest memory
+	bool                          m_owns_direct_memory = true; // false: a view (GuestDirectTag::shared_memory)
 	uint64_t                      m_size;
 	bool                          m_coherent = false;
 	std::span<uint8_t>            m_mapped;
