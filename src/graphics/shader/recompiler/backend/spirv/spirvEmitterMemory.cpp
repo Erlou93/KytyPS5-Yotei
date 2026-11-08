@@ -2616,6 +2616,125 @@ uint32_t LoadRawBuffer(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Me
 	return result;
 }
 
+// KYTY_PERF_WIDE_BUFFER_LOAD (indirectLoadFast.h): whether a raw X4 load may read through the buffers_u128 alias: a
+// direct buffer of a compute stage (the robust, branchless dword reads of LoadWordBranchless), 32-bit elements, no
+// swizzle (a swizzled buffer's dwords are not consecutive), and not a GLC load of a shader with per-access coherence
+// (that one keeps the Coherent u32 alias; the wide alias is Coherent exactly when the plain aliases are).
+bool WideBufferLoadCandidate(const EmitterState& state, const IR::MemoryInfo& mem, bool per_access_coherence) {
+	if (!state.guardless || mem.kind != IR::ResourceKind::Buffer || mem.formatted) return false;
+	if (mem.resource >= state.program.info.buffers.size() || IR::StorageBufferElementBits(state.program, mem) != 32u) {
+		return false;
+	}
+	if (mem.coherent && per_access_coherence) return false;
+	const auto packed = StorageBufferPackedStride(state, mem);
+	return (packed & 0x3fffu) == 0u || (packed & (1u << 14u)) == 0u; // BufferByteAddress's swizzle test
+}
+
+// KYTY_PERF_WIDE_BUFFER_LOAD: a raw BUFFER_LOAD_DWORDX4 of a direct buffer (WideBufferLoadCandidate). For dword k,
+// LoadWordBranchless reads element A_k >> 2 of the u32 alias while the lane is active and A_k >> 2 < length, else an
+// element past the end (0, robustBufferAccess2); A_k is ByteAddress of the load's offset + 4k: the guest byte address
+// plus the binding prefix, UINT32_MAX when a zero run-time stride made the guest address UINT32_MAX or the prefix
+// wrapped it. The wide read is taken when A_0 % 16 == 0 and A_0 / 4 + 3 < length. Then A_0 is no UINT32_MAX, so the
+// stride is not zero and nothing wrapped; without swizzle the guest address is linear in the offset, so A_k = A_0 + 4k,
+// which stays below 4 * length without a wrap: every A_k passes the prefix test, A_k >> 2 = A_0 / 4 + k < length, and
+// the four dwords are uvec4 element A_0 / 16 of the buffers_u128 alias (the same binding, so the same bytes), wholly
+// inside the range. That element is read once with the u32 alias's access (Volatile for GLC) and each dword is kept for
+// an active lane, 0 for an inactive one: LoadWordBranchless's four values. Every other lane takes the four dword reads.
+uint32_t LoadBufferWide(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+                        const MemoryResourceAccess& resource, uint32_t guard) {
+	auto&      state   = ctx.state;
+	const auto u32     = TypeU32(state);
+	const auto boolean = TypeBool(state);
+	const auto vector  = TypeU32Composite(state, 4u);
+	const auto zero    = ConstantU32(state, 0);
+	const bool guarded = guard != 0u && guard != ConstantBool(state, true);
+	const auto dwords  = [&]() {
+		std::array<uint32_t, 4> values {};
+		for (uint32_t k = 0; k < 4u; k++) {
+			values[k] = LoadWordBranchless(ctx, inst, RebaseRawComponent(mem, k), resource, guard);
+		}
+		return values;
+	};
+	const int mode = WideBufferLoad::Mode();
+	// The check counts in the fault buffer's diag words and the live mode reads its flags word.
+	if ((mode == 2 || mode == 3) && state.fault_buffer_variable == 0u) return ConstructU32Composite(state, 4u, dwords());
+	const auto address = ByteAddress(ctx, inst, mem); // A_0
+	const auto first   = Binary(state, spv::OpShiftRightLogical, u32, address, ConstantU32(state, 2));
+	auto       wide    = AndCondition(
+        state,
+        Binary(state, spv::OpIEqual, boolean, Binary(state, spv::OpBitwiseAnd, u32, address, ConstantU32(state, 15)), zero),
+        Binary(state, spv::OpULessThan, boolean, EmitAddU32(state, first, ConstantU32(state, 3)), resource.length));
+	const auto wide_read = [&]() {
+		auto&      alias  = state.wide_buffers_alias;
+		const auto access = PrepareStorageBufferResourceAccess(state, mem, alias);
+		if (alias.element_pointer_type == 0u) {
+			alias.element_pointer_type = TypePointer(state, spv::StorageClassStorageBuffer, alias.element_type);
+		}
+		const auto element = Binary(state, spv::OpShiftRightLogical, u32, address, ConstantU32(state, 4));
+		const auto pointer = EmitStorageBufferElementPointer(state, access, element, alias.element_pointer_type);
+		const auto loaded  = LoadResourceElement(state, vector, state.builder.AllocateId(), pointer, access, element);
+		std::array<uint32_t, 4> values {};
+		for (uint32_t k = 0; k < 4u; k++) {
+			values[k] = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, u32, values[k], loaded, k);
+			if (guarded) values[k] = Select(state, u32, guard, values[k], zero);
+		}
+		return values;
+	};
+	if (mode == 2) {
+		// Check: today's four reads are the result. The wide read happens for every lane (where the test fails its element
+		// may lie past the end: robust, 0, unused). Counted where the wide read would be taken: the loads, those whose four
+		// element indices differ from LoadWordBranchless's (the claim above), those whose values differ.
+		const auto today    = dwords();
+		const auto values   = wide_read();
+		const auto past_end = RobustPastEnd(state, resource);
+		auto index_differ   = ConstantBool(state, false);
+		auto value_differ   = ConstantBool(state, false);
+		for (uint32_t k = 0; k < 4u; k++) {
+			const auto old_index = RobustElement(state, resource, guard, DwordIndex(ctx, inst, RebaseRawComponent(mem, k)));
+			auto       new_index = k == 0u ? first : EmitAddU32(state, first, ConstantU32(state, k));
+			if (guarded) new_index = Select(state, u32, guard, new_index, past_end);
+			index_differ = Binary(state, spv::OpLogicalOr, boolean, index_differ,
+			                      Binary(state, spv::OpINotEqual, boolean, old_index, new_index));
+			value_differ = Binary(state, spv::OpLogicalOr, boolean, value_differ,
+			                      Binary(state, spv::OpINotEqual, boolean, today[k], values[k]));
+		}
+		const auto count = [&](uint32_t condition) { return Select(state, u32, condition, ConstantU32(state, 1), zero); };
+		(void)FaultDiagAdd(state, WideBufferLoad::DiagWord, count(wide));
+		(void)FaultDiagAdd(state, WideBufferLoad::DiagWord + 1u, count(AndCondition(state, wide, index_differ)));
+		(void)FaultDiagAdd(state, WideBufferLoad::DiagWord + 2u, count(AndCondition(state, wide, value_differ)));
+		return ConstructU32Composite(state, 4u, today);
+	}
+	if (mode == 3) {
+		// Live mode: also bit 1 of the live shader flags word (SpirvLive, written at frame boundaries).
+		const auto flags = Unary(state, spv::OpLoad, u32,
+		                         FaultElementPointer(state, ConstantU32(state, BufferCache::FAULT_DIAG_BASE +
+		                                                                           BufferCache::FAULT_DIAG_WORDS)));
+		wide = AndCondition(state, wide,
+		                    Binary(state, spv::OpINotEqual, boolean,
+		                           Binary(state, spv::OpBitwiseAnd, u32, flags, ConstantU32(state, SpirvLive::FlagWideBufferLoad)),
+		                           zero));
+	}
+	// Both arms labelled (a selection whose false target was its own merge block crashed the NVIDIA compiler).
+	const auto wide_label  = state.builder.AllocateId();
+	const auto dword_label = state.builder.AllocateId();
+	const auto merge       = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelectionMerge, merge, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, wide, wide_label, dword_label);
+	EmitLabel(state, wide_label);
+	const auto wide_values = ConstructU32Composite(state, 4u, wide_read());
+	const auto wide_exit   = state.current_label;
+	state.builder.AddFunction(spv::OpBranch, merge);
+	EmitLabel(state, dword_label);
+	const auto dword_values = ConstructU32Composite(state, 4u, dwords());
+	const auto dword_exit   = state.current_label;
+	state.builder.AddFunction(spv::OpBranch, merge);
+	EmitLabel(state, merge);
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpPhi, vector, result, wide_values, wide_exit, dword_values, dword_exit);
+	return result;
+}
+
 uint32_t LoadBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t components) {
 	auto& state = ctx.state;
 	{
@@ -2625,6 +2744,11 @@ uint32_t LoadBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compon
 		if (mem.kind != IR::ResourceKind::IndirectBuffer && !mem.formatted && !mem.IsCoherentBufferPairLoad(inst.GetOpcode())) {
 			const auto              resource = PrepareMemoryResourceAccess(state, mem);
 			const auto              guard    = ctx.Arg(inst, inst.NumArgs() - 1);
+			// KYTY_PERF_WIDE_BUFFER_LOAD: an X4 load as one uvec4 read where that gives the same four dwords.
+			if (components == 4u && state.wide_buffers_alias.variable != 0u &&
+			    WideBufferLoadCandidate(state, mem, state.coherent_buffers_alias.variable != 0u)) {
+				return LoadBufferWide(ctx, inst, mem, resource, guard);
+			}
 			std::array<uint32_t, 4> values {};
 			for (uint32_t component = 0; component < components; component++) {
 				values[component] = LoadWordBranchless(ctx, inst, RebaseRawComponent(mem, component), resource, guard);
@@ -2760,6 +2884,21 @@ void StoreWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compo
 } // namespace
 
 static_assert(BdaPageBytes == uint64_t {1} << BufferCache::CACHING_PAGEBITS);
+
+bool WideBufferLoadsWanted(const EmitterState& state, bool per_access_coherence) {
+	if (WideBufferLoad::Mode() == 0 || !WideBufferLoad::Listed(state.program.shader_hash)) return false;
+	for (const auto* block: state.program.blocks) {
+		for (const auto& inst: *block) {
+			if (inst.GetOpcode() != IR::ValueOpcode::LoadBufferU32x4) continue;
+			const auto index = inst.Flags<IR::MemoryFlags>().index;
+			if (index < state.program.memory_info.size() &&
+			    WideBufferLoadCandidate(state, state.program.memory_info[index], per_access_coherence)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
 
 uint32_t GetBdaPointer(EmitterState& state, uint32_t address) {
 	const auto result = state.builder.AllocateId();

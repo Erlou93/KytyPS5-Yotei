@@ -139,6 +139,9 @@ struct EmitterState {
 	// The 32-bit buffers alias decorated Coherent that only the cache-bypassing (GLC)
 	// accesses of a buffer-read-only shader use (variable 0: not used).
 	BufferDefinition                                 coherent_buffers_alias {};
+	// KYTY_PERF_WIDE_BUFFER_LOAD (indirectLoadFast.h): the uvec4 alias of the buffers that raw X4 loads read (variable 0:
+	// not used).
+	BufferDefinition                                 wide_buffers_alias {};
 	// KYTY_PERF_BDA_ENTRY_SHARE: per lane half, Function variables holding the page (u64, address >> page bits) and the
 	// page's base pointer (u64, 0 = none) of the last scalar load through a GPU-built V# (0: not declared).
 	std::array<uint32_t, 2>                          bda_memo_page {};
@@ -816,6 +819,9 @@ void DeclareBdaEntryShare(EmitterState& state);
 void FindScalarLoadGroups(EmitterState& state);
 void DefineIndirectFormattedLoadFunctions(ValueEmitContext& ctx);
 void DefineIndirectRawDword(ValueEmitContext& ctx);
+// KYTY_PERF_WIDE_BUFFER_LOAD (indirectLoadFast.h): the switch is on for this shader and one of its raw X4 loads may read
+// through the buffers_u128 alias (spirvEmitterMemory.cpp, WideBufferLoadCandidate).
+bool WideBufferLoadsWanted(const EmitterState& state, bool per_access_coherence);
 void DefineIndirectStoreFunctions(ValueEmitContext& ctx);
 void DefineBvhIntersect(EmitterState& state);
 // Upstream bfd4c34b8 / 5eab0ec73 (spirvEmitterTrinityBvh.cpp): BVH8 intersections and the BVH stack.

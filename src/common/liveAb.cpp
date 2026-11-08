@@ -48,6 +48,9 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Only which of two exact paths the listed shaders take per raw X4 buffer load (KYTY_PERF_WIDE_BUFFER_LOAD=3 compiles
+    // both and reads the live shader flags word, rewritten at frame boundaries; indirectLoadFast.h).
+    {Switch::WideBufferLoad, "KYTY_PERF_WIDE_BUFFER_LOAD", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

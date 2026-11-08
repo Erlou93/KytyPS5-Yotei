@@ -60,6 +60,9 @@ inline constexpr const char* Names[] = {
     "KYTY_PERF_BINDLESS_CLASSES",
     "KYTY_PERF_F16_CVT_PLAIN",
     "KYTY_PERF_SPIRV_STORE_OUTLINE",
+    // indirectLoadFast.cpp (WideBufferLoad), read by the SPIR-V emitter: raw X4 loads of direct buffers as one uvec4 read.
+    "KYTY_PERF_WIDE_BUFFER_LOAD",
+    "KYTY_PERF_WIDE_BUFFER_LOAD_HASHES",
     // pipelineCache.cpp: the driver cache's signature (the warm list file is dropped with it).
     "KYTY_PIPELINE_CACHE_ANY_REVISION",
     "KYTY_RECORD_KEYED_VERIFY",

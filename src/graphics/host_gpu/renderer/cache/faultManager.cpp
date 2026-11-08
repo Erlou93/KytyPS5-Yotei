@@ -112,6 +112,8 @@ FaultManager::~FaultManager() {
 
 static_assert(IndirectLoadFast::DiagWord >= BufferCache::FAULT_DIAG_MISS_FIRST + 4 * BufferCache::FAULT_DIAG_MISS_SLOTS &&
               IndirectLoadFast::DiagWord + 8 <= BufferCache::FAULT_DIAG_WORDS);
+static_assert(WideBufferLoad::DiagWord >= IndirectLoadFast::DiagWord + 8 &&
+              WideBufferLoad::DiagWord + 3 <= ShaderRecompiler::IR::BindlessCensusWord);
 static_assert(ShaderRecompiler::IR::BindlessCensusWord >= IndirectLoadFast::DiagWord + 8 &&
               ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords <= BufferCache::FAULT_DIAG_WORDS);
 static_assert(ShaderRecompiler::IR::WaterfallRecord0CensusWord >= ShaderRecompiler::IR::BindlessCensusWord + ShaderRecompiler::IR::BindlessCensusWords &&
@@ -181,6 +183,19 @@ void FaultManager::ReportDiagTail(const uint32_t* tail) {
 				line += item;
 			}
 			std::fprintf(stderr, "PERF indirect_format_census total=%llu%s\n", static_cast<unsigned long long>(total), line.c_str());
+		}
+	}
+	// KYTY_PERF_WIDE_BUFFER_LOAD=2: raw X4 loads that would read one uvec4 element, checked against the four dword reads
+	// (index_differ must stay 0; value_differ only where another invocation wrote the bytes between the two reads).
+	if (WideBufferLoad::Mode() == 2) {
+		static uint64_t wide = 0, index_differ = 0, value_differ = 0, passes = 0;
+		wide += tail[WideBufferLoad::DiagWord];
+		index_differ += tail[WideBufferLoad::DiagWord + 1];
+		value_differ += tail[WideBufferLoad::DiagWord + 2];
+		if ((++passes % 256u) == 0u || tail[WideBufferLoad::DiagWord + 1] != 0u) {
+			std::fprintf(stderr, "PERF wide_buffer_load verify wide=%llu index_differ=%llu value_differ=%llu\n",
+			             static_cast<unsigned long long>(wide), static_cast<unsigned long long>(index_differ),
+			             static_cast<unsigned long long>(value_differ));
 		}
 	}
 	if (ShaderRecompiler::IR::BindlessPlaceholderCensus()) { // KYTY_DIAG_BINDLESS_PLACEHOLDER_CENSUS: lanes by slot read
@@ -363,7 +378,7 @@ void FaultManager::ProcessFaultBuffer() {
 	// KYTY_DIAG_RT_TRIPS: the tail of the work recorded so far goes to this area's diagnostic copy and starts over.
 	const auto diag_offset = MaxPendingFaults * PageFaultAreaSize * 2 + m_current_area * DiagAreaSize;
 	if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
-	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
+	    IndirectLoadFast::Mode() == 2 || WideBufferLoad::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
 	    ShaderRecompiler::IR::WaterfallRecord0Census() || IndirectLoadFast::CensusEnabled()) { // + KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 		const auto tail_offset = uint64_t {BufferCache::FAULT_DIAG_BASE} * sizeof(uint32_t);
 		vk::BufferMemoryBarrier2 to_copy {};
@@ -416,7 +431,7 @@ void FaultManager::ProcessFaultBuffer() {
 		m_download_buffer.Invalidate(offset, PageFaultAreaSize);
 		if (FaultDiagTripsEnabled() || BufferCache::BdaEntryShareMode() == 2 ||
 	    ShaderRecompiler::IR::ClampNanMode() == 2 ||
-	    IndirectLoadFast::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
+	    IndirectLoadFast::Mode() == 2 || WideBufferLoad::Mode() == 2 || ShaderRecompiler::IR::BindlessPlaceholderCensus() ||
 		    ShaderRecompiler::IR::WaterfallRecord0Census() || IndirectLoadFast::CensusEnabled()) { // KYTY_DIAG_RT_TRIPS, KYTY_PERF_BDA_ENTRY_SHARE=2, KYTY_FIX_CLAMP_NAN=2, KYTY_PERF_INDIRECT_LOAD_FAST=2
 			m_download_buffer.Invalidate(diag_offset, DiagAreaSize);
 			ReportDiagTail(std::bit_cast<const uint32_t*>(m_download_buffer.Mapped().data() + diag_offset));

@@ -322,12 +322,13 @@ void DefineDescriptors(EmitterState& state) {
 				// go through its non-coherent GL0/GL1 caches as well. The GLC accesses stay Coherent + Volatile.
 				const bool per_access_coherence = info.coherent_buffers && !info.buffer_writes && !info.coherent_narrow &&
 				                                  !state.program.has_address_writes;
+				const bool wide = WideBufferLoadsWanted(state, per_access_coherence); // KYTY_PERF_WIDE_BUFFER_LOAD
 				for (uint32_t alias = 0; alias < used.size(); ++alias) {
 					if (!used[alias]) continue;
 					auto& buffer = state.storage_buffers[alias];
 					const auto type = StorageBufferType(state, buffer, 8u << alias);
 					buffer.variable = Define(ArrayType(type), names[alias]);
-					if (info.buffer_u8 || info.buffer_u16 || info.buffer_int64_atomics || per_access_coherence) {
+					if (info.buffer_u8 || info.buffer_u16 || info.buffer_int64_atomics || per_access_coherence || wide) {
 						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationAliased);
 					}
 					// RDNA2 stores publish to L2 even without GLC; every alias of the buffer
@@ -343,6 +344,22 @@ void DefineDescriptors(EmitterState& state) {
 					coherent.variable = Define(ArrayType(coherent.type), "buffers_coherent");
 					state.builder.AddAnnotation(spv::OpDecorate, coherent.variable, spv::DecorationAliased);
 					state.builder.AddAnnotation(spv::OpDecorate, coherent.variable, spv::DecorationCoherent);
+				}
+				if (wide) {
+					// KYTY_PERF_WIDE_BUFFER_LOAD: uvec4 elements (stride 16) over the same binding, Coherent exactly when the
+					// plain aliases are (its loads are never the GLC loads of a per-access-coherence shader).
+					auto& buffer        = state.wide_buffers_alias;
+					buffer.element_type = TypeU32Composite(state, 4u);
+					const auto array    = state.builder.DecoratedType(
+					    spv::OpTypeRuntimeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, 16u}}}, buffer.element_type);
+					buffer.type = state.builder.DecoratedType(
+					    spv::OpTypeStruct, {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
+					                        {spv::OpDecorate, {spv::DecorationBlock}}}, array);
+					buffer.variable = Define(ArrayType(buffer.type), "buffers_u128");
+					state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationAliased);
+					if (info.coherent_buffers && !per_access_coherence) {
+						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationCoherent);
+					}
 				}
 				break;
 			}
