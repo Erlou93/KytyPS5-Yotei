@@ -1,5 +1,4 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-#include "graphics/host_gpu/renderer/indirectLoadFast.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
@@ -311,18 +310,13 @@ void DefineBvhIntersect(EmitterState& s) {
 		// The node's second 64 bytes: `address` is 64-aligned (base << 8 plus index << 6), so unless it is the last 64
 		// bytes of its 16 KiB page, address + 64 lies in the same page and the page table gives first + 64 (one entry; the
 		// remap of high addresses and the page bound are per page). An unmapped first page keeps the lookup. The
-		// cutscene's BVH shader 91451da6 spent ~10% of its samples in this second lookup (Nsight, 8.11).
-		auto same_page = Binary(
+		// cutscene's BVH shader 91451da6 spent ~10% of its samples in this second lookup (Nsight, 8.11);
+		// live A/B per call: -8.1% (part 2), -10.7% (part 1).
+		const auto same_page = Binary(
 		    s, spv::OpLogicalAnd, b,
 		    Binary(s, spv::OpULessThan, b, Binary(s, spv::OpBitwiseAnd, wide, address, ConstantU64(s, BdaPageBytes - 1u)),
 		           ConstantU64(s, BdaPageBytes - 64u)),
 		    Binary(s, spv::OpINotEqual, b, first, ConstantU64(s, 0)));
-		if (SpirvLive::BvhOneLookupLive() && s.fault_buffer_variable != 0u) { // KYTY_PERF_BVH_ONE_LOOKUP=3 (test only)
-			const auto flags = LoadSpirvLiveFlags(s);
-			same_page = Binary(s, spv::OpLogicalAnd, b, same_page,
-			                   Binary(s, spv::OpINotEqual, b, Binary(s, spv::OpBitwiseAnd, u, flags, ConstantU32(s, SpirvLive::FlagBvhOneLookup)),
-			                          ConstantU32(s, 0)));
-		}
 		const auto second  = EmitValueOrDefaultIfCondition(s, full, wide, ConstantU64(s, 0), [&] {
 			return EmitValueOrDefaultIfCondition(
 			    s, Unary(s, spv::OpLogicalNot, b, same_page), wide, Binary(s, spv::OpIAdd, wide, first, ConstantU64(s, 64)),

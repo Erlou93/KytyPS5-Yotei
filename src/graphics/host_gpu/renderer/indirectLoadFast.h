@@ -47,11 +47,6 @@ namespace SpirvLive {
 
 inline constexpr uint32_t LiveWordsBytes      = 256;
 inline constexpr uint32_t FlagIndirectLoadFast = 1u << 0u;
-inline constexpr uint32_t FlagBvhOneLookup     = 1u << 1u; // KYTY_PERF_BVH_ONE_LOOKUP=3
-
-// KYTY_PERF_BVH_ONE_LOOKUP=3 (test only): a BVH node's second 64 bytes reuse the first page-table lookup only while
-// FlagBvhOneLookup is set (KYTY_LIVE_AB=KYTY_PERF_BVH_ONE_LOOKUP toggles it); default (unset) = always reuse.
-[[nodiscard]] bool BvhOneLookupLive();
 
 // Whether any switch is in its live mode (the fault buffer then has the flags word and Update writes it).
 [[nodiscard]] bool Enabled();

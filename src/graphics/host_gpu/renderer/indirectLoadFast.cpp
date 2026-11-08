@@ -64,16 +64,8 @@ bool Listed(uint64_t shader_hash) {
 
 namespace SpirvLive {
 
-bool BvhOneLookupLive() {
-	static const bool on = [] {
-		const char* value = std::getenv("KYTY_PERF_BVH_ONE_LOOKUP");
-		return value != nullptr && value[0] == '3';
-	}();
-	return on;
-}
-
 bool Enabled() {
-	static const bool on = IndirectLoadFast::Mode() == 3 || BvhOneLookupLive();
+	static const bool on = IndirectLoadFast::Mode() == 3;
 	return on;
 }
 
@@ -81,9 +73,6 @@ uint32_t Flags() {
 	uint32_t flags = 0;
 	if (IndirectLoadFast::Mode() == 3 && Common::LiveAb::Gate(Common::LiveAb::Switch::IndirectLoadFast, 1u) != 0u) {
 		flags |= FlagIndirectLoadFast;
-	}
-	if (BvhOneLookupLive() && Common::LiveAb::Gate(Common::LiveAb::Switch::BvhOneLookup, 1u) != 0u) {
-		flags |= FlagBvhOneLookup;
 	}
 	return flags;
 }

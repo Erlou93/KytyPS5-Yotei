@@ -2761,11 +2761,6 @@ void StoreWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compo
 
 static_assert(BdaPageBytes == uint64_t {1} << BufferCache::CACHING_PAGEBITS);
 
-uint32_t LoadSpirvLiveFlags(EmitterState& state) {
-	return Unary(state, spv::OpLoad, TypeU32(state),
-	             FaultElementPointer(state, ConstantU32(state, BufferCache::FAULT_DIAG_BASE + BufferCache::FAULT_DIAG_WORDS)));
-}
-
 uint32_t GetBdaPointer(EmitterState& state, uint32_t address) {
 	const auto result = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpFunctionCall, TypeU64(state), result,

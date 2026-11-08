@@ -48,9 +48,6 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
-    // Whether a BVH node's second 64 bytes reuse the first page-table lookup (1) or look up again (0); both paths are
-    // compiled in and give the same pointers (spirvEmitterBvh.cpp).
-    {Switch::BvhOneLookup, "KYTY_PERF_BVH_ONE_LOOKUP", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
