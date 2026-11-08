@@ -48,6 +48,8 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Whether SCC branches take SCC (1) or the subgroup vote (0); both compiled in, same results (spirvEmitterFlow.cpp).
+    {Switch::SccNoVote, "KYTY_PERF_SCC_NO_VOTE", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

@@ -62,10 +62,24 @@ bool Listed(uint64_t shader_hash) {
 
 } // namespace IndirectLoadFast
 
+namespace SccNoVote {
+
+int Mode() {
+	static const int mode = [] {
+		const char* value = std::getenv("KYTY_PERF_SCC_NO_VOTE");
+		const int   m     = value != nullptr ? std::atoi(value) : 0;
+		if (m != 0) std::fprintf(stderr, "PERF_SCC_NO_VOTE mode=%d\n", m);
+		return m;
+	}();
+	return mode;
+}
+
+} // namespace SccNoVote
+
 namespace SpirvLive {
 
 bool Enabled() {
-	static const bool on = IndirectLoadFast::Mode() == 3;
+	static const bool on = IndirectLoadFast::Mode() == 3 || SccNoVote::Mode() == 3;
 	return on;
 }
 
@@ -73,6 +87,9 @@ uint32_t Flags() {
 	uint32_t flags = 0;
 	if (IndirectLoadFast::Mode() == 3 && Common::LiveAb::Gate(Common::LiveAb::Switch::IndirectLoadFast, 1u) != 0u) {
 		flags |= FlagIndirectLoadFast;
+	}
+	if (SccNoVote::Mode() == 3 && Common::LiveAb::Gate(Common::LiveAb::Switch::SccNoVote, 1u) != 0u) {
+		flags |= FlagSccNoVote;
 	}
 	return flags;
 }

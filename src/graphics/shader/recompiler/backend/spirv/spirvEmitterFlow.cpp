@@ -1,4 +1,6 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/indirectLoadFast.h"
 
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/BindlessBindings.h"
@@ -830,6 +832,32 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (kind == CFG::BranchCondition::ScalarInstruction) return ctx.Arg(inst, 0);
 	const bool zero = kind == CFG::BranchCondition::ExecZero ||
 	                  kind == CFG::BranchCondition::VccZero || kind == CFG::BranchCondition::SccZero;
+	// KYTY_PERF_SCC_NO_VOTE (code-size project K1): SCC is written only by scalar instructions, so it is the same in every
+	// invocation of the wave (and in both halves of a paired wave); any, all and the pair exchange of one value return it.
+	const bool scc = kind == CFG::BranchCondition::SccZero || kind == CFG::BranchCondition::SccNonZero;
+	const int  scc_mode = scc ? SccNoVote::Mode() : 0;
+	if (scc_mode == 1) return ctx.Arg(inst, 0);
+	const auto voted = [&](uint32_t vote_result) {
+		if (scc_mode == 2 && ctx.state.fault_buffer_variable != 0u) {
+			auto&      state  = ctx.state;
+			const auto differ = Binary(state, spv::OpLogicalNotEqual, TypeBool(state), vote_result, ctx.Arg(inst, 0));
+			(void)FaultDiagAdd(state, SccNoVote::DiagWord, ConstantU32(state, 1));
+			(void)FaultDiagAdd(state, SccNoVote::DiagWord + 1u,
+			                   Select(state, TypeU32(state), differ, ConstantU32(state, 1), ConstantU32(state, 0)));
+		}
+		if (scc_mode == 3 && ctx.state.fault_buffer_variable != 0u) {
+			auto&      state = ctx.state;
+			const auto flags = Unary(state, spv::OpLoad, TypeU32(state),
+			                         FaultElementPointer(state, ConstantU32(state, BufferCache::FAULT_DIAG_BASE +
+			                                                                           BufferCache::FAULT_DIAG_WORDS)));
+			const auto on    = Binary(state, spv::OpINotEqual, TypeBool(state),
+			                          Binary(state, spv::OpBitwiseAnd, TypeU32(state), flags,
+			                                 ConstantU32(state, SpirvLive::FlagSccNoVote)),
+			                          ConstantU32(state, 0));
+			return Select(state, TypeBool(state), on, ctx.Arg(inst, 0), vote_result);
+		}
+		return vote_result;
+	};
 	if (ctx.state.wave_pair && ctx.other_half == nullptr) {
 		auto& state = ctx.state;
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformVote);
@@ -839,14 +867,14 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto own   = Select(state, TypeU32(state), vote, ConstantU32(state, 1u), ConstantU32(state, 0u));
 		const auto other = EmitPairExchange(state, own);
 		const auto both  = Binary(state, zero ? spv::OpBitwiseAnd : spv::OpBitwiseOr, TypeU32(state), own, other);
-		return Binary(state, spv::OpINotEqual, TypeBool(state), both, ConstantU32(state, 0u));
+		return voted(Binary(state, spv::OpINotEqual, TypeBool(state), both, ConstantU32(state, 0u)));
 	}
 	const auto ballot = ctx.Ballot(inst.Arg(0));
 	const auto reference = zero ? ctx.Ballot(IR::Value(true))
 	                            : ConstantU32CompositeZero(ctx.state, 4);
 	const auto compare = Binary(ctx.state, zero ? spv::OpIEqual : spv::OpINotEqual,
 	                            TypeBoolVector(ctx.state, 4), ballot, reference);
-	return Unary(ctx.state, zero ? spv::OpAll : spv::OpAny, TypeBool(ctx.state), compare);
+	return voted(Unary(ctx.state, zero ? spv::OpAll : spv::OpAny, TypeBool(ctx.state), compare));
 }
 
 uint32_t EmitBallot(ValueEmitContext& ctx, IR::Value predicate) {

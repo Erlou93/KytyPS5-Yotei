@@ -38,6 +38,16 @@ inline constexpr uint32_t CensusWords = 512;
 
 } // namespace IndirectLoadFast
 
+// KYTY_PERF_SCC_NO_VOTE (test switch, code-size project K1): a branch on SCC takes SCC itself instead of a subgroup vote
+// (and, for paired waves, the exchange with the other half). SCC comes from scalar instructions, so it is the same in
+// every invocation of the wave and the vote returns it unchanged. 0 = vote (today), 1 = SCC, 2 = vote kept and every
+// invocation adds 1 to diag word DiagWord + 0 and its mismatches (vote != SCC) to DiagWord + 1 (PERF scc_no_vote
+// verify), 3 = both compiled, SCC while live flag bit 1 is set.
+namespace SccNoVote {
+inline constexpr uint32_t DiagWord = IndirectLoadFast::DiagWord + 8u;
+[[nodiscard]] int Mode();
+} // namespace SccNoVote
+
 // Live shader flags: one word of the fault buffer, after the diagnostic tail (BufferCache::FAULT_DIAG_BASE +
 // FAULT_DIAG_WORDS; the fault buffer has LiveWordsBytes more for it), which shaders compiled with a switch's live mode
 // read before taking the switch's path. The GPU thread rewrites it at frame boundaries when a live A/B phase changes
@@ -47,6 +57,7 @@ namespace SpirvLive {
 
 inline constexpr uint32_t LiveWordsBytes      = 256;
 inline constexpr uint32_t FlagIndirectLoadFast = 1u << 0u;
+inline constexpr uint32_t FlagSccNoVote        = 1u << 1u; // KYTY_PERF_SCC_NO_VOTE=3
 
 // Whether any switch is in its live mode (the fault buffer then has the flags word and Update writes it).
 [[nodiscard]] bool Enabled();
