@@ -167,8 +167,8 @@ void PlanSrtGpuWords(Program& program) {
 	const auto     base   = static_cast<uint32_t>(program.srt_reads.size());
 	const auto     count  = static_cast<uint32_t>(slots.size());
 	const uint32_t words  = base + count * (verify ? 2u : 1u);
-	// KYTY_PERF_UNIFORM_CONST_BUFFERS: the flat words must fit one uniform view.
-	if (UniformConstBuffers() && words > UniformBufferMaxBytes / 4u) return;
+	// Uniform const buffers (ShaderIR.h): the flat words must fit one uniform view.
+	if (ReadConstUniform(program.srt_reads.size()) && words > UniformBufferMaxBytes / 4u) return;
 	for (uint32_t k = 0; k < count; ++k) {
 		program.info.srt_gpu_words.push_back(
 		    {.slot = slots[k], .hi = base + k, .verify = verify ? base + count + k : UINT32_MAX});
