@@ -186,12 +186,17 @@ uint32_t GuestAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Mem
 	                    ConstantU64(state, static_cast<uint64_t>(static_cast<int64_t>(immediate))));
 }
 
+} // namespace
+
+// Declared in spirvEmitterInternal.h (also used by spirvEmitterFlow.cpp, KYTY_PERF_SCC_NO_VOTE=3).
 uint32_t FaultElementPointer(EmitterState& state, uint32_t index) {
 	const auto pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer,
 	                          state.fault_buffer_variable, ConstantU32(state, 0), index);
 	return pointer;
 }
+
+namespace {
 
 void RecordBdaFault(EmitterState& state, uint32_t page) {
 	const auto word =
