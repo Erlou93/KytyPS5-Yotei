@@ -32,6 +32,19 @@ bool CensusEnabled() {
 	return on;
 }
 
+bool CensusFor(uint64_t shader_hash) {
+	// KYTY_DIAG_INDIRECT_FORMAT_CENSUS_HASHES: the shaders counted (default: all).
+	static const std::string list = [] {
+		const char* value = std::getenv("KYTY_DIAG_INDIRECT_FORMAT_CENSUS_HASHES");
+		return value != nullptr ? std::string(value) : std::string("all");
+	}();
+	if (!CensusEnabled()) return false;
+	if (list == "all") return true;
+	char text[17];
+	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(shader_hash));
+	return list.find(text) != std::string::npos;
+}
+
 bool Listed(uint64_t shader_hash) {
 	// Default: the probe-evaluation shaders of "Deferred Ambient>Eval non-RT Probes" (2.65 ms of GPU time per frame at
 	// the torii gate).
