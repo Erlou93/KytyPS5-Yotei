@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
