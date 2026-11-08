@@ -831,6 +831,8 @@ uint32_t GetBdaPointer(EmitterState& state, uint32_t address);
 // (BufferCache::FAULT_DIAG_*). FaultDiagAdd: atomic add of `value` to tail word `word`, returns the old value.
 // FaultDiagStore: `value` (u32 id) to tail word FAULT_DIAG_BASE + `first` + `slot` * `stride` + `field`.
 uint32_t FaultDiagAdd(EmitterState& state, uint32_t word, uint32_t value);
+// Pointer to word `index` (u32 id) of the fault buffer (state.fault_buffer_variable).
+uint32_t FaultElementPointer(EmitterState& state, uint32_t index);
 void     FaultDiagStore(EmitterState& state, uint32_t first, uint32_t slot, uint32_t stride, uint32_t field, uint32_t value);
 // A store through BDA whose page has no host buffer (`bda` == 0) is dropped: counted and reported.
 void     ReportBdaStoreMiss(EmitterState& state, uint32_t address, uint32_t bda);

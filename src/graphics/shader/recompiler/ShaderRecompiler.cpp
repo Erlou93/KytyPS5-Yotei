@@ -996,8 +996,15 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	}();
 	std::array<uint32_t, 10> cond_kinds {};
 	uint32_t                 cond_dup = 0, ir_selects = 0;
+	// Repeats in other blocks (K2 follow-up): the same value and kind already used by a condition in an earlier block
+	// (xblock), or the same value with any kind (xblock_any, e.g. SccZero and SccNonZero of one compare). Immediates skipped.
+	uint32_t                                 cond_xblock = 0, cond_xblock_any = 0;
+	std::set<std::pair<uintptr_t, uint32_t>> program_seen;
+	std::set<uintptr_t>                      program_seen_any;
 	if (code_stats) {
 		for (const auto* block: ir.blocks) {
+			std::set<std::pair<uintptr_t, uint32_t>> block_keys;
+			std::set<uintptr_t>                      block_values;
 			std::set<std::pair<uintptr_t, uint32_t>> seen;
 			for (const auto& inst: *block) {
 				if (inst.GetOpcode() == IR::ValueOpcode::SelectU32) ++ir_selects;
@@ -1008,7 +1015,15 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 				const auto key = arg.IsImmediate() ? uintptr_t {arg.U1() ? 1u : 2u}
 				                                   : reinterpret_cast<uintptr_t>(arg.ResolveInstruction());
 				if (!seen.emplace(key, kind).second) ++cond_dup;
+				if (!arg.IsImmediate()) {
+					if (program_seen.contains({key, kind})) ++cond_xblock;
+					if (program_seen_any.contains(key)) ++cond_xblock_any;
+					block_keys.emplace(key, kind);
+					block_values.insert(key);
+				}
 			}
+			program_seen.insert(block_keys.begin(), block_keys.end());
+			program_seen_any.insert(block_values.begin(), block_values.end());
 		}
 	}
 	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " SPIR-V EmitProgram\n",
@@ -1031,10 +1046,10 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 			i += count == 0u ? 1u : count;
 		}
 		std::fprintf(stderr,
-		             "CODE_STATS stage=%s hash=%016llx words=%zu cond[scc=%u vcc=%u exec=%u scalar=%u] cond_dup=%u ir_selects=%u "
+		             "CODE_STATS stage=%s hash=%016llx words=%zu cond[scc=%u vcc=%u exec=%u scalar=%u] cond_dup=%u cond_xblock=%u cond_xblock_any=%u ir_selects=%u "
 		             "elide[selects=%u elided=%u top=%u wider=%u] spv[any=%u all=%u ballot=%u barrier=%u select=%u phi=%u atomic_store=%u]\n",
 		             StageName(ir.stage), static_cast<unsigned long long>(ir.shader_hash), spirv.size(),
-		             cond_kinds[1] + cond_kinds[2], cond_kinds[3] + cond_kinds[4], cond_kinds[5] + cond_kinds[6], cond_kinds[7], cond_dup,
+		             cond_kinds[1] + cond_kinds[2], cond_kinds[3] + cond_kinds[4], cond_kinds[5] + cond_kinds[6], cond_kinds[7], cond_dup, cond_xblock, cond_xblock_any,
 		             ir_selects, elide_stats.selects, elide_stats.elided, elide_stats.top, elide_stats.wider, any, all, ballot, barrier,
 		             select, phi, atomic_store);
 	}
