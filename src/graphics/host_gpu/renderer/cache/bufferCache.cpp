@@ -215,6 +215,11 @@ void BufferCache::DiagBdaPoolRead(uint64_t address, bool served) {
 
 void BufferCache::DiagBdaPoolMap(uint64_t vaddr, uint64_t size, bool map) {
 	if (!DiagBdaPools()) return;
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1) < 40u) {
+		std::fprintf(stderr, "BDA_POOLS_MAP %s vaddr=0x%llx size=0x%llx\n", map ? "map" : "unmap",
+		             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size));
+	}
 	const int     pool = BdaPoolOf(vaddr);
 	const int64_t live = g_bda_map_live[pool].fetch_add(map ? static_cast<int64_t>(size) : -static_cast<int64_t>(size)) +
 	                     (map ? static_cast<int64_t>(size) : -static_cast<int64_t>(size));
