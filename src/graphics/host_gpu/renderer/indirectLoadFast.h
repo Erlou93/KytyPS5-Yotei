@@ -47,11 +47,6 @@ namespace SpirvLive {
 
 inline constexpr uint32_t LiveWordsBytes      = 256;
 inline constexpr uint32_t FlagIndirectLoadFast = 1u << 0u;
-inline constexpr uint32_t FlagBvhPageMemo      = 1u << 1u; // KYTY_PERF_BVH_PAGE_MEMO=3
-
-// KYTY_PERF_BVH_PAGE_MEMO=3 (test only): the BVH intersection's page memo is used only while FlagBvhPageMemo is set
-// (KYTY_LIVE_AB=KYTY_PERF_BVH_PAGE_MEMO toggles it); unset = always used.
-[[nodiscard]] bool BvhPageMemoLive();
 
 // Whether any switch is in its live mode (the fault buffer then has the flags word and Update writes it).
 [[nodiscard]] bool Enabled();

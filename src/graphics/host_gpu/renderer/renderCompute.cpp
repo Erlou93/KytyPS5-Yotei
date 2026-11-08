@@ -5,7 +5,6 @@
 #include "graphics/host_gpu/renderer/renderComputeTrace.h"
 #include "graphics/host_gpu/renderer/twinDispatch.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
-#include "graphics/host_gpu/renderer/indirectLoadFast.h"
 #include "graphics/host_gpu/gpuCheckpoints.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -950,8 +949,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	if (GpuTimer::LabelsEnabled()) GpuTimer::LabelEnd(vk_buffer);
-	// KYTY_PERF_BVH_PAGE_MEMO=3 (test only): the live flags in the timing key (GPUTIME_TOP b = 1 | flags << 4).
-	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, SpirvLive::Enabled() ? 1u | SpirvLive::Flags() << 4u : 1u);
+	if (gpu_time != ~0u) GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1);
 	m_context.GetBufferCache().DiagGpuDelayAfter(vk_buffer, program.shader_hash); // KYTY_DIAG_GPU_DELAY_HASHES (measurement only)
 	m_context.GetBufferCache().NoteCommandEmitted();
 	GpuCheckpoints::Mark(vk_buffer, ~input_info.stage.program->shader_hash);

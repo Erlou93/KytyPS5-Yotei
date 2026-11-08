@@ -34,7 +34,6 @@ enum class Switch : uint32_t {
 	SharedImageMemory,     // KYTY_FIX_SHARED_IMAGE_MEMORY (0/1 per bind; =2, the check, only as the start value; D4 K1)
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
-	BvhPageMemo,               // KYTY_PERF_BVH_PAGE_MEMO (=3 test: shader-side, SpirvLive flags)
 	Count
 };
 

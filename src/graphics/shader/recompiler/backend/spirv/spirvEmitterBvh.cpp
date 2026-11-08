@@ -1,5 +1,4 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-#include "graphics/host_gpu/renderer/indirectLoadFast.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
@@ -315,13 +314,8 @@ void DefineBvhIntersect(EmitterState& s) {
 	const auto result = EmitValueOrDefaultIfCondition(s, valid, vec4, invalid, [&] {
 		const auto page_offset = Binary(s, spv::OpBitwiseAnd, wide, address, ConstantU64(s, BdaPageBytes - 1u));
 		const auto page        = Binary(s, spv::OpShiftRightLogical, wide, address, ConstantU32(s, 14));
-		auto       hit         = Binary(s, spv::OpIEqual, b, page, Unary(s, spv::OpLoad, wide, memo_page));
-		if (SpirvLive::BvhPageMemoLive() && s.fault_buffer_variable != 0u) { // KYTY_PERF_BVH_PAGE_MEMO=3 (test only)
-			hit = Binary(s, spv::OpLogicalAnd, b, hit,
-			             Binary(s, spv::OpINotEqual, b,
-			                    Binary(s, spv::OpBitwiseAnd, u, LoadSpirvLiveFlags(s), ConstantU32(s, SpirvLive::FlagBvhPageMemo)),
-			                    ConstantU32(s, 0)));
-		}
+		// Live A/B per call of 91451da6 (8.11): -8.9% in cutscene part 1, -1.1% / -4.1% in part 2.
+		const auto hit         = Binary(s, spv::OpIEqual, b, page, Unary(s, spv::OpLoad, wide, memo_page));
 		const auto first = EmitValueOrDefaultIfCondition(
 		    s, Unary(s, spv::OpLogicalNot, b, hit), wide,
 		    Binary(s, spv::OpIAdd, wide, Unary(s, spv::OpLoad, wide, memo_base), page_offset), [&] {
