@@ -344,6 +344,7 @@ public:
 	static constexpr uint64_t BdaMapTimePoolStart = 0x8000000000ull;
 	static constexpr uint64_t BdaMapTimePoolSize  = uint64_t {16} << 30u; // the allocator holds ~3.9 GiB on a base PS5
 	static constexpr uint64_t MapTimeImportBytes  = uint64_t {256} << 20u; // one import per piece of the pool's backing
+	static constexpr size_t   MapTimeGranuleItem  = size_t {1} << 62u;     // a worker queue item: one granule, not a piece
 	void NoteBdaMapTimeZero() { m_maptime.zero.fetch_add(1, std::memory_order_relaxed); }
 
 	// KYTY_TRACE_PERF: the PERF fault_wait_on_caller line (the caller wait's counters).
@@ -721,19 +722,22 @@ private:
 	// granules asked of the worker, the worker's queue and its finished imports.
 	void MapTimeMap(uint64_t vaddr, uint64_t size);   // RenderContext::MapMemory (game threads)
 	void MapTimeInstall();                            // GPU thread (ApplyFallbackMaps)
+	void MapTimeRequestGranule(size_t granule, uint64_t vaddr); // GPU thread: a download or a read as 0 wants it
+	void MapTimeSize(uint64_t total);                           // under m_maptime.mutex: the tables' first sizing
 	void MapTimeWorker();
 	struct MapTimeState {
 		std::mutex                                           mutex;
 		std::condition_variable                              wake;
 		std::vector<uint64_t>                                granule_vaddr; // where a page of the granule was mapped last
 		std::vector<uint8_t>                                 requested; // per piece: 1 asked or imported, 2 refused
+		std::vector<uint8_t>                                 granule_requested; // single granules (outside the pool)
 		std::deque<size_t>                                   queue;
 		std::vector<vk::DeviceMemory>                        memories; // the imported pieces (freed at the end)
 		std::vector<std::pair<size_t, std::unique_ptr<Buffer>>> ready;
 		std::thread                                          worker;
 		bool                                                 stop = false;
 		std::atomic<uint64_t>                                zero {0};
-		uint64_t imports = 0, imported_bytes = 0, import_us = 0, refused = 0, installed = 0, dropped = 0;
+		uint64_t imports = 0, granule_imports = 0, imported_bytes = 0, import_us = 0, refused = 0, installed = 0, dropped = 0;
 	} m_maptime;
 	std::vector<std::unique_ptr<Buffer>>              m_fallback_chunks; // imported backing per granule, null: not yet
 	std::vector<uint8_t>                              m_fallback_chunk_failed;
