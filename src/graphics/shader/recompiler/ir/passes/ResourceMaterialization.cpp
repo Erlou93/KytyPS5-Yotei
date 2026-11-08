@@ -2446,8 +2446,6 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	// The indirect-descriptor path uses the same clean evaluator (and memo) as the fill and written
 	// descriptor reads above and below.
 	IndirectEvaluator clean_indirect(clean, tape != nullptr ? &*tape_clean : nullptr);
-	// KYTY_PERF_SRT_GPU_WORDS: only the tape writes the address words the shader expects.
-	EXIT_IF(tape == nullptr && !program.info.srt_gpu_words.empty());
 	if (!(tape != nullptr ? tape_walker->RefreshFlatBuffer(program, snapshot.flattened_srt)
 	                      : walker->RefreshFlatBuffer(snapshot.flattened_srt))) {
 		return MaterializeFailAt(__LINE__);

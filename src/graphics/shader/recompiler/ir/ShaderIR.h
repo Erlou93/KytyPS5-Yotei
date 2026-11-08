@@ -18,7 +18,6 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -919,19 +918,6 @@ struct ShaderInfo {
 	bool                            buffer_writes                 = false;
 	bool                            coherent_narrow               = false;
 	bool                            float64                       = false;
-	// KYTY_PERF_SRT_GPU_WORDS (PlanSrtGpuWords): shader-only SRT words the shader reads from GPU memory itself. The flat
-	// SRT holds the word's guest address (low half at the slot, high half at `hi`; 0 reads zero), which the host turns
-	// into a device address at bind time. `verify` (KYTY_PERF_SRT_GPU_WORDS_VERIFY): the flat word with the value the
-	// CPU read as before (UINT32_MAX: none). `srt_flat_words`: the flat words before the indirect mapping words.
-	struct SrtGpuWord {
-		uint32_t slot   = 0;
-		uint32_t hi     = 0;
-		uint32_t verify = UINT32_MAX;
-
-		bool operator==(const SrtGpuWord& other) const = default;
-	};
-	std::vector<SrtGpuWord>         srt_gpu_words;
-	uint32_t                        srt_flat_words                = 0;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };
@@ -1162,19 +1148,6 @@ struct ResourcePlan {
 	};
 	std::shared_ptr<NullFormattedLive> null_formatted_live = std::make_shared<NullFormattedLive>();
 };
-
-// The shader binds the fault buffer: BDA accesses report their faults there, and KYTY_PERF_SRT_GPU_WORDS_VERIFY counts
-// its comparisons in its diagnostic words.
-[[nodiscard]] inline bool UsesFaultBuffer(const ShaderInfo& info) {
-	return info.uses_dma ||
-	       std::ranges::any_of(info.srt_gpu_words, [](const ShaderInfo::SrtGpuWord& word) { return word.verify != UINT32_MAX; });
-}
-
-// The flat SRT words before the indirect mapping words: the slots, plus the KYTY_PERF_SRT_GPU_WORDS address and verify
-// words.
-[[nodiscard]] inline uint32_t SrtFlatWords(const ResourcePlan& plan) {
-	return plan.info.srt_flat_words != 0u ? plan.info.srt_flat_words : static_cast<uint32_t>(plan.srt_reads.size());
-}
 
 struct Program: ResourcePlan {
 	Program() = default;

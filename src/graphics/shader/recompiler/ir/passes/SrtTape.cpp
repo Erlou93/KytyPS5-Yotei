@@ -12,7 +12,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
-#include <string>
 #include <unordered_map>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -74,16 +73,15 @@ uint32_t SrtOperandCount(const SrtNode& node) {
 	}
 }
 
-// KYTY_TRACE_SRT_CLASSES, KYTY_PERF_SRT_GPU_WORDS: per node, 1 when the CPU needs its value (reachable from a
-// descriptor root, an indirect key/selector value, a block condition or a fill root, or from the address operands of
-// any read).
-std::vector<uint8_t> ClassifySrtNodes(const SrtTape& tape) {
+// KYTY_TRACE_SRT_CLASSES: marks every node whose value the CPU needs (reachable from a descriptor root, an indirect
+// key/selector value, a block condition or a fill root, or from the address operands of any read).
+void ClassifySrtReads(SrtTape& tape) {
 	const auto n = static_cast<uint32_t>(tape.nodes.size());
-	std::vector<uint8_t> cpu_needed(n, 0u);
+	tape.cpu_needed.assign(n, 0u);
 	std::vector<uint32_t> pending;
 	const auto push = [&](uint32_t id) {
-		if (id < n && cpu_needed[id] == 0u) {
-			cpu_needed[id] = 1u;
+		if (id < n && tape.cpu_needed[id] == 0u) {
+			tape.cpu_needed[id] = 1u;
 			pending.push_back(id);
 		}
 	};
@@ -103,84 +101,8 @@ std::vector<uint8_t> ClassifySrtNodes(const SrtTape& tape) {
 		pending.pop_back();
 		for (uint32_t arg = 0; arg < SrtOperandCount(node); ++arg) push(node.args[arg]);
 	}
-	return cpu_needed;
-}
-
-void ClassifySrtReads(SrtTape& tape) {
-	tape.cpu_needed = ClassifySrtNodes(tape);
-}
-
-// KYTY_PERF_SRT_GPU_WORDS: "all", or a list of 16-digit hashes; unset or "0" off.
-bool SrtGpuWordsRequested(uint64_t hash) {
-	static const std::string list = [] {
-		const char* value = std::getenv("KYTY_PERF_SRT_GPU_WORDS");
-		std::string v     = value != nullptr ? std::string(value) : std::string();
-		if (!v.empty() && v != "0") std::fprintf(stderr, "PERF_SRT_GPU_WORDS %s\n", v.c_str());
-		return v == "0" ? std::string() : v;
-	}();
-	if (list.empty()) return false;
-	if (list == "1" || list == "all") return true;
-	char text[17];
-	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
-	return list.find(text) != std::string::npos;
-}
-
-bool SrtGpuWordsVerify() {
-	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_PERF_SRT_GPU_WORDS_VERIFY");
-		const bool  on    = value != nullptr && value[0] == '1';
-		if (on) std::fprintf(stderr, "PERF_SRT_GPU_WORDS_VERIFY enabled\n");
-		return on;
-	}();
-	return enabled;
 }
 } // namespace
-
-void PlanSrtGpuWords(Program& program) {
-	program.info.srt_gpu_words.clear();
-	program.info.srt_flat_words = 0;
-	// A shader that may write the words it reads (stores through unknown addresses) keeps the snapshot.
-	if (!SrtGpuWordsRequested(program.shader_hash) || !program.srt_plan_complete || program.srt_reads.empty() ||
-	    program.has_address_writes) {
-		return;
-	}
-	const ResourcePlan plan = ExtractResourcePlan(program);
-	const auto         tape = plan.srt_tape != nullptr ? plan.srt_tape : BuildSrtTape(plan);
-	if (tape == nullptr) return; // the runtime has no tape for such a plan either
-	const auto cpu_needed = ClassifySrtNodes(*tape);
-	std::vector<uint32_t> slots;
-	for (uint32_t slot = 0; slot < tape->slots.size(); ++slot) {
-		const auto& read = tape->slots[slot];
-		// Scalar reads through a pointer (LoadAddressU32) or through a V# (ReadConstBuffer: s_buffer_load, the range
-		// check evaluated on the CPU as ReadRaw does); not vector buffer loads.
-		if (read.root >= tape->nodes.size() || read.flat_clean || read.flat_offset != slot ||
-		    (read.opcode != ValueOpcode::LoadAddressU32 && read.opcode != ValueOpcode::ReadConstBuffer)) {
-			continue;
-		}
-		const auto& node = tape->nodes[read.root];
-		if (node.op != SrtOp::RawRead || (node.flags & SrtNode::FlagVector) != 0u || cpu_needed[read.root] != 0u) {
-			continue;
-		}
-		slots.push_back(slot);
-	}
-	if (slots.empty()) return;
-	const bool     verify = SrtGpuWordsVerify();
-	const auto     base   = static_cast<uint32_t>(program.srt_reads.size());
-	const auto     count  = static_cast<uint32_t>(slots.size());
-	const uint32_t words  = base + count * (verify ? 2u : 1u);
-	// Uniform const buffers (ShaderIR.h): the flat words must fit one uniform view.
-	if (ReadConstUniform(program.srt_reads.size()) && words > UniformBufferMaxBytes / 4u) return;
-	for (uint32_t k = 0; k < count; ++k) {
-		program.info.srt_gpu_words.push_back(
-		    {.slot = slots[k], .hi = base + k, .verify = verify ? base + count + k : UINT32_MAX});
-	}
-	program.info.srt_flat_words = words;
-	static std::atomic_uint logged {0};
-	if (logged.fetch_add(1) < 64u) {
-		std::fprintf(stderr, "SRT_GPU_WORDS hash=%016llx slots=%u of %u verify=%d\n",
-		             static_cast<unsigned long long>(program.shader_hash), count, base, verify ? 1 : 0);
-	}
-}
 
 void MergeSrtReads(SrtReadRanges& reads) {
 	size_t kept = 0;
@@ -421,12 +343,6 @@ Reason Builder::Run() {
 		target.opcode       = inst != nullptr ? inst->GetOpcode() : ValueOpcode::Void;
 		// Retained reads carry SrtReadFlags, no guest PC.
 		target.pc           = 0u;
-	}
-	for (const auto& word: m_plan.info.srt_gpu_words) { // KYTY_PERF_SRT_GPU_WORDS
-		if (word.slot < m_tape.slots.size()) {
-			m_tape.slots[word.slot].gpu_hi     = word.hi;
-			m_tape.slots[word.slot].gpu_verify = word.verify == UINT32_MAX ? SrtTape::None : word.verify;
-		}
 	}
 	for (const auto& source: m_plan.descriptor_sources) {
 		auto& values = m_tape.indirect_values.emplace_back();
@@ -909,46 +825,6 @@ bool SrtTapeWalker::ReadRaw(const SrtNode& node, uint64_t& result) {
 	return true;
 }
 
-bool SrtTapeWalker::RawAddress(const SrtNode& node, uint64_t& address) {
-	if (node.op != SrtOp::RawRead || (node.flags & SrtNode::FlagVector) != 0u) return false;
-	const auto& handle = m_tape.nodes[node.args[0]];
-	uint64_t    low    = 0;
-	uint64_t    high   = 0;
-	uint64_t    offset = 0;
-	if (!Eval(handle.args[0], low) || !Eval(handle.args[1], high) || !Eval(node.args[1], offset)) {
-		return false;
-	}
-	const auto base      = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
-	const auto immediate = static_cast<int64_t>(node.imm);
-	if ((node.flags & SrtNode::FlagBuffer) != 0u) {
-		// The V# range check of ReadRaw: an out-of-range load reads zero (address 0).
-		uint64_t records = 0;
-		uint64_t word3   = 0;
-		if ((handle.flags & SrtNode::FlagHandle4) == 0u || !Eval(handle.args[2], records) ||
-		    !Eval(handle.args[3], word3) || immediate < 0) {
-			return false;
-		}
-		const auto byte_offset =
-		    (static_cast<uint64_t>(immediate) & ~uint64_t {3}) + (static_cast<uint32_t>(offset) & ~3u);
-		const auto stride = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
-		const auto size   = stride == 0u ? static_cast<uint64_t>(static_cast<uint32_t>(records))
-		                                 : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
-		if (byte_offset > size || size - byte_offset < sizeof(uint32_t)) {
-			address = 0u;
-			return true;
-		}
-		address = (base & ~uint64_t {3}) + byte_offset;
-	} else {
-		const auto relative = (immediate & ~int64_t {3}) + static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
-		if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
-			return false;
-		}
-	}
-	// ReadRaw reads zero from the null page without touching memory.
-	if (address < 0x10000u) address = 0u;
-	return true;
-}
-
 bool SrtTapeWalker::Run(uint32_t index, const SrtNode& node, uint64_t& result) {
 	uint64_t   a       = 0;
 	uint64_t   b       = 0;
@@ -1287,22 +1163,6 @@ bool SrtTapeWalker::RefreshFlatBuffer(const ResourcePlan& program, std::vector<u
 			return false;
 		auto&    evaluator = clean ? *m_clean_evaluator : *this;
 		uint64_t wide      = 0;
-		if (read.gpu_hi != SrtTape::None) {
-			// KYTY_PERF_SRT_GPU_WORDS: the shader reads the word itself; the flat words hold its guest address (and
-			// with KYTY_PERF_SRT_GPU_WORDS_VERIFY the value read as before, for the shader's comparison).
-			uint64_t   address = 0;
-			const bool ok      = read.gpu_hi < flat.size() && read.flat_offset < flat.size() &&
-			                RawAddress(m_tape.nodes[read.root], address) &&
-			                (read.gpu_verify == SrtTape::None || (read.gpu_verify < flat.size() && Eval(read.root, wide)));
-			if (ok) {
-				flat[read.flat_offset] = static_cast<uint32_t>(address);
-				flat[read.gpu_hi]      = static_cast<uint32_t>(address >> 32u);
-				if (read.gpu_verify != SrtTape::None) flat[read.gpu_verify] = static_cast<uint32_t>(wide);
-			} else if (!m_quiet) {
-				std::fprintf(stderr, "SRT refresh failed slot=%u gpu_word pc=0x%x\n", slot, read.pc);
-			}
-			return ok;
-		}
 		const bool ok = read.flat_offset < flat.size() && evaluator.Eval(read.root, wide);
 		if (ok) {
 			flat[read.flat_offset] = static_cast<uint32_t>(wide);
@@ -1316,15 +1176,13 @@ bool SrtTapeWalker::RefreshFlatBuffer(const ResourcePlan& program, std::vector<u
 	const auto fusable = [&](uint32_t slot) {
 		if (slot >= m_tape.slots.size()) return SrtTape::None;
 		const auto& read = m_tape.slots[slot];
-		return read.flat_clean || read.gpu_hi != SrtTape::None || read.flat_offset >= flat.size()
-		           ? SrtTape::None
-		           : FusableRead(read.root);
+		return read.flat_clean || read.flat_offset >= flat.size() ? SrtTape::None : FusableRead(read.root);
 	};
 	auto& scratch = program.ThreadScratch();
 	auto& active  = scratch.active_sources;
 	if (program.control_flow.empty()) {
 		active.clear();
-		flat.resize(SrtFlatWords(program));
+		flat.resize(program.srt_reads.size());
 		const auto slot_count = static_cast<uint32_t>(program.srt_reads.size());
 		for (uint32_t slot = 0; slot < slot_count; ++slot) {
 			if (m_fuse) {
@@ -1334,7 +1192,7 @@ bool SrtTapeWalker::RefreshFlatBuffer(const ResourcePlan& program, std::vector<u
 		}
 		return true;
 	}
-	flat.assign(SrtFlatWords(program), 0u);
+	flat.assign(program.srt_reads.size(), 0u);
 	active.assign(program.descriptor_sources.size(), 1u);
 	for (const auto& block: program.control_flow) {
 		for (const auto source: block.sources) active.at(source) = 0u;

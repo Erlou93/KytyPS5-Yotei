@@ -298,32 +298,7 @@ public:
 	// Verify counts checks / mismatches in fault-buffer diag words FAULT_DIAG_ENTRY_SHARE (+0, +1).
 	[[nodiscard]] static int BdaEntryShareMode();
 	static constexpr uint32_t FAULT_DIAG_ENTRY_SHARE = 4;
-	// (Words 8, 9 and 13 are free.)
-	// KYTY_PERF_SRT_GPU_WORDS_VERIFY (SrtTape.cpp PlanSrtGpuWords, spirvEmitterMemory.cpp EmitReadGpuWord): shader-only SRT
-	// words read from GPU memory compared with the CPU's value: checks / mismatches in diag words +0, +1.
-	static constexpr uint32_t FAULT_DIAG_SRT_GPU_WORDS = 12;
-	// +2: mismatch records taken; records of FAULT_DIAG_SRT_GPU_STRIDE words from FAULT_DIAG_SRT_GPU_FIRST (record
-	// FAULT_DIAG_SRT_GPU_RECORDS is the spare one other lanes store into; all below FAULT_DIAG_TRIP_FIRST).
-	static constexpr uint32_t FAULT_DIAG_SRT_GPU_FIRST   = 20;
-	static constexpr uint32_t FAULT_DIAG_SRT_GPU_STRIDE  = 7;
-	static constexpr uint32_t FAULT_DIAG_SRT_GPU_RECORDS = 5;
-	static_assert(FAULT_DIAG_SRT_GPU_FIRST + (FAULT_DIAG_SRT_GPU_RECORDS + 1) * FAULT_DIAG_SRT_GPU_STRIDE <= FAULT_DIAG_TRIP_FIRST);
-	// The guest addresses of the last GPU-word device addresses RebindBuffers bound (verify mode; any thread reads).
-	static inline std::array<std::atomic<uint64_t>, (1u << 20u)> s_gpu_word_device {};
-	static inline std::array<std::atomic<uint64_t>, (1u << 20u)> s_gpu_word_guest {};
-	static inline std::atomic<uint32_t>                   s_gpu_word_next {0};
-	static void NoteGpuWordBind(uint64_t device, uint64_t guest) {
-		const uint32_t i = s_gpu_word_next.fetch_add(1, std::memory_order_relaxed) % s_gpu_word_device.size();
-		s_gpu_word_device[i].store(device, std::memory_order_relaxed);
-		s_gpu_word_guest[i].store(guest, std::memory_order_relaxed);
-	}
-	[[nodiscard]] static uint64_t GpuWordGuest(uint64_t device) {
-		for (size_t i = 0; i < s_gpu_word_device.size(); ++i) {
-			if (s_gpu_word_device[i].load(std::memory_order_relaxed) == device)
-				return s_gpu_word_guest[i].load(std::memory_order_relaxed);
-		}
-		return 0;
-	}
+	// (Words 8, 9, 12 and 13 are free.)
 	void QueueFallbackMap(uint64_t vaddr, uint64_t size); // any thread (RenderContext::MapMemory)
 	void ApplyFallbackMaps();                             // GPU thread (RenderContext::PrepareBda)
 	void ClearFallback(uint64_t vaddr, uint64_t size);    // GPU thread (unmap, after InvalidateMemory)

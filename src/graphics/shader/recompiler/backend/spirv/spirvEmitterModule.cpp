@@ -252,8 +252,8 @@ void DefineDescriptors(EmitterState& state) {
 	counts[static_cast<size_t>(Kind::SharedMemory)] =
 	    info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer;
 	counts[static_cast<size_t>(Kind::BdaPagetable)] = info.uses_dma;
-	counts[static_cast<size_t>(Kind::FaultBuffer)] = IR::UsesFaultBuffer(info) || ClampNanCheckBinding(state.program) ||
-	                                                 RtTripsCheckBinding(state.program); // KYTY_DIAG_RT_TRIPS, + KYTY_PERF_SRT_GPU_WORDS_VERIFY
+	counts[static_cast<size_t>(Kind::FaultBuffer)] = info.uses_dma || ClampNanCheckBinding(state.program) ||
+	                                                 RtTripsCheckBinding(state.program); // KYTY_DIAG_RT_TRIPS
 	// Uniform const buffers (ShaderIR.h): ReadConst reads FlattenedSrtUniform; the storage binding keeps the SRT mapping
 	// reads of GPU-selected descriptors (ValidateNativeProgram expects the same split).
 	const bool srt_uniform = info.uses_read_const && IR::ReadConstUniform(state.program.srt_reads.size());
@@ -363,7 +363,7 @@ void DefineDescriptors(EmitterState& state) {
 				break;
 			case IR::DescriptorBindingKind::FlattenedSrtUniform:
 				state.flattened_srt_uniform_variable =
-				    Define(UniformDwordBlockType(state, IR::SrtFlatWords(state.program)), // + KYTY_PERF_SRT_GPU_WORDS words
+				    Define(UniformDwordBlockType(state, static_cast<uint32_t>(state.program.srt_reads.size())),
 				           "flattened_srt_uniform", spv::StorageClassUniform);
 				break;
 			case IR::DescriptorBindingKind::FlattenedSrt:
@@ -907,8 +907,7 @@ void DefineModule(EmitterState& state) {
 	if (state.program.info.buffer_u16) {
 		state.builder.RequireCapability(spv::CapabilityStorageBuffer16BitAccess);
 	}
-	if (state.program.info.uses_dma || state.program.info.uses_image_heap ||
-	    !state.program.info.srt_gpu_words.empty()) { // KYTY_PERF_SRT_GPU_WORDS
+	if (state.program.info.uses_dma || state.program.info.uses_image_heap) {
 		state.builder.RequireCapability(spv::CapabilityInt64);
 		state.builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
 		state.builder.RequireExtension("SPV_KHR_physical_storage_buffer");
@@ -984,8 +983,7 @@ void DefineModule(EmitterState& state) {
 		state.builder.RequireExtension("SPV_KHR_fragment_shader_barycentric");
 	}
 	state.builder.RequireExtension("SPV_KHR_float_controls");
-	state.builder.AddMemoryModel(state.program.info.uses_dma || state.program.info.uses_image_heap ||
-	                                     !state.program.info.srt_gpu_words.empty()
+	state.builder.AddMemoryModel(state.program.info.uses_dma || state.program.info.uses_image_heap
 	                                 ? spv::AddressingModelPhysicalStorageBuffer64
 	                                 : spv::AddressingModelLogical,
 	                             spv::MemoryModelGLSL450);
