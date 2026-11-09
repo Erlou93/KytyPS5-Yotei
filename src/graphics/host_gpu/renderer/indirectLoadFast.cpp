@@ -47,12 +47,15 @@ bool CensusFor(uint64_t shader_hash) {
 
 bool Listed(uint64_t shader_hash) {
 	// Default: the probe-evaluation shaders of "Deferred Ambient>Eval non-RT Probes" (2.65 ms of GPU time per frame at
-	// the torii gate).
+	// the torii gate) and their town-walk variants (9.11, GPU time per call: 0867a684 0.76 -> 0.54 ms, c979f9f4 0.43 ->
+	// 0.31, c7d0fb51 0.48 -> 0.39, e10e9cb1 0.75 -> 0.69, 0818af11 0.30 -> 0.27; =2 1.9e11 checks, 0 mismatches;
+	// e8e38335, 16 such loads, went 0.68 -> 0.71 and stays out).
 	static const std::string list = [] {
 		const char* value = std::getenv("KYTY_PERF_INDIRECT_LOAD_FAST_HASHES");
 		return value != nullptr ? std::string(value)
 		                        : std::string("85312e99a3c69cef,3ab9b653825476ab,8368b02a85651dd8,2b018f33db5ffffe,"
-		                                      "40395313615abcc8");
+		                                      "40395313615abcc8,0867a684b8afe55f,e10e9cb1b1d29914,c7d0fb51c6c469e9,c979f9f43c0dacb3,"
+		                                      "0818af1143ec601c");
 	}();
 	if (list == "all") return true;
 	char text[17];
