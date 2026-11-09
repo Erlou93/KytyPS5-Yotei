@@ -242,7 +242,7 @@ private:
 	std::atomic<uint64_t>                          m_tasks_finished {0};
 	struct HelperStats {
 		std::atomic<uint64_t> tasks {0}, done {0}, empty {0}, stolen {0}, skipped {0}, ready {0}, running {0}, pending {0};
-		std::atomic<uint64_t> waits {0}, wait_ns {0}, wait_cmd_ns {0}, wait_max_ns {0}, wait_commands {0}, k_changes {0};
+		std::atomic<uint64_t> waits {0}, wait_ns {0}, wait_cmd_ns {0}, wait_max_ns {0}, wait_commands {0};
 		// KYTY_CHECK_RESOLVE=2: both empty, refused, reads differ, compared, bad; the fault test: injected, injected and
 		// compared, detected.
 		std::atomic<uint64_t> both_empty {0}, refused {0}, reads_differ {0}, compared {0}, bad {0};

@@ -3277,7 +3277,7 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 	}
 }
 
-// A resolution ahead of execution (see ResolveDrawAhead): the draw state with its shader programs or the dispatch's input
+// A resolution ahead of execution (see ResolveTaskInto): the draw state with its shader programs or the dispatch's input
 // info, the stages they point to, and whether the execution thread still uses them.
 // Based on TheCruZ/KytyPS5-GTA daaf45201 (renderDraw.cpp), GPL-2.0.
 struct RenderExecutor::ResolvedDraw {
@@ -3332,23 +3332,6 @@ RenderExecutor::ResolvedDraw& RenderExecutor::NextResolvedDraw() {
 	return draw;
 }
 
-RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDrawAhead(const HW::Context& context, const HW::UserConfig& user_config,
-                                                               const HW::Shader& shaders,
-                                                               const ShaderIndirectDrawInfo& indirect_draw) {
-	// A metadata, copy or resolve operation in place of the draw selects nothing.
-	const auto mode = context.GetColorControl().mode;
-	if ((mode != 0u && mode != 1u) || !DrawHasValidVertexShader(shaders)) return nullptr;
-	std::optional<ChunkLead::PartTimer> slot_timer(std::in_place, ChunkLead::RpSlot); // KYTY_TRACE_CHUNK_LEAD (N2.0)
-	auto& draw = TakeResolvedSlot();
-	slot_timer.reset();
-	if (!ResolveDrawInto(draw, context, user_config, shaders, indirect_draw)) {
-		draw.phase.store(PhaseFree, std::memory_order_release);
-		return nullptr;
-	}
-	draw.phase.store(PhaseReady, std::memory_order_release);
-	return &draw;
-}
-
 RenderExecutor::ResolvedDraw& RenderExecutor::TakeResolvedSlot() {
 	auto& draw = NextResolvedDraw();
 	draw.phase.store(PhasePending, std::memory_order_relaxed); // taken from its allocation (published with its operation or task)
@@ -3376,18 +3359,6 @@ bool RenderExecutor::ResolveDrawInto(ResolvedDraw& draw, const HW::Context& cont
 	draw.shaders    = &shaders;
 	draw.is_compute = false;
 	return true;
-}
-
-RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDispatchAhead(const HW::Shader& shaders, uint32_t groups_x,
-                                                                   uint32_t groups_y, uint32_t groups_z, uint32_t mode,
-                                                                   bool indirect, bool async_compute) {
-	auto& draw = TakeResolvedSlot();
-	if (!ResolveDispatchInto(draw, shaders, groups_x, groups_y, groups_z, mode, indirect, async_compute)) {
-		draw.phase.store(PhaseFree, std::memory_order_release);
-		return nullptr;
-	}
-	draw.phase.store(PhaseReady, std::memory_order_release);
-	return &draw;
 }
 
 bool RenderExecutor::ResolveDispatchInto(ResolvedDraw& draw, const HW::Shader& shaders, uint32_t groups_x, uint32_t groups_y,

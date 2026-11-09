@@ -596,8 +596,7 @@ static bool GraphicsRunDebugDumpEnabled() {
 	       Config::GetPrintfDirection() != Config::LogDirection::Silent;
 }
 
-static bool ResolveHelperPossible(); // project 15 N2.2 (below, with the resolve thread)
-static bool ResolveCheckOn();
+static bool ResolveCheckOn(); // project 15 N2.2 (below, with the resolve thread)
 
 GuestGpu::GuestGpu(RenderContext& renderer)
     : m_renderer(renderer), m_operations(OperationQueueSize), m_resolved(ResolvedQueueSize),
@@ -613,10 +612,8 @@ GuestGpu::GuestGpu(RenderContext& renderer)
 	m_gfx_cp->Reset();
 	m_executor = std::jthread([this] { ExecutionThread(); });
 	m_resolver = std::jthread([this] { ResolveThread(); });
-	if (ResolveHelperPossible()) { // project 15 N2.2
-		RenderExecutor::SetResolveCheckMode(ResolveCheckOn());
-		m_resolve_helper = std::jthread([this] { ResolveHelperThread(); });
-	}
+	RenderExecutor::SetResolveCheckMode(ResolveCheckOn()); // project 15 N2.2: the helper resolves
+	m_resolve_helper = std::jthread([this] { ResolveHelperThread(); });
 	m_thread   = std::jthread(ThreadRun, this);
 	StallWatch::StartIfEnabled(); // KYTY_DIAG_STALL_WATCH (diagnostic)
 }
@@ -967,7 +964,7 @@ void GuestGpu::ExecutionThread() {
 			ChunkLead::NoteOperation(member ? ChunkLead::TargetPass(operation->pass_id) : -1, operation->sequence,
 			                         m_operations.SizeApprox() + resolved, resolved, operation->emit_tsc);
 		}
-		if (operation->resolved != nullptr && m_resolve_helper.joinable()) {
+		if (operation->resolved != nullptr) {
 			// Project 15 N2.2: a helper may be resolving it; its wait is outside the work scopes.
 			struct Scopes {
 				std::optional<PerfScope>*                perf;
@@ -1066,17 +1063,11 @@ void GuestGpu::ExecutionThread() {
 static const char* IndirectDrawLayout(const IndirectDrawRegisters& registers, ShaderIndirectDrawInfo& sgprs);
 
 // Based on TheCruZ/KytyPS5-GTA daaf45201 (graphicsRun.cpp), GPL-2.0.
-// Project 15 N2.2 (design: the analysis session's n2-2-doprecyzowanie.md): KYTY_PERF_RESOLVE_HELPERS=1 (test switch, live
-// A/B) - a helper thread resolves the draws and dispatches, the resolve thread hands it tasks in stream order;
-// KYTY_CHECK_RESOLVE=2 (diagnostic) - the resolve thread resolves each one itself (the reference, used) and the helper
-// too (compared before the operation executes); KYTY_CHECK_RESOLVE_FAULT=N - every N-th helper result gets an error.
-static uint32_t ResolveHelpersFixed() {
-	static const uint32_t value = [] {
-		const char* env = std::getenv("KYTY_PERF_RESOLVE_HELPERS");
-		return env != nullptr && env[0] == '1' ? 1u : 0u;
-	}();
-	return value;
-}
+// Project 15 N2.2 (design: the analysis session's n2-2-doprecyzowanie.md; the only path since 10.11, live A/B -0.04% se
+// 1.08, the execution thread's waits as before): a helper thread resolves the draws and dispatches, the resolve thread
+// hands it tasks in stream order. KYTY_CHECK_RESOLVE=2 (diagnostic) - the resolve thread resolves each one itself too
+// (the reference, used) and the helper's result is compared before the operation executes; KYTY_CHECK_RESOLVE_FAULT=N -
+// every N-th helper result gets an error.
 static bool ResolveCheckOn() {
 	static const bool on = [] {
 		const char* env = std::getenv("KYTY_CHECK_RESOLVE");
@@ -1093,22 +1084,16 @@ static uint32_t ResolveFaultEvery() {
 	}();
 	return every;
 }
-static bool ResolveHelperPossible() {
-	return ResolveCheckOn() || Common::LiveAb::Possible(Common::LiveAb::Switch::ResolveHelpers, ResolveHelpersFixed());
-}
 
 // Based on TheCruZ/KytyPS5-GTA daaf45201 (graphicsRun.cpp), GPL-2.0.
 void GuestGpu::ResolveThread() {
 	KYTY_PROFILER_THREAD("Thread_GpuResolve");
-	Config::ConfigureGpuStageThread(Config::GpuStageThread::Resolve);
-	// KYTY_TRACE_CHUNK_LEAD (N2.0b); the sampler on the helper when there is one.
-	if (ChunkLead::On()) ChunkLead::ResolveThreadStart(!ResolveHelperPossible(), "resolve");
+	// The command processor's SMT sibling: the operations it writes are in that core's caches; the helper resolves.
+	Config::ConfigureGpuStageThread(Config::GpuStageThread::ResolveDispatcher);
+	if (ChunkLead::On()) ChunkLead::ResolveThreadStart(false, "resolve"); // KYTY_TRACE_CHUNK_LEAD (the sampler: the helper's)
 	auto&          executor   = m_renderer.GetRenderExecutor();
 	const bool     check      = ResolveCheckOn();
-	const bool     possible   = ResolveHelperPossible();
-	const uint32_t fixed_k    = ResolveHelpersFixed();
 	const uint32_t fault_each = check ? ResolveFaultEvery() : 0u;
-	uint32_t       k_now      = 0;
 	uint64_t       members    = 0;
 	auto&          hs         = m_helper_stats;
 	auto           report_at  = std::chrono::steady_clock::now();
@@ -1127,23 +1112,13 @@ void GuestGpu::ResolveThread() {
 		const auto  kind     = operation->kind;
 		const bool  dispatch = kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect;
 		const bool  draw     = kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto || kind == GpuOperationKind::DrawIndirect;
-		// Who resolves (N2.2): changed over only when the helper finished every task, so one thread makes each resolution.
-		const uint32_t k = check ? 1u : possible ? Common::LiveAb::Gate(Common::LiveAb::Switch::ResolveHelpers, fixed_k) : 0u;
-		if (k != k_now) {
-			for (Common::SpinWait wait; m_tasks_finished.load(std::memory_order_acquire) != m_tasks_pushed;) {
-				if (!wait.Spin()) std::this_thread::yield();
-			}
-			k_now = k;
-			Config::ConfigureGpuStageThread(k_now != 0 ? Config::GpuStageThread::ResolveDispatcher : Config::GpuStageThread::Resolve);
-			hs.k_changes.fetch_add(1, std::memory_order_relaxed);
-		}
 		ShaderIndirectDrawInfo indirect_draw;
 		if (kind == GpuOperationKind::DrawIndirect) {
 			// The layout a GPU indirect draw gets (none: the packet expands on the CPU, with patched registers).
 			if (IndirectDrawLayout(operation->draw_indirect.registers, indirect_draw) != nullptr) indirect_draw = {};
 		}
 		const bool lead = ChunkLead::On(); // KYTY_TRACE_CHUNK_LEAD: the resolve thread's work
-		if ((draw || dispatch) && k_now != 0) {
+		if (draw || dispatch) {
 			RenderExecutor::ResolveTask task;
 			task.context       = state.context;
 			task.user_config   = state.user_config;
@@ -1188,26 +1163,6 @@ void GuestGpu::ResolveThread() {
 			m_tasks_pushed++;
 			hs.tasks.fetch_add(1, std::memory_order_relaxed);
 			operation->resolved = &slot;
-		} else if (draw || dispatch) {
-			if (lead) {
-				ChunkLead::g_resolving.fetch_add(1, std::memory_order_relaxed);
-				std::fill(std::begin(ChunkLead::t_parts), std::end(ChunkLead::t_parts), uint64_t {0}); // N2.0: this operation's parts
-				ChunkLead::t_part_buffers = 0;
-				ChunkLead::ResolveOperationStart();
-			}
-			const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
-			if (draw) {
-				operation->resolved = executor.ResolveDrawAhead(*state.context, *state.user_config, *state.shaders, indirect_draw);
-			} else {
-				const auto& d       = operation->dispatch;
-				operation->resolved = executor.ResolveDispatchAhead(*state.shaders, d.thread_group_x, d.thread_group_y, d.thread_group_z,
-				                                                    d.mode, kind == GpuOperationKind::DispatchIndirect,
-				                                                    operation->processor->IsAsyncComputeQueue());
-			}
-			if (lead) {
-				ChunkLead::NoteResolve(operation->pass_id, dispatch, ChunkLead::Tsc() - lead_t0, operation->resolved != nullptr);
-				ChunkLead::g_resolving.fetch_sub(1, std::memory_order_relaxed);
-			}
 		}
 		if (g_gpu_stage_stats) {
 			if (!m_resolved.TryPush(*operation)) {
@@ -1220,19 +1175,19 @@ void GuestGpu::ResolveThread() {
 			m_resolved.Push(std::move(*operation));
 		}
 		RingExecution();
-		if (possible && g_gpu_stage_stats) {
+		if (g_gpu_stage_stats) {
 			// PERF resolve_helper every ~5 s (N2.2): the helper's tasks, the execution thread's claims and waits.
 			const auto now = std::chrono::steady_clock::now();
 			if (now - report_at >= std::chrono::seconds(5)) {
 				report_at      = now;
 				const auto get = [](const std::atomic<uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
 				std::fprintf(stderr,
-				             "PERF resolve_helper k=%u tasks=%llu done=%llu empty=%llu stolen=%llu skipped=%llu claim[ready|running|stolen]=%llu|%llu|%llu "
-				             "wait=%llu/%.1fms wait_cmd_ms=%.1f wait_max_us=%.1f wait_commands=%llu k_changes=%llu check[both_empty|refused|reads_differ|compared|bad]=%llu|%llu|%llu|%llu|%llu "
+				             "PERF resolve_helper tasks=%llu done=%llu empty=%llu stolen=%llu skipped=%llu claim[ready|running|stolen]=%llu|%llu|%llu "
+				             "wait=%llu/%.1fms wait_cmd_ms=%.1f wait_max_us=%.1f wait_commands=%llu check[both_empty|refused|reads_differ|compared|bad]=%llu|%llu|%llu|%llu|%llu "
 				             "fault[injected|compared|detected]=%llu|%llu|%llu\n",
-				             k_now, get(hs.tasks), get(hs.done), get(hs.empty), get(hs.stolen), get(hs.skipped), get(hs.ready), get(hs.running),
+				             get(hs.tasks), get(hs.done), get(hs.empty), get(hs.stolen), get(hs.skipped), get(hs.ready), get(hs.running),
 				             get(hs.pending), get(hs.waits), static_cast<double>(get(hs.wait_ns)) / 1e6, static_cast<double>(get(hs.wait_cmd_ns)) / 1e6,
-				             static_cast<double>(get(hs.wait_max_ns)) / 1e3, get(hs.wait_commands), get(hs.k_changes), get(hs.both_empty),
+				             static_cast<double>(get(hs.wait_max_ns)) / 1e3, get(hs.wait_commands), get(hs.both_empty),
 				             get(hs.refused), get(hs.reads_differ), get(hs.compared), get(hs.bad), get(hs.injected), get(hs.injected_compared),
 				             get(hs.detected));
 			}

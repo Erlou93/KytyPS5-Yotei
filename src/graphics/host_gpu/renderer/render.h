@@ -300,14 +300,9 @@ public:
 	// snapshots, which stay valid until it executed; null when there is nothing to resolve. Based on
 	// TheCruZ/KytyPS5-GTA daaf45201 (render.h), GPL-2.0.
 	struct ResolvedDraw;
-	[[nodiscard]] ResolvedDraw* ResolveDrawAhead(const HW::Context& context, const HW::UserConfig& user_config,
-	                                             const HW::Shader& shaders, const ShaderIndirectDrawInfo& indirect_draw);
-	[[nodiscard]] ResolvedDraw* ResolveDispatchAhead(const HW::Shader& shaders, uint32_t groups_x, uint32_t groups_y,
-	                                                 uint32_t groups_z, uint32_t mode, bool indirect, bool async_compute);
-	// Project 15 N2.1: the two halves of ResolveDrawAhead / ResolveDispatchAhead. TakeResolvedSlot (the thread that keeps
-	// the stream order) gives the next slot of the ring, marked busy at once; ResolveDrawInto / ResolveDispatchInto fill it
-	// (any resolving thread, one slot at a time) and return false when there is nothing to resolve (the caller releases
-	// the slot then).
+	// Project 15 N2.1/N2.2: TakeResolvedSlot (the resolve thread, which keeps the stream order) gives the next slot of the
+	// ring, pending at once; ResolveDrawInto / ResolveDispatchInto fill it (the helper through ResolveTaskInto) and return
+	// false when there is nothing to resolve.
 	[[nodiscard]] ResolvedDraw& TakeResolvedSlot();
 	// Project 15 N2.2: a draw's or dispatch's resolution handed to the resolve helper: its slot, register snapshots (valid
 	// until the operation executed) and arguments. `fault`: KYTY_CHECK_RESOLVE_FAULT's error number (0: none).

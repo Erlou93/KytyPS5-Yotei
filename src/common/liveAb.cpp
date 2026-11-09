@@ -51,10 +51,6 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
-    // Project 15 N2.2: who resolves the draws and dispatches ahead (0: the resolve thread, 1: a helper thread). The
-    // resolve thread reads it once per operation and changes over only when the helper finished every task it has, so
-    // each resolution is made by one thread whole; the results are the same either way (KYTY_CHECK_RESOLVE=2).
-    {Switch::ResolveHelpers, "KYTY_PERF_RESOLVE_HELPERS", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
