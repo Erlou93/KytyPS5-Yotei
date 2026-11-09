@@ -114,7 +114,31 @@ void Report(State& s) {
 	s.window_frame    = frame;
 }
 
+// KYTY_CHUNK_SUBMIT: the open chunk (execution thread).
+struct SubmitState {
+	bool     open  = false;
+	uint32_t count = 0;
+};
+
 } // namespace
+
+bool SubmitBefore(bool gfx_queue, uint16_t pass, int kind) {
+	static SubmitState st;
+	const bool member = gfx_queue && (kind == 1 || kind == 2) && IsTarget(St(), pass);
+	if (!member) {
+		const bool close = st.open;
+		st.open           = false;
+		st.count          = 0;
+		return close;
+	}
+	if (!st.open || st.count == ChunkCap) {
+		st.open  = true;
+		st.count = 1;
+		return true;
+	}
+	st.count++;
+	return false;
+}
 
 bool Enabled() {
 	static const bool on = [] {

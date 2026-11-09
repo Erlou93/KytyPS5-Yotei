@@ -913,6 +913,20 @@ void GuestGpu::ExecutionThread() {
 			perf_process.emplace(PerfKind::Process);
 			live_busy.emplace();
 		}
+		{
+			// KYTY_CHUNK_SUBMIT (project 15 S1.1, test switch, live A/B): a chunk starts and ends a command buffer.
+			static const uint32_t chunk_fixed = std::getenv("KYTY_CHUNK_SUBMIT") != nullptr && std::getenv("KYTY_CHUNK_SUBMIT")[0] == '1' ? 1u : 0u;
+			if (Common::LiveAb::Gate(Common::LiveAb::Switch::ChunkSubmit, chunk_fixed) != 0u) {
+				const auto kind = operation->kind;
+				const int  k    = (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto) ? 1
+				                  : kind == GpuOperationKind::DispatchDirect                                 ? 2
+				                  : kind == GpuOperationKind::DrawIndirect                                   ? 3
+				                                                                                            : 0;
+				if (ChunkCensus::SubmitBefore(operation->processor == m_gfx_cp.get(), operation->pass_id, k)) {
+					m_renderer.GetCommandScheduler().Flush();
+				}
+			}
+		}
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
 			const auto kind  = operation->kind;

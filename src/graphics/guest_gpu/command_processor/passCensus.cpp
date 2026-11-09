@@ -174,7 +174,9 @@ bool Enabled() {
 }
 
 static bool Active() {
-	static const bool active = Enabled() || !FreeList().empty();
+	// KYTY_CHUNK_SUBMIT (project 15 S1.1) needs the pass ids too.
+	static const bool active = Enabled() || !FreeList().empty() || std::getenv("KYTY_CHUNK_SUBMIT") != nullptr ||
+	                           std::getenv("KYTY_LIVE_AB") != nullptr;
 	return active;
 }
 
@@ -209,7 +211,7 @@ std::string PassName(uint16_t id) {
 }
 
 uint16_t CurrentPassId(const void* cp) {
-	if (!Enabled()) return 0;
+	if (!Active()) return 0;
 	auto it = t_processors.find(cp);
 	return it != t_processors.end() ? it->second.id : uint16_t {0};
 }
