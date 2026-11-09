@@ -271,6 +271,11 @@ void Accumulate(State& s, const Chunk& chunk) {
 		if (base == 0) base = begin;
 		std::vector<std::pair<uint64_t, uint32_t>> by_marker; // (ticks, marker)
 		std::vector<std::pair<uint64_t, uint64_t>> by_mark;   // (ticks, emulator operation id): marked operations
+		struct ShaderTicks {
+			uint64_t ticks = 0, a = 0;
+			char     kind = 0;
+		};
+		std::vector<ShaderTicks> by_shader; // the costliest commands by their shader (a)
 		uint64_t                                   other_ticks = 0;
 		for (uint32_t query = 0; query + 1u < chunk.used; query++) {
 			const auto from = ts(query), to = ts(query + 1u);
@@ -287,6 +292,10 @@ void Accumulate(State& s, const Chunk& chunk) {
 				else it->first += to - from;
 				continue;
 			}
+			const auto& command = chunk.commands[index];
+			auto sh = std::find_if(by_shader.begin(), by_shader.end(), [&](const auto& e) { return e.a == command.a && e.kind == command.kind; });
+			if (sh == by_shader.end()) by_shader.push_back({to - from, command.a, command.kind});
+			else sh->ticks += to - from;
 			const uint32_t marker = chunk.commands[index].marker;
 			auto it = std::find_if(by_marker.begin(), by_marker.end(), [&](const auto& e) { return e.second == marker; });
 			if (it == by_marker.end()) by_marker.push_back({to - from, marker});
@@ -303,6 +312,14 @@ void Accumulate(State& s, const Chunk& chunk) {
 			       (m < s.marker_names.size() ? s.marker_names[m] : std::string("?")) + "]";
 		}
 		std::sort(by_mark.begin(), by_mark.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+		std::sort(by_shader.begin(), by_shader.end(), [](const auto& x, const auto& y) { return x.ticks > y.ticks; });
+		top += " | sh:";
+		for (size_t i = 0; i < by_shader.size() && i < 5u; i++) {
+			char item[48];
+			std::snprintf(item, sizeof(item), " %c%08llx=%dus", by_shader[i].kind,
+			              static_cast<unsigned long long>(by_shader[i].a >> 32u), static_cast<int>(us(by_shader[i].ticks)));
+			top += item;
+		}
 		top += " | other=" + std::to_string(static_cast<int>(us(other_ticks))) + "us emu:";
 		for (size_t i = 0; i < by_mark.size() && i < 3u; i++) {
 			char item[48];
