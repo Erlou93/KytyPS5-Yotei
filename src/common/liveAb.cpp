@@ -48,6 +48,11 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Test (walk 9.11): only how RebindBuffers' uniform words reach the stream buffer (the same bytes either way).
+    {Switch::UniformOneCopy, "KYTY_PERF_UNIFORM_ONE_COPY", 1},
+    // Test (walk 9.11): a table set whose page sums held at an unchanged g_image_page_epoch_any skips their loop (a
+    // pure memo: the stored value is kept by both phases).
+    {Switch::TablePagesAny, "KYTY_PERF_TABLE_PAGES_ANY", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
