@@ -1365,10 +1365,14 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		const auto caller_wait_ns = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count());
 		m_caller_stats.caller_wait_ns.fetch_add(caller_wait_ns, std::memory_order_relaxed);
-		// KYTY_TRACE_CALLER_WAITS=1 (diagnostic): each caller wait over 200 us (first 400): the faulting address, the access,
+		// KYTY_TRACE_CALLER_WAITS=<frame> (diagnostic): each caller wait over 200 us (first 400): the faulting address, the access,
 		// the wait and the tick (project "the GPU reads resources itself", part 2: what the game threads read).
-		static const bool caller_trace = std::getenv("KYTY_TRACE_CALLER_WAITS") != nullptr;
-		if (caller_trace && caller_wait_ns > 200000u) {
+		// The value is the first presented frame to report.
+		static const uint32_t caller_trace_from = [] {
+			const char* v = std::getenv("KYTY_TRACE_CALLER_WAITS");
+			return v != nullptr ? std::max<uint32_t>(1u, static_cast<uint32_t>(std::strtoul(v, nullptr, 10))) : 0u;
+		}();
+		if (caller_trace_from != 0u && caller_wait_ns > 200000u && DebugPresentCount().load() >= caller_trace_from) {
 			static std::atomic<uint32_t> lines {0};
 			if (lines.fetch_add(1, std::memory_order_relaxed) < 400u) {
 				std::fprintf(stderr, "CALLER_WAIT frame=%u addr=0x%llx size=0x%llx write=%d us=%llu tick=%llu attempt=%u\n",
