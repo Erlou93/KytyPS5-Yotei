@@ -2756,7 +2756,7 @@ struct ObtainMemoEntry {
 	uint32_t regions = 0;      // 1 or 2; 0: empty
 	BufferId id {};
 };
-constexpr size_t kObtainMemoSlots = 8192;
+constexpr size_t kObtainMemoSlots = size_t {1} << 18u; // KYTY_PERF_OBTAIN_MEMO_BITS (test): the largest table
 ObtainMemoEntry  g_obtain_memo[kObtainMemoSlots]; // GPU thread
 struct ObtainMemoStats {
 	uint64_t hits = 0, misses = 0, stores = 0;
@@ -2771,10 +2771,21 @@ static ObtainMemoStats& ObtainMemoStatsRef() {
 
 namespace {
 
+// KYTY_PERF_OBTAIN_MEMO_BITS (test, live A/B): the slot count is 2^bits (13..18; unset or 0: 13, the table before).
+uint64_t ObtainMemoMask() {
+	static const uint32_t fixed = [] {
+		const char* v = std::getenv("KYTY_PERF_OBTAIN_MEMO_BITS");
+		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
+	}();
+	uint32_t bits = Common::LiveAb::Gate(Common::LiveAb::Switch::ObtainMemoBits, fixed);
+	bits          = bits == 0u ? 13u : std::clamp(bits, 13u, 18u);
+	return (uint64_t {1} << bits) - 1u;
+}
+
 size_t ObtainMemoIndex(uint64_t vaddr, uint64_t size) {
 	uint64_t h = vaddr * 0x9E3779B97F4A7C15ull ^ (size + (size << 17u));
 	h ^= h >> 29u;
-	return static_cast<size_t>(h & (kObtainMemoSlots - 1u));
+	return static_cast<size_t>(h & ObtainMemoMask());
 }
 
 // The tracker regions of the range (at most 2 are kept) and their epochs now; false when the range spans more.
@@ -2858,7 +2869,7 @@ struct WriteMemoEntry {
 	uint32_t regions = 0; // 1 or 2; 0: empty
 	BufferId id {};
 };
-constexpr size_t kWriteMemoSlots = 8192;
+constexpr size_t kWriteMemoSlots = size_t {1} << 18u; // KYTY_PERF_OBTAIN_MEMO_BITS (test): the largest table
 WriteMemoEntry   g_write_memo[kWriteMemoSlots]; // GPU thread
 struct {
 	uint64_t hits = 0, retick_hits = 0, misses = 0, stores = 0;
@@ -2870,7 +2881,7 @@ struct {
 WriteMemoEntry& WriteMemoSlot(uint64_t vaddr, uint64_t size) {
 	uint64_t h = vaddr * 0x9E3779B97F4A7C15ull ^ (size + (size << 21u));
 	h ^= h >> 31u;
-	return g_write_memo[h & (kWriteMemoSlots - 1u)];
+	return g_write_memo[h & ObtainMemoMask()];
 }
 
 // The tracker regions of the range (at most 2) and both epochs of each now; false when the range spans more.
