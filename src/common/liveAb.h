@@ -35,6 +35,7 @@ enum class Switch : uint32_t {
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
 	DiagTablesAssume,          // KYTY_DIAG_TABLES_ASSUME_UNCHANGED (measurement only, APPROXIMATION)
+	ClampSeqlock,              // KYTY_PERF_CLAMP_SEQLOCK (project 15, test switch: the resolve helper's range clamp without the lock)
 	Count
 };
 

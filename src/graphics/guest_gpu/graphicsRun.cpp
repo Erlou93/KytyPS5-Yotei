@@ -1190,6 +1190,14 @@ void GuestGpu::ResolveThread() {
 				             static_cast<double>(get(hs.wait_max_ns)) / 1e3, get(hs.wait_commands), get(hs.both_empty),
 				             get(hs.refused), get(hs.reads_differ), get(hs.compared), get(hs.bad), get(hs.injected), get(hs.injected_compared),
 				             get(hs.detected));
+				std::string hist;
+				for (size_t i = 0; i < hs.hist_n.size(); i++) {
+					char buf[48];
+					std::snprintf(buf, sizeof(buf), "%s%llu/%.1f", i == 0 ? "" : " ", get(hs.hist_n[i]), static_cast<double>(get(hs.hist_ns[i])) / 1e6);
+					hist += buf;
+				}
+				std::fprintf(stderr, "PERF resolve_wait_hist count/ms[<5us <20 <100 <500 <2000 >=2000]=[%s] long=%llu dumps=%llu\n", hist.c_str(),
+				             get(hs.long_waits), get(hs.dumps));
 			}
 		}
 	}
@@ -1244,9 +1252,19 @@ void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context
 		const auto start       = std::chrono::steady_clock::now();
 		bool       commands    = false;
 		uint64_t   commands_ns = 0;
+		bool       dumped      = false;
 		for (Common::SpinWait spin;;) {
 			claim = RenderExecutor::TryClaimResolvedDraw(r, steal);
 			if (claim != RenderExecutor::ResolvedClaim::Running) break;
+			if (!dumped && g_gpu_stage_stats && std::chrono::steady_clock::now() - start > std::chrono::microseconds(200)) {
+				// What the helper stands on in a long resolution (diagnostics, PERF only): its stack, every 8th one.
+				dumped = true;
+				if ((hs.long_waits.fetch_add(1, std::memory_order_relaxed) & 7u) == 0 && hs.dumps.fetch_add(1, std::memory_order_relaxed) < 4000u) {
+					char label[64];
+					std::snprintf(label, sizeof(label), "RESOLVE_WAIT seq=%llu", static_cast<unsigned long long>(operation.sequence));
+					PerfDumpThreadStack(m_resolve_helper.native_handle(), label);
+				}
+			}
 			if (m_pending_commands.load(std::memory_order_acquire) != 0) {
 				const auto c0 = std::chrono::steady_clock::now();
 				RunCommands();
@@ -1265,10 +1283,13 @@ void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context
 		if (commands) hs.wait_commands.fetch_add(1, std::memory_order_relaxed);
 		for (uint64_t max = hs.wait_max_ns.load(std::memory_order_relaxed); ns > max && !hs.wait_max_ns.compare_exchange_weak(max, ns);) {
 		}
-		if (all > 1000000u) {
-			std::fprintf(stderr, "RESOLVE_HELPER wait %.2f ms commands %.2f ms (sequence %llu)\n", static_cast<double>(all) / 1e6,
+		if (all > 1000000u || dumped) {
+			std::fprintf(stderr, "RESOLVE_HELPER wait %.3f ms commands %.3f ms (sequence %llu)\n", static_cast<double>(all) / 1e6,
 			             static_cast<double>(commands_ns) / 1e6, static_cast<unsigned long long>(operation.sequence));
 		}
+		const size_t bucket = ns < 5000u ? 0 : ns < 20000u ? 1 : ns < 100000u ? 2 : ns < 500000u ? 3 : ns < 2000000u ? 4 : 5;
+		hs.hist_n[bucket].fetch_add(1, std::memory_order_relaxed);
+		hs.hist_ns[bucket].fetch_add(ns, std::memory_order_relaxed);
 		if (ChunkLead::On()) ChunkLead::NoteIdle(all, 0, commands); // counted as the "resolve" idle cause (commands apart)
 		return claim;
 	};
