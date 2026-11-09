@@ -2503,16 +2503,7 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 static bool FormattedInline(const EmitterState& state) {
 	constexpr std::array<uint64_t, 4> Inlined {0x91451da6526e1954ull, 0x455a480b7aae67dcull, 0x6c9184bb2721d580ull,
 	                                           0x039ed97b41485281ull};
-	if (std::ranges::find(Inlined, state.program.shader_hash) != Inlined.end()) return true;
-	// KYTY_PERF_FORMATTED_INLINE_EXTRA (test switch 9.11, default off): more shaders (hash list).
-	static const std::string extra = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_PERF_FORMATTED_INLINE_EXTRA");
-		return value != nullptr ? std::string(value) : std::string();
-	}();
-	if (extra.empty()) return false;
-	char text[17];
-	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(state.program.shader_hash));
-	return extra.find(text) != std::string::npos;
+	return std::ranges::find(Inlined, state.program.shader_hash) != Inlined.end();
 }
 
 // One DontInline function per shape of the formatted loads through GPU-selected
