@@ -50,9 +50,6 @@ inline std::atomic<uint32_t>     g_image_page_epochs[kImagePageEpochCount] {};
 // with the array above, so either sum can be compared at any time.
 inline constexpr uint32_t        kImagePageEpochExactCount = 1u << 20u;
 inline std::atomic<uint32_t>     g_image_page_epochs_exact[kImagePageEpochExactCount] {};
-// Bumped once after every change of the page epochs above: equal values mean no page epoch changed in between (a reader
-// loads it before it reads page epochs, so a change it overlapped makes its next load differ).
-inline std::atomic<uint64_t>     g_image_page_epoch_any {1};
 // The image-page epochs of a range (both arrays above), without the registry epoch: for NoteImageRegistryChange below
 // and for an image that keeps its registration but gets a pending rebind (TextureCache), which
 // changes what FindImage's checks answer for it. A bump only makes the memos that compare these epochs (bindless slot
@@ -69,7 +66,6 @@ inline void NoteImagePagesChange(uint64_t address, uint64_t size) {
 		g_image_page_epochs[page & (kImagePageEpochCount - 1u)].fetch_add(1, std::memory_order_relaxed);
 		g_image_page_epochs_exact[page & (kImagePageEpochExactCount - 1u)].fetch_add(1, std::memory_order_relaxed);
 	}
-	g_image_page_epoch_any.fetch_add(1, std::memory_order_release); // after the pages (read before them)
 }
 inline void NoteImageRegistryChange(uint64_t address, uint64_t size) {
 	NoteImageRegistryChange();

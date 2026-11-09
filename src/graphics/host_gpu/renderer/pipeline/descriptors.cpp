@@ -9,7 +9,6 @@
 #include "common/emulatorConfig.h"
 #include "common/envDefaults.h"
 #include "common/envRead.h"
-#include "common/liveAb.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
@@ -51,7 +50,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -3854,7 +3852,6 @@ struct TableSet {
 	std::vector<TextureBinding> images;
 	std::vector<uint8_t>        memo;
 	std::vector<uint64_t>       page_sums;
-	uint64_t                    pages_any = 0; // KYTY_PERF_TABLE_PAGES_ANY: g_image_page_epoch_any when page_sums last held
 	std::vector<ImageId>        member_ids;
 	std::vector<vk::Sampler>    samplers;
 };
@@ -4241,22 +4238,12 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 			table_set = list[0].get();
 		}
 		if (table_set != nullptr && table_set->views_ready) {
-			// KYTY_PERF_TABLE_PAGES_ANY (test, live A/B): no page epoch changed since the sums last held: they hold.
-			static const uint32_t pages_any_fixed = [] {
-				const char* v = std::getenv("KYTY_PERF_TABLE_PAGES_ANY");
-				return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
-			}();
-			const bool     pages_any_on = Common::LiveAb::Gate(Common::LiveAb::Switch::TablePagesAny, pages_any_fixed) != 0u;
-			const uint64_t any          = DrawRepeat::g_image_page_epoch_any.load(std::memory_order_acquire);
-			bool           pages        = true;
-			if (!pages_any_on || table_set->pages_any != any) {
-				size_t member = 0;
-				for (size_t i = 0; i < table_set->images.size() && pages; i++) {
-					if (table_set->memo[i] == 0u) continue;
-					const auto& data = table_set->images[i].desc.info.data;
-					pages = DrawRepeat::ImagePageEpochSum(data.address, data.size) == table_set->page_sums[member++];
-				}
-				table_set->pages_any = pages ? any : 0u;
+			bool   pages  = true;
+			size_t member = 0;
+			for (size_t i = 0; i < table_set->images.size() && pages; i++) {
+				if (table_set->memo[i] == 0u) continue;
+				const auto& data = table_set->images[i].desc.info.data;
+				pages = DrawRepeat::ImagePageEpochSum(data.address, data.size) == table_set->page_sums[member++];
 			}
 			const bool ok = pages && m_context.GetTextureCache().TableReplayStage(table_set->member_ids);
 			if (ok) {
@@ -4336,7 +4323,6 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 				table_set->samplers    = prepared.samplers;
 				table_set->memo.assign(prepared.images.size(), 0u);
 				table_set->page_sums.clear();
-				table_set->pages_any = 0u;
 				table_set->member_ids.clear();
 				for (size_t i = 0; i < prepared.images.size(); i++) {
 					const auto& binding = prepared.images[i];
@@ -4633,28 +4619,9 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	// plan's SRT read count, which the flat buffer always holds), the storage view the words themselves.
 	const auto upload_uniform = [&](std::span<const uint32_t> words, vk::DescriptorBufferInfo* storage_view,
 	                                vk::DescriptorBufferInfo* uniform_view) {
-		vk::DescriptorBufferInfo view;
-		// KYTY_PERF_UNIFORM_ONE_COPY (test, live A/B): the words and their zero padding go straight into the stream
-		// buffer (the same bytes at the same alignment) instead of through m_uniform_words first.
-		static const uint32_t one_copy_fixed = [] {
-			const char* v = std::getenv("KYTY_PERF_UNIFORM_ONE_COPY");
-			return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
-		}();
-		if (!words.empty() && Common::LiveAb::Gate(Common::LiveAb::Switch::UniformOneCopy, one_copy_fixed) != 0u) {
-			const size_t padded = (words.size() + 3u) & ~size_t {3};
-			auto&        stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
-			EXIT_IF(m_context.GetCommandScheduler().Current().IsInvalid());
-			const auto [data, offset] = stream.Map(padded * 4u, 256);
-			EXIT_IF(data == nullptr);
-			std::memcpy(data, words.data(), words.size_bytes());
-			std::memset(data + words.size_bytes(), 0, (padded - words.size()) * 4u);
-			stream.Commit();
-			view = {stream.Handle(), offset, padded * 4u};
-		} else {
-			m_uniform_words.assign(words.begin(), words.end());
-			m_uniform_words.resize((words.size() + 3u) & ~size_t {3}, 0u);
-			view = NativeUpload(m_context, m_uniform_words);
-		}
+		m_uniform_words.assign(words.begin(), words.end());
+		m_uniform_words.resize((words.size() + 3u) & ~size_t {3}, 0u);
+		const auto view = NativeUpload(m_context, m_uniform_words);
 		if (storage_view != nullptr) *storage_view = {view.buffer, view.offset, words.size_bytes()};
 		*uniform_view = {view.buffer, view.offset,
 		                 std::min<vk::DeviceSize>(view.range, ShaderRecompiler::IR::UniformBufferMaxBytes)};
