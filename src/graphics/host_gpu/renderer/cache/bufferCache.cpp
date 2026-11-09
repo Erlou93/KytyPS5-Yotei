@@ -1362,10 +1362,22 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			m_scheduler.GetMasterSemaphore().Wait(defer_tick);
 			m_scheduler.WaitPriorityOperations(defer_tick);
 		}
-		m_caller_stats.caller_wait_ns.fetch_add(
-		    static_cast<uint64_t>(
-		        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count()),
-		    std::memory_order_relaxed);
+		const auto caller_wait_ns = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count());
+		m_caller_stats.caller_wait_ns.fetch_add(caller_wait_ns, std::memory_order_relaxed);
+		// KYTY_TRACE_CALLER_WAITS=1 (diagnostic): each caller wait over 200 us (first 400): the faulting address, the access,
+		// the wait and the tick (project "the GPU reads resources itself", part 2: what the game threads read).
+		static const bool caller_trace = std::getenv("KYTY_TRACE_CALLER_WAITS") != nullptr;
+		if (caller_trace && caller_wait_ns > 200000u) {
+			static std::atomic<uint32_t> lines {0};
+			if (lines.fetch_add(1, std::memory_order_relaxed) < 400u) {
+				std::fprintf(stderr, "CALLER_WAIT frame=%u addr=0x%llx size=0x%llx write=%d us=%llu tick=%llu attempt=%u\n",
+				             DebugPresentCount().load(), static_cast<unsigned long long>(vaddr),
+				             static_cast<unsigned long long>(size), is_write ? 1 : 0,
+				             static_cast<unsigned long long>(caller_wait_ns / 1000u), static_cast<unsigned long long>(defer_tick),
+				             attempt);
+			}
+		}
 		m_caller_stats.retries.fetch_add(1, std::memory_order_relaxed);
 		last_tick = defer_tick;
 	}
