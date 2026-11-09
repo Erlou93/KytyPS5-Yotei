@@ -1792,12 +1792,8 @@ uint32_t BufferCache::DirectMode() {
 		if (Common::EnvRead::DirectRanges(&value)) {
 			if (value == nullptr || (value[0] == '1' && value[1] == '\0')) {
 				m_direct_ranges.push_back({0x2010000000ull, 0x2015E00000ull});
-				// Pages the game and the GPU share (project "the GPU reads resources itself", part 2, walk 9.11): the GPU
-				// writes small counters there and a game thread writes next to them every frame, so a tracked page made
-				// the game wait for the GPU (0x5000000090: 257 of 400 long waits; 0x5000001c00). As on the console, both write
-				// the same memory. Ranges must be CACHING_PAGESIZE-aligned. (0x5039c50000 grew to ~29 MB with the bindings
-				// over it - host memory for the GPU - and stays tracked.)
-				m_direct_ranges.push_back({0x5000000000ull, 0x5000004000ull}); // CACHING_PAGESIZE-aligned, as parsed ranges
+				// (9.11: the pages the game and the GPU share, 0x5000000000, made the walk's game threads wait less but cost
+				// the menu half its frame rate - shaders read them from host memory in every invocation; they stay tracked.)
 			} else {
 				const char* p = value;
 				while (*p != '\0') {
