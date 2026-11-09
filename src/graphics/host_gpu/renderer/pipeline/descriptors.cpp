@@ -4592,7 +4592,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			const uint64_t address = (uint64_t {flat[word.hi]} << 32u) | flat[word.slot];
 			if (address != 0u) m_gpu_word_addresses.emplace_back(address, static_cast<uint32_t>(&word - words.data()));
 		}
-		std::ranges::sort(m_gpu_word_addresses);
+		if (!std::ranges::is_sorted(m_gpu_word_addresses)) std::ranges::sort(m_gpu_word_addresses); // usually in order
 		auto& cache = m_context.GetBufferCache();
 		for (size_t first = 0; first < m_gpu_word_addresses.size();) {
 			// One range per run of words no more than 256 bytes apart inside one 64 KiB block.
