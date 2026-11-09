@@ -2756,7 +2756,7 @@ struct ObtainMemoEntry {
 	uint32_t regions = 0;      // 1 or 2; 0: empty
 	BufferId id {};
 };
-constexpr size_t kObtainMemoSlots = 8192;
+constexpr size_t kObtainMemoSlots = size_t {1} << 18u; // KYTY_PERF_OBTAIN_MEMO_BITS (test): the largest table
 ObtainMemoEntry  g_obtain_memo[kObtainMemoSlots]; // GPU thread
 struct ObtainMemoStats {
 	uint64_t hits = 0, misses = 0, stores = 0;
@@ -2771,10 +2771,21 @@ static ObtainMemoStats& ObtainMemoStatsRef() {
 
 namespace {
 
+// KYTY_PERF_OBTAIN_MEMO_BITS (test, live A/B): the slot count is 2^bits (10..18; unset or 0: 13, the table before).
+uint64_t ObtainMemoMask() {
+	static const uint32_t fixed = [] {
+		const char* v = std::getenv("KYTY_PERF_OBTAIN_MEMO_BITS");
+		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
+	}();
+	uint32_t bits = Common::LiveAb::Gate(Common::LiveAb::Switch::ObtainMemoBits, fixed);
+	bits          = bits == 0u ? 13u : std::clamp(bits, 10u, 18u);
+	return (uint64_t {1} << bits) - 1u;
+}
+
 size_t ObtainMemoIndex(uint64_t vaddr, uint64_t size) {
 	uint64_t h = vaddr * 0x9E3779B97F4A7C15ull ^ (size + (size << 17u));
 	h ^= h >> 29u;
-	return static_cast<size_t>(h & (kObtainMemoSlots - 1u));
+	return static_cast<size_t>(h & ObtainMemoMask());
 }
 
 // The tracker regions of the range (at most 2 are kept) and their epochs now; false when the range spans more.
@@ -2858,7 +2869,7 @@ struct WriteMemoEntry {
 	uint32_t regions = 0; // 1 or 2; 0: empty
 	BufferId id {};
 };
-constexpr size_t kWriteMemoSlots = 8192;
+constexpr size_t kWriteMemoSlots = size_t {1} << 18u; // KYTY_PERF_OBTAIN_MEMO_BITS (test): the largest table
 WriteMemoEntry   g_write_memo[kWriteMemoSlots]; // GPU thread
 struct {
 	uint64_t hits = 0, retick_hits = 0, misses = 0, stores = 0;
@@ -2870,7 +2881,7 @@ struct {
 WriteMemoEntry& WriteMemoSlot(uint64_t vaddr, uint64_t size) {
 	uint64_t h = vaddr * 0x9E3779B97F4A7C15ull ^ (size + (size << 21u));
 	h ^= h >> 31u;
-	return g_write_memo[h & (kWriteMemoSlots - 1u)];
+	return g_write_memo[h & ObtainMemoMask()];
 }
 
 // The tracker regions of the range (at most 2) and both epochs of each now; false when the range spans more.
@@ -2954,7 +2965,13 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		return {&buffer, buffer.Offset(vaddr)};
 	}
 	// The write memo: the diagnostic and approximation paths below never use it.
-	const bool write_memo = is_written && !image_source && GuestGpu::IsGpuThread() && !InDirectRange(vaddr, size);
+	// KYTY_PERF_OBTAIN_MEMO_OFF (test, live A/B): neither memo is used.
+	static const uint32_t memo_off_fixed = [] {
+		const char* v = std::getenv("KYTY_PERF_OBTAIN_MEMO_OFF");
+		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
+	}();
+	const bool memos = Common::LiveAb::Gate(Common::LiveAb::Switch::ObtainMemoOff, memo_off_fixed) == 0u;
+	const bool write_memo = memos && is_written && !image_source && GuestGpu::IsGpuThread() && !InDirectRange(vaddr, size);
 	WriteMemoEntry write_memo_fresh; // the epochs before the full path (a change during it makes the entry stale)
 	bool           write_memo_keep = false;
 	if (write_memo) {
@@ -2984,7 +3001,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		write_memo_keep               = WriteMemoEpochs(vaddr, size, write_memo_fresh);
 	}
 	// The obtain memo: a read of a kept range (the diagnostic and approximation paths below never use it).
-	const bool memo_on = !is_written && !is_texel_buffer && !image_source;
+	const bool memo_on = memos && !is_written && !is_texel_buffer && !image_source;
 	const ObtainMemoEntry* memo_hit = memo_on ? ObtainMemoFind(vaddr, size) : nullptr;
 	if (memo_on) {
 		auto& s = ObtainMemoStatsRef();

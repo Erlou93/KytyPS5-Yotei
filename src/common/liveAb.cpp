@@ -48,6 +48,12 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Test (walk 9.11): the obtain memo's slot count, 2^value (0: 2^13). A pure memo: an entry holds only while every
+    // epoch it was kept with holds, whichever slot count stored or finds it (bufferCache.cpp ObtainMemoIndex).
+    {Switch::ObtainMemoBits, "KYTY_PERF_OBTAIN_MEMO_BITS", 18},
+    // Test (walk 9.11): the obtain and write memos are neither searched nor kept (the full path every call); their entries
+    // hold only while their epochs hold, so the other phase continues with them.
+    {Switch::ObtainMemoOff, "KYTY_PERF_OBTAIN_MEMO_OFF", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
