@@ -600,13 +600,6 @@ void CommandScheduler::NoteGpuCommand() {
 // already in the open buffer.
 void CommandScheduler::NoteGpuCommandBatched() {
 	const auto count = ++m_commands_since_submit;
-	if (m_flush_after_command) {
-		m_flush_after_command = false;
-		if (count > 1u) {
-			FlushFor(SubmitReason::Other);
-			return;
-		}
-	}
 	if (count == 1 && !m_batch_idle_armed && m_last_submit_reason == SubmitReason::Other) {
 		// The buffer's first draw/dispatch after a slice end, wait or flip: did the GPU run dry before it?
 		// After a batch submission (periodic, interrupt, idle early) the GPU was just handed work, and an

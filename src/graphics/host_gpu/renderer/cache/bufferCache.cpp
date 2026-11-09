@@ -903,13 +903,6 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		g_dtb.chunk_copies.fetch_add(direct_plan.chunks.size(), std::memory_order_relaxed);
 	}
 	if (label) GpuTimer::LabelEnd(native);
-	if constexpr (!async) {
-		// KYTY_PERF_FLUSH_READ_WRITERS: the GPU-written intervals this synchronous download is about to wait for, when the
-		// mapping read declined because their newest write is in the open command buffer.
-		if (DownloadWaitTrace::g_last_bar_reason == 2) {
-			for (const auto& copy: copies) NoteReadWriterRange(buffer_address + copy.srcOffset, copy.size);
-		}
-	}
 	auto publish = [this, mapped, offset, total_size, buffer_address, ring,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		KYTY_PROFILER_BLOCK("Download::Publish");
@@ -3076,61 +3069,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	return {&buffer, buffer.Offset(vaddr)};
 }
 
-// KYTY_PERF_FLUSH_READ_WRITERS (test, live A/B; walk 9.11: 84% of the GPU thread's GPU waits are synchronous downloads
-// whose newest write is still in the open command buffer): ranges such a download waited for are kept (64, oldest
-// replaced); a GPU write into one of them asks the scheduler to submit the open buffer before the next draw/dispatch, so
-// the GPU starts the writer while the CPU records on. Only submission points move.
-namespace {
-struct ReadWriterRanges {
-	struct Range {
-		uint64_t start = 0, end = 0;
-		uint32_t frame = 0; // the presented frame of its last flush (one per frame)
-	};
-	std::array<Range, 64> ranges {};
-	uint32_t                                      next = 0;
-	uint64_t                                      learned = 0, flushes = 0;
-};
-ReadWriterRanges g_read_writers; // GPU thread
-uint32_t ReadWritersFixed() {
-	static const uint32_t v = [] {
-		const char* s = std::getenv("KYTY_PERF_FLUSH_READ_WRITERS");
-		return s != nullptr ? static_cast<uint32_t>(std::strtoul(s, nullptr, 10)) : 0u;
-	}();
-	return v;
-}
-} // namespace
-
-void BufferCache::NoteReadWriterRange(uint64_t vaddr, uint64_t size) {
-	if (!Common::LiveAb::Possible(Common::LiveAb::Switch::FlushReadWriters, ReadWritersFixed()) || size == 0) return;
-	auto& r = g_read_writers;
-	for (const auto& range: r.ranges) {
-		if (range.start <= vaddr && vaddr + size <= range.end) return;
-	}
-	r.ranges[r.next] = {vaddr, vaddr + size, 0};
-	r.next           = (r.next + 1u) % static_cast<uint32_t>(r.ranges.size());
-	r.learned++;
-}
-
-void BufferCache::NoteReadWriterWrite(uint64_t vaddr, uint64_t size) {
-	if (Common::LiveAb::Gate(Common::LiveAb::Switch::FlushReadWriters, ReadWritersFixed()) == 0u) return;
-	auto&          r     = g_read_writers;
-	const uint32_t frame = DebugPresentCount().load(std::memory_order_relaxed);
-	for (auto& range: r.ranges) {
-		if (vaddr < range.end && range.start < vaddr + size) {
-			if (range.frame == frame) return;
-			range.frame = frame;
-			m_scheduler.RequestFlushAfterCommand();
-			if ((++r.flushes & 0xffu) == 0u && Common::EnvRead::PerfLines()) {
-				std::fprintf(stderr, "PERF flush_read_writers learned=%llu flushes=%llu\n",
-				             static_cast<unsigned long long>(r.learned), static_cast<unsigned long long>(r.flushes));
-			}
-			return;
-		}
-	}
-}
-
 void BufferCache::NoteObtainedWrite(uint64_t vaddr, uint64_t size) {
-	NoteReadWriterWrite(vaddr, size); // KYTY_PERF_FLUSH_READ_WRITERS
 	if (!m_append_pools.empty() || !m_append_windows.empty()) AppendForeignWrite(vaddr, size); // D4b step 1 (append windows)
 	if (UploadClobberCheck()) { // D4 step K0
 		C0Note(vaddr, size, InDirectRange(vaddr, size) ? C0Event::DirectWrite : C0Event::ShaderWrite,
@@ -3163,7 +3102,6 @@ void BufferCache::NoteObtainedWrite(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::NoteObtainedWriteRepeat(uint64_t vaddr, uint64_t size, bool same_tick) {
-	NoteReadWriterWrite(vaddr, size); // KYTY_PERF_FLUSH_READ_WRITERS
 	if (!m_append_pools.empty() || !m_append_windows.empty()) AppendForeignWrite(vaddr, size); // D4b step 1 (append windows)
 	// As NoteObtainedWrite, without what the noted range already holds: the GPU-dirty set's range (the generation still
 	// moves, as for every GPU write) and, at the same tick, the per-range write ticks and the granule write ticks.

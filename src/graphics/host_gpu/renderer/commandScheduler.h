@@ -38,8 +38,6 @@ public:
 	// Before a draw or dispatch, the open command buffer is submitted (no wait) once 128 draws/dispatches were recorded
 	// into it, so the GPU starts on them while the CPU records the next ones.
 	void           NoteGpuCommand();
-	// KYTY_PERF_FLUSH_READ_WRITERS (test): the open buffer is submitted before the next draw/dispatch is recorded.
-	void           RequestFlushAfterCommand() noexcept { m_flush_after_command = true; }
 	// An end-of-pipe interrupt was queued for the open command buffer's tick, which must be submitted for
 	// it to fire (RELEASE_MEM): at once only when the GPU is idle (submission batching, commandScheduler.cpp).
 	void           FlushForInterrupt();
@@ -82,7 +80,6 @@ private:
 	std::function<void()> m_pre_submit_hook;
 	bool                  m_in_pre_submit_hook = false;
 	uint32_t m_commands_since_submit = 0;
-	bool     m_flush_after_command   = false; // RequestFlushAfterCommand
 
 	// Why the next Submit happens (FlushFor), for the PERF submit line and the batching's idle arming.
 	enum class SubmitReason : uint32_t {
