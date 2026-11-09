@@ -1968,7 +1968,10 @@ bool LongPrepPartsOn() {
 // before both preparations) and not the images' layouts (the commit sets them). A cached buffer that is no longer the one
 // registered for its guest range when the print is taken is marked stale: a binding the first preparation took before one
 // of its own later acquisitions replaced the buffer (merged it into a bigger one) is a class of its own (merged=), not a
-// difference; a stale binding of the second preparation (stale_commit=) is one the commit would bind.
+// difference (merged_written=: of a binding the shader writes). In a run without the oracle the one preparation is the
+// "first": merged= counts the draws whose commit binds a replaced buffer today (stale_commit=, the second preparation's,
+// is 0 by construction: the first preparation registered every range of the draw). The bindless images are counted
+// apart (bindless_info=): not a worker's result.
 // KYTY_CHECK_CHUNKS_FAULT=N (with =2, diagnostic): every N-th member gets one error in its first preparation's data, the
 // fields in turn; the oracle must report every one (PERF chunk_check fault[...]).
 namespace {
@@ -1987,7 +1990,8 @@ struct ChunkBufRec {
 	uint32_t kind  = 0;         // 0: a cached or fixed buffer (its Vulkan buffer, offset, range), 1: the stream ring (bytes)
 	uint64_t address = 0, size = 0; // the guest range (0 for GDS and LDS)
 	uint64_t buffer = 0, offset = 0, range = 0, bytes = 0;
-	bool     stale = false; // a cached buffer that is no longer the one registered for its guest range
+	bool     stale   = false; // a cached buffer that is no longer the one registered for its guest range
+	bool     written = false; // a storage binding the shader writes
 	[[nodiscard]] bool Same(const ChunkBufRec& o) const {
 		return field == o.field && kind == o.kind && address == o.address && size == o.size && buffer == o.buffer &&
 		       offset == o.offset && range == o.range && bytes == o.bytes;
@@ -2001,7 +2005,7 @@ struct ChunkPrint {
 struct ChunkCheckState {
 	ChunkPrint                    first, second;
 	uint64_t                      draws = 0, dispatches = 0, bad = 0, mixed = 0, members = 0;
-	uint64_t                      merged = 0, stale_commit = 0;
+	uint64_t                      merged = 0, merged_written = 0, stale_commit = 0, bindless_info = 0;
 	std::array<uint64_t, CfCount> mismatches {}, injected {}, detected {}, injected_mixed {};
 	uint32_t                      fault_turn  = 0;
 	int                           fault_field = -1;       // the field of this member's injected error (-1: none)
@@ -2065,12 +2069,20 @@ void ChunkPrintOf(BufferCache& cache, ChunkPrint& p, std::span<PreparedBindings*
 			const auto& b = st.buffers[i];
 			add(CfBuffers, st.buffer_sources[i].address, st.buffer_sources[i].size, b.buffer, b.offset, b.range);
 		}
+		if (st.runtime != nullptr && st.runtime->program != nullptr) {
+			// Which storage bindings the shader writes (merged_written: a write through a replaced buffer would be lost).
+			const size_t first = p.bufs.size() - st.buffer_sources.size();
+			for (const auto& resource: st.runtime->program->info.buffers) {
+				if (resource.written && resource.descriptor_index < st.buffer_sources.size()) {
+					p.bufs[first + resource.descriptor_index].written = true;
+				}
+			}
+		}
 		add(CfBuffers, 0, 0, st.gds.buffer, st.gds.offset, st.gds.range);
 		add(CfBuffers, 0, 0, st.shared_memory.buffer, st.shared_memory.offset, st.shared_memory.range);
 		for (const auto& image: st.images) {
 			f[CfImages] = FpMix(f[CfImages], (uint64_t {image.image_id.generation} << 32u) | image.image_id.index);
 			f[CfImages] = FpMix(f[CfImages], reinterpret_cast<uint64_t>(static_cast<VkImageView>(image.image_view)));
-			f[CfImages] = FpMix(f[CfImages], static_cast<uint64_t>(image.layout));
 			for (const auto view: image.mip_views) f[CfImages] = FpMix(f[CfImages], reinterpret_cast<uint64_t>(static_cast<VkImageView>(view)));
 		}
 		for (const auto sampler: st.samplers) f[CfImages] = FpMix(f[CfImages], reinterpret_cast<uint64_t>(static_cast<VkSampler>(sampler)));
@@ -2180,6 +2192,7 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 			if (a[i].Same(b[i])) continue;
 			if (same_range && a[i].stale && !b[i].stale && i != s.fault_rec) {
 				s.merged++; // the first preparation's own later acquisition replaced this binding's buffer
+				if (a[i].written) s.merged_written++;
 				continue;
 			}
 			bad[a[i].field] = true;
@@ -2203,6 +2216,12 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 			s.injected_mixed[f]++;
 		}
 		bad[f] = bad_rec[f] != SIZE_MAX; // the injected error is not a difference; another binding of its field still is
+	}
+	// The bindless images are not a worker's result (the tables stay at the commit, plan 9.11 ~20:45; the first
+	// preparation's table state - in-draw marks, the once-per-draw refresh - is what the second sees): counted apart.
+	if (bad[CfBindless]) {
+		s.bindless_info++;
+		bad[CfBindless] = false;
 	}
 	bool any = false;
 	for (uint32_t i = 0; i < CfCount; i++) {
@@ -2253,10 +2272,13 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 			        std::to_string(s.detected[i]) + "/" + std::to_string(s.injected_mixed[i]);
 		}
 	}
-	std::fprintf(stderr, "PERF chunk_check draws=%llu dispatches=%llu bad=%llu mixed=%llu merged=%llu stale_commit=%llu mismatches[%s]\n",
+	std::fprintf(stderr,
+	             "PERF chunk_check draws=%llu dispatches=%llu bad=%llu mixed=%llu merged=%llu merged_written=%llu stale_commit=%llu "
+	             "bindless_info=%llu mismatches[%s]\n",
 	             static_cast<unsigned long long>(s.draws), static_cast<unsigned long long>(s.dispatches),
 	             static_cast<unsigned long long>(s.bad), static_cast<unsigned long long>(s.mixed),
-	             static_cast<unsigned long long>(s.merged), static_cast<unsigned long long>(s.stale_commit), text.c_str());
+	             static_cast<unsigned long long>(s.merged), static_cast<unsigned long long>(s.merged_written),
+	             static_cast<unsigned long long>(s.stale_commit), static_cast<unsigned long long>(s.bindless_info), text.c_str());
 	s.window = now;
 }
 } // namespace
