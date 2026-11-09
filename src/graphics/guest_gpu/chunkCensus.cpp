@@ -124,8 +124,7 @@ void NoteSubmit(bool open) {
 	if (now - window < std::chrono::seconds(5)) return;
 	const uint32_t frame  = DebugPresentCount().load(std::memory_order_relaxed);
 	const double   frames = frame > frame0 ? frame - frame0 : 1u;
-	std::fprintf(stderr, "PERF chunk_submit opens/frame=%.1f closes/frame=%.1f
-", opens / frames, closes / frames);
+	std::fprintf(stderr, "PERF chunk_submit opens/frame=%.1f closes/frame=%.1f\n", opens / frames, closes / frames);
 	opens = closes = 0;
 	window = now;
 	frame0 = frame;
