@@ -2308,9 +2308,72 @@ void RenderExecutor::ChunkCheckSecond(std::span<PreparedBindings* const> stages,
 	// preparation took those events, so the committed stage also gets the images the first one listed (the commit's
 	// layout transitions are repeatable; it gets at least what a run without the oracle gets).
 	for (size_t k = 0; k < stages.size() && k < s.first_stages.size(); k++) {
-		auto& committed = stages[k]->bindless_images;
-		for (const auto id: s.first_stages[k]->bindless_images) {
-			if (std::ranges::find(committed, id) == committed.end()) committed.push_back(id);
+		auto&        committed = stages[k]->bindless_images;
+		const auto&  first     = s.first_stages[k]->bindless_images;
+		const size_t before    = committed.size();
+		for (const auto id: first) {
+			// Without the duplicate check above a few images (the search is linear; a repeated transition is harmless).
+			if (before > 64u || std::ranges::find(committed, id) == committed.end()) committed.push_back(id);
+		}
+	}
+}
+
+// Project 15 (the buffer registry epoch guard, 9.11; found by the oracle v2: merged=): a draw takes its buffer bindings
+// one after another - the stages' storage buffers (RebindBuffers), then the vertex, index and indirect buffers - and a later
+// acquisition can create a buffer that joins one an earlier binding named (CreateBuffer, JoinOverlap: the old buffer is
+// unregistered, its bytes copied into the new one; a read through the old one gets the same bytes, a write would be lost).
+// FindBuffers registers the stages' ranges first, the vertex and index ranges it does not. So when the buffer registry
+// changed while the bindings were taken (DrawRepeat::g_buffer_registry_epoch, every registration and unregistration), the
+// buffer part is taken again: the next pass creates nothing (every range is registered now), its bindings name the
+// registered buffers. PrepareBindings is not repeated (a table's image listing is taken once, ListTableImagesByEvents).
+void RenderExecutor::PrepareDrawBindings(DrawPlan& plan, CommandBuffer& buffer, std::span<RenderColorInfo> colors,
+                                         std::chrono::steady_clock::time_point* buffers_mark) {
+	const auto stages = std::span {plan.descriptor_stages.data(), plan.stage_count};
+	PrepareGraphicsBuffersHead(stages);
+	PrepareGraphicsImages(stages, colors);
+	const auto& epoch = DrawRepeat::g_buffer_registry_epoch;
+	uint64_t    seen  = epoch.load(std::memory_order_acquire);
+	struct GuardStats {
+		uint64_t repeated = 0, passes = 0, unstable = 0;
+		std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+	};
+	static GuardStats stats; // execution thread
+	for (uint32_t pass = 0;; pass++) {
+		PrepareGraphicsBuffersTail(stages);
+		if (pass == 0 && buffers_mark != nullptr) *buffers_mark = std::chrono::steady_clock::now();
+		if (!plan.mesh_active) {
+			if (pass == 0) LogDrawPhase(plan.draw.Name(), "PrepareVertexBuffers");
+			plan.vertex_bindings = {};
+			AcquireVertexBuffers(buffer, plan.state->vertex_info[0], plan.vertex_bindings);
+			plan.index_binding = PrepareIndexBuffer(buffer, plan.index_source);
+			if (plan.indirect) {
+				// GPU-written records stay in their cached buffer (no readback); CPU-written ones upload.
+				auto& cache        = m_context.GetBufferCache();
+				plan.indirect_args = cache.ObtainBuffer(plan.indirect->args_addr, plan.indirect->args_size, false);
+				if (plan.indirect->count_addr != 0) {
+					plan.indirect_count = cache.ObtainBuffer(plan.indirect->count_addr, sizeof(uint32_t), false);
+				}
+			}
+		}
+		const uint64_t now_epoch = epoch.load(std::memory_order_acquire);
+		if (now_epoch == seen) break;
+		seen = now_epoch;
+		if (pass == 0) stats.repeated++;
+		stats.passes++;
+		if (pass == 3) {
+			// Still changing after four passes: today's bindings of the last pass are kept (counted; expected 0).
+			stats.unstable++;
+			break;
+		}
+	}
+	static const bool perf = std::getenv("KYTY_TRACE_PERF") != nullptr;
+	if (perf) {
+		const auto now = std::chrono::steady_clock::now();
+		if (now - stats.window >= std::chrono::seconds(5)) {
+			std::fprintf(stderr, "PERF buffer_guard repeated=%llu passes=%llu unstable=%llu\n",
+			             static_cast<unsigned long long>(stats.repeated), static_cast<unsigned long long>(stats.passes),
+			             static_cast<unsigned long long>(stats.unstable));
+			stats.window = now;
 		}
 	}
 }
@@ -2453,15 +2516,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			PrepareBindings(state.ps_input_info.stage, ChunkScratchBindings(3));
 			plan.descriptor_stages[plan.stage_count++] = &ChunkScratchBindings(3);
 		}
-		PrepareGraphicsBindings(std::span {plan.descriptor_stages.data(), plan.stage_count},
-		                        std::span {state.color_info, state.color_count});
-		AcquireVertexBuffers(buffer, state.vertex_info[0], plan.vertex_bindings);
-		plan.index_binding = PrepareIndexBuffer(buffer, index_source);
-		if (indirect != nullptr) {
-			auto& cache        = m_context.GetBufferCache();
-			plan.indirect_args = cache.ObtainBuffer(indirect->args_addr, indirect->args_size, false);
-			if (indirect->count_addr != 0) plan.indirect_count = cache.ObtainBuffer(indirect->count_addr, sizeof(uint32_t), false);
-		}
+		PrepareDrawBindings(plan, buffer, std::span {state.color_info, state.color_count}, nullptr);
 		ChunkCheckFirst(std::span {plan.descriptor_stages.data(), plan.stage_count}, &plan);
 		plan.descriptor_stages = {};
 		plan.stage_count       = 0;
@@ -2491,22 +2546,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 				plan.descriptor_stages[plan.stage_count++] = &*bindings.pixel;
 			}
 			if (long_us != 0) marks[2] = std::chrono::steady_clock::now();
-			const auto stages = std::span {plan.descriptor_stages.data(), plan.stage_count};
-			PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
-			if (long_us != 0) marks[3] = std::chrono::steady_clock::now();
-			if (!plan.mesh_active) {
-				LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
-				AcquireVertexBuffers(buffer, state.vertex_info[0], plan.vertex_bindings);
-				plan.index_binding = PrepareIndexBuffer(buffer, index_source);
-				if (indirect != nullptr) {
-					// GPU-written records stay in their cached buffer (no readback); CPU-written ones upload.
-					auto& cache        = m_context.GetBufferCache();
-					plan.indirect_args = cache.ObtainBuffer(indirect->args_addr, indirect->args_size, false);
-					if (indirect->count_addr != 0) {
-						plan.indirect_count = cache.ObtainBuffer(indirect->count_addr, sizeof(uint32_t), false);
-					}
-				}
-			}
+			PrepareDrawBindings(plan, buffer, std::span {state.color_info, state.color_count}, long_us != 0 ? &marks[3] : nullptr);
 		}
 		if (long_us != 0) marks[4] = std::chrono::steady_clock::now();
 		if (long_us != 0) {

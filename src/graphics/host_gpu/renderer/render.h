@@ -12,6 +12,7 @@
 
 #include <unordered_set>
 #include <array>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <span>
@@ -412,6 +413,11 @@ private:
 	void PrepareGraphicsBuffersHead(std::span<PreparedBindings* const> stages);
 	void PrepareGraphicsImages(std::span<PreparedBindings* const> stages, std::span<RenderColorInfo> colors);
 	void PrepareGraphicsBuffersTail(std::span<PreparedBindings* const> stages);
+	// A draw's bindings after its stages' PrepareBindings: PrepareGraphicsBindings' parts, then the vertex, index and indirect
+	// buffers, the buffer part taken again while the buffer registry changed under it (renderDraw.cpp, the registry epoch
+	// guard). buffers_mark: set after the stages' buffers of the first pass (KYTY_TRACE_LONG_PREP).
+	void PrepareDrawBindings(DrawPlan& plan, CommandBuffer& buffer, std::span<RenderColorInfo> colors,
+	                         std::chrono::steady_clock::time_point* buffers_mark);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
 	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
 	                              bool ignore_target_mask = false, bool exact_format = false);
