@@ -2545,17 +2545,26 @@ void NoteTableFallback(BindlessTable::TableFallback reason, uint64_t shader_hash
 
 } // namespace
 
-// PERF table_why (diagnostic, KYTY_TRACE_PERF): the bindless table translations by first reason (0 new table, 1 covered
+// PERF table_why (diagnostic, KYTY_TRACE_TABLE_WHY=1 with KYTY_TRACE_PERF): the bindless table translations by first reason (0 new table, 1 covered
 // size changed, 2 fields changed, 3 slots dead, 4 content hash changed) for tables up to / over 1 MiB, with their time and
 // bytes, and the slot refreshes (RefreshTableSlots) per size class; one line every 5 s. GPU thread.
 namespace {
 struct TableWhy {
 	uint64_t                              n[2][5] {}, ns[2][5] {}, bytes[2][5] {};
 	uint64_t                              refresh_n[2] {}, refresh_ns[2] {}, uses[2] {};
+	// A table use's parts: table and fields, check and translation, tail (generation, class, patch, list, mark).
+	uint64_t                              head_ns[2] {}, check_ns[2] {}, tail_ns[2] {};
 	uint32_t                              calls  = 0;
 	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
 TableWhy g_table_why;
+bool TableWhyOn() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_TRACE_TABLE_WHY");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on && PerfEnabled();
+}
 void TableWhyReport() {
 	auto& w = g_table_why;
 	if ((++w.calls & 255u) != 0u) return;
@@ -2563,8 +2572,10 @@ void TableWhyReport() {
 	if (now - w.window < std::chrono::seconds(5)) return;
 	w.window = now;
 	for (int large = 0; large < 2; large++) {
-		std::fprintf(stderr, "PERF table_why %s uses=%llu refresh=%llu/%.1fms", large != 0 ? "large" : "small",
-		             static_cast<unsigned long long>(w.uses[large]), static_cast<unsigned long long>(w.refresh_n[large]),
+		std::fprintf(stderr, "PERF table_why %s uses=%llu head=%.1fms check=%.1fms tail=%.1fms refresh=%llu/%.1fms",
+		             large != 0 ? "large" : "small", static_cast<unsigned long long>(w.uses[large]),
+		             static_cast<double>(w.head_ns[large]) / 1e6, static_cast<double>(w.check_ns[large]) / 1e6,
+		             static_cast<double>(w.tail_ns[large]) / 1e6, static_cast<unsigned long long>(w.refresh_n[large]),
 		             static_cast<double>(w.refresh_ns[large]) / 1e6);
 		static constexpr const char* names[] = {"new", "covered", "fields", "dead", "hash"};
 		for (int r = 0; r < 5; r++) {
@@ -2592,6 +2603,14 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 		return false;
 	};
 	stats.uses++;
+	const bool why_use = TableWhyOn(); // PERF table_why: the use's parts
+	auto       why_mark = why_use ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+	const auto why_part = [&](uint64_t& sum) {
+		if (!why_use) return;
+		const auto now = std::chrono::steady_clock::now();
+		sum += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - why_mark).count());
+		why_mark = now;
+	};
 	// A table may be as large as the translation space (bindless E1: the large tables too).
 	const uint64_t max_bytes        = uint64_t {ShaderRecompiler::IR::WatchdogReportBase} * 4u;
 	const uint32_t descriptor_bytes = resource.r128 ? 16u : 32u;
@@ -2664,6 +2683,7 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	}
 	// Within a presented frame a table only grows (draws reading other fields or more records of it); a new frame
 	// starts from what this draw reads (a ring table changes its record count from frame to frame).
+	why_part(g_table_why.head_ns[large ? 1 : 0]);
 	const auto covered =
 	    static_cast<uint32_t>(table.covered_frame != frame ? needed : std::max<uint64_t>(table.covered, needed));
 	// Guest memory is compared once per command-buffer tick: a slice of a submission ends with a submission, and the
@@ -2748,7 +2768,7 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 				t_long_prep_parts[41] = covered;
 				t_long_prep_parts[42] = table.covered;
 			}
-			const bool   why_on     = PerfEnabled(); // PERF table_why
+			const bool   why_on     = TableWhyOn(); // PERF table_why
 			const size_t why_reason = table.region == 0 ? 0u : covered != table.covered ? 1u : fields_changed ? 2u : retranslate ? 3u : 4u;
 			const auto large_start = large || why_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 			if (!TranslateBindlessTable(table, covered, hash, frame, shader_hash)) return fallback(Fallback::ArenaFull);
@@ -2781,12 +2801,13 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	} else {
 		stats.epoch_hits++;
 	}
+	why_part(g_table_why.check_ns[large ? 1 : 0]);
 	// The textures are looked up again once per presented frame, like the heap path's resolved keys (CPU writes,
 	// GPU-rendered data). A lookup that dropped an image one of the entries holds makes the table translate once
 	// more, with the replacement in the cache (once per tick besides the translation above).
 	{
 		const bool parts = LongPrepPartsOn(); // KYTY_TRACE_LONG_PREP
-		const bool why_on = PerfEnabled(); // PERF table_why
+		const bool why_on = TableWhyOn(); // PERF table_why
 		const auto start = parts || large || why_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		if (!skip_check) RefreshTableSlots(table, frame);
 		if (parts || large || why_on) {
@@ -2815,6 +2836,7 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 			}
 		}
 	}
+	if (why_use) why_mark = std::chrono::steady_clock::now(); // the refresh above has its own timer
 	if (table.generation != bindless.TableGeneration()) {
 		if (slots_alive(table)) {
 			table.generation = bindless.TableGeneration();
@@ -2857,6 +2879,7 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	}
 	if (large) stats.large_listed += prepared.bindless_images.size() - listed_before;
 	bindless.MarkTableInDraw(table);
+	why_part(g_table_why.tail_ns[large ? 1 : 0]);
 	return true;
 }
 
@@ -3198,7 +3221,7 @@ bool RenderExecutor::TranslateBindlessTableFull(BindlessTable::Table& table, uin
 	}
 	// The next translation may go by difference from this one.
 	table.diff_ready     = large && src_taken && table.fields.size() < 65536u;
-	table.diff_signature = TableFieldsSignature(table);
+	table.diff_signature = table.diff_ready ? TableFieldsSignature(table) : 0u; // read only by a ready difference translation
 	table.dead_list.clear();
 	if (!large) {
 		table.diff_entries.clear();
@@ -3436,8 +3459,10 @@ void RenderExecutor::RefreshTableSlots(BindlessTable::Table& table, uint64_t fra
 	// The run's lock, released when this scope ends.
 	TableRefreshBatch batch {m_context.GetTextureCache()};
 	// A slot refresh of any table: one it leaves without a replay goes on its owners' lists (NoteFastSlot).
+	// XXH3 of the table's view (set below, before the first refresh): the view the replay memos were taken for.
+	uint64_t view_tag = 0;
 	const auto refresh_slot = [&](uint32_t slot) {
-		const bool remap = RefreshTableSlot(table, slot, frame, batch);
+		const bool remap = RefreshTableSlot(table, slot, frame, batch, view_tag);
 		bindless.NoteFastSlot(table.view.binding, slot);
 		return remap;
 	};
@@ -3458,7 +3483,7 @@ void RenderExecutor::RefreshTableSlots(BindlessTable::Table& table, uint64_t fra
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - since).count());
 	};
 	auto&          texture_cache = m_context.GetTextureCache();
-	const uint64_t view_tag      = XXH3_64bits(&table.view, sizeof(table.view)); // the view the replay memos were taken for
+	view_tag                     = XXH3_64bits(&table.view, sizeof(table.view)); // the view the replay memos were taken for
 	// The trusted skip: the journal did not name the slot since its replay check last ran (or it was last refreshed) and
 	// its last refresh replayed, so nothing that check reads changed since.
 	const auto trusted = [&](const BindlessTable::TableSlotInfo& info, uint32_t generation) {
@@ -3654,7 +3679,8 @@ void RenderExecutor::RefreshTableSlots(BindlessTable::Table& table, uint64_t fra
 
 // RefreshBindlessDescriptor for a table slot: the texture cache's current image of the slot's descriptor goes into the
 // slot when it is another one.
-bool RenderExecutor::RefreshTableSlot(BindlessTable::Table& table, uint32_t slot, uint64_t frame, TableRefreshBatch& batch) {
+bool RenderExecutor::RefreshTableSlot(BindlessTable::Table& table, uint32_t slot, uint64_t frame, TableRefreshBatch& batch,
+                                     uint64_t view_tag) {
 	auto&      bindless      = m_context.GetBindlessTable();
 	auto&      texture_cache = m_context.GetTextureCache();
 	auto&      info          = bindless.GetTableSlot(table.view.binding, slot); // a deque that only grows: stays valid
@@ -3695,16 +3721,19 @@ bool RenderExecutor::RefreshTableSlot(BindlessTable::Table& table, uint32_t slot
 			batch.Release(); // BindImage may wait for a commit
 			BindImage(memo_image, false);
 		}
-		// Refresh events: a replay only touched the image; the next one may be skipped until it changes.
-		info.event_valid      = !info.gpu_written;
-		info.event_serial     = image->change_serial;
-		info.event_view       = XXH3_64bits(&table.view, sizeof(table.view));
-		info.event_image_sum  = DrawRepeat::ImagePageEpochSumExact(image->info.data.address, image->info.data.size);
-		info.event_image_alias_sum = DrawRepeat::ImagePageEpochSum(image->info.data.address, image->info.data.size);
-		// The slot journal: the page index lists the slot under the pages whose epochs this check reads.
-		if (info.event_valid)
+		// Refresh events: a replay only touched the image; the next one may be skipped until it changes. A GPU-written slot
+		// (refreshed at every draw, gpu_written stays set for the slot's generation) never takes the skip: its event fields
+		// are read only with event_valid (the skip, the check, NoteFastSlot), so they are not taken for it.
+		info.event_valid = !info.gpu_written;
+		if (info.event_valid) {
+			info.event_serial     = image->change_serial;
+			info.event_view       = view_tag;
+			info.event_image_sum  = DrawRepeat::ImagePageEpochSumExact(image->info.data.address, image->info.data.size);
+			info.event_image_alias_sum = DrawRepeat::ImagePageEpochSum(image->info.data.address, image->info.data.size);
+			// The slot journal: the page index lists the slot under the pages whose epochs this check reads.
 			bindless.IndexSlotPages(table.view.binding, slot, image->info.data.address, image->info.data.size,
 			                        info.memo_address, info.memo_size);
+		}
 		return false;
 	}
 	batch.Release(); // the full lookup below takes the cache's lock

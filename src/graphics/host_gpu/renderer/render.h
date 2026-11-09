@@ -365,7 +365,7 @@ public:
 	// those logged in g_bindless_layout_log since and the GPU-written ones).
 	void ListTableImagesByEvents(BindlessTable::Table& table, std::vector<ImageId>& list);
 	[[nodiscard]] bool RefreshTableSlot(BindlessTable::Table& table, uint32_t slot, uint64_t frame,
-	                                    TableRefreshBatch& batch); // true: remapped
+	                                    TableRefreshBatch& batch, uint64_t view_tag); // true: remapped
 	// Once per presented frame: stale tables and unused table slots go.
 	void PrepareTablesFrame(uint64_t frame);
 	// KYTY_PERF_BINDLESS_CLASSES: registers an integer class for a float resource of one field whose records (the
