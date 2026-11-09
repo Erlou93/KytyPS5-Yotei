@@ -9,6 +9,7 @@
 #include "common/emulatorConfig.h"
 #include "common/envDefaults.h"
 #include "common/envRead.h"
+#include "common/liveAb.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
@@ -2653,12 +2654,14 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	// KYTY_DIAG_TABLES_ASSUME_UNCHANGED=1 (ceiling test only, map 5.11 "ruch przez miasto": the bindless tables were ~20%
 	// of the GPU thread in the town): a table with a translation of the same size and fields is taken as unchanged - no
 	// read, hash, translation or slot refresh (stale textures may show; the draws per frame must stay). Read once.
-	static const bool assume_unchanged = [] {
+	// Live A/B toggles it per use (a table skipped in one phase is checked at its next use in the other).
+	static const uint32_t assume_fixed = [] {
 		const char* value = std::getenv("KYTY_DIAG_TABLES_ASSUME_UNCHANGED");
 		const bool  set   = value != nullptr && value[0] == '1';
 		if (set) std::fprintf(stderr, "DIAG_TABLES_ASSUME_UNCHANGED ceiling: table checks skipped""\n");
-		return set;
+		return set ? 1u : 0u;
 	}();
+	const bool assume_unchanged = Common::LiveAb::Gate(Common::LiveAb::Switch::DiagTablesAssume, assume_fixed) != 0u;
 	const bool skip_check = assume_unchanged && table.region != 0 && covered == table.covered && !fields_changed &&
 	                        !retranslate;
 	const bool check_due = !skip_check && (table.checked_tick != tick || covered != table.covered || fields_changed ||

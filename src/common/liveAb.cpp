@@ -48,6 +48,9 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
+    // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
+    {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
