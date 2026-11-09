@@ -48,6 +48,7 @@ private:
 	// The recipe key of a dispatch (0: none) and where it was seen.
 	void NoteRecipe(uint64_t key);
 	uint64_t                              m_address;
+	uint64_t                              m_hash = 0; // the program's shader hash (NoteDispatch)
 	uint32_t                              m_kind;
 	uint32_t                              m_class = 0;
 	bool                                  m_on;

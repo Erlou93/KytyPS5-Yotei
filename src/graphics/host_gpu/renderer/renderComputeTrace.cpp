@@ -42,7 +42,16 @@ namespace {
 struct Row {
 	uint64_t count = 0;
 	uint64_t ns    = 0;
+	uint64_t hash  = 0; // the shader hash of the last dispatch (address rows)
+	std::array<uint64_t, 30> sub_ns {}; // the dispatch parts (DispatchSub up to BindlessHeaps), every dispatch
 };
+const char* const g_sub_names[] = {"prepare_program", "key_find", "adopt", "permutation", "find_buffers",
+                                   "prepare_bda", "rebind_images", "shared_memory", "rebind_buffers",
+                                   "pipeline", "prepare_bindings", "commit_bindings", "record", "reset",
+                                   "adopt_reads", "bda_ranges", "obtain_written", "obtain_read", "tc_invalidate",
+                                   "srt_upload", "data_upload", "ow_batch_commit", "ow_upload_walk",
+                                   "ow_dirty_add", "ow_observer", "ow_write_tick", "tail_pre", "tail_post",
+                                   "tail_emitted", "bindless_heaps"};
 struct Phases {
 	uint64_t count = 0, full = 0, ns = 0;
 	std::array<uint64_t, DispatchCensusTimer::kMarks> phase_ns {};
@@ -100,6 +109,7 @@ void DispatchCensusTimer::NoteRecipe(uint64_t key) {
 void DispatchCensusTimer::NoteDispatch(const ShaderComputeInputInfo& input_info, uint32_t mode) {
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
+	m_hash                = program.shader_hash;
 	// The recipe key.
 	XXH3_state_t* state = XXH3_createState();
 	XXH3_64bits_reset(state);
@@ -152,6 +162,8 @@ void DispatchCensusTimer::Finish() {
 	Classes()[m_class & 3u].ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_start).count());
 	row.count++;
 	row.ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_start).count());
+	if (m_hash != 0) row.hash = m_hash;
+	for (size_t i = 0; i < row.sub_ns.size(); i++) row.sub_ns[i] += t_dispatch_sub_ns[i];
 	static auto     window      = now;
 	static uint32_t frame_start = DebugPresentCount().load();
 	if (now - window < std::chrono::seconds(5)) return;
@@ -210,9 +222,18 @@ void DispatchCensusTimer::Finish() {
 	}
 	for (size_t i = 0; i < rows.size() && i < 16u; i++) {
 		const auto& [a, r] = rows[i];
-		std::fprintf(stderr, "PERF dispatch_census cs=0x%llx n=%.1f/frame %.3fms/frame %.1fus\n",
-		             static_cast<unsigned long long>(a), static_cast<double>(r.count) / frames,
-		             static_cast<double>(r.ns) / frames / 1e6, static_cast<double>(r.ns) / 1e3 / static_cast<double>(r.count));
+		std::fprintf(stderr, "PERF dispatch_census cs=0x%llx hash=%016llx n=%.1f/frame %.3fms/frame %.1fus top:",
+		             static_cast<unsigned long long>(a), static_cast<unsigned long long>(r.hash),
+		             static_cast<double>(r.count) / frames, static_cast<double>(r.ns) / frames / 1e6,
+		             static_cast<double>(r.ns) / 1e3 / static_cast<double>(r.count));
+		std::array<size_t, 30> order {};
+		for (size_t j = 0; j < order.size(); j++) order[j] = j;
+		std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return r.sub_ns[x] > r.sub_ns[y]; });
+		for (size_t j = 0; j < 4; j++) {
+			std::fprintf(stderr, " %s=%.1fus", g_sub_names[order[j]],
+			             static_cast<double>(r.sub_ns[order[j]]) / 1e3 / static_cast<double>(r.count));
+		}
+		std::fprintf(stderr, "\n");
 	}
 	Rows().clear();
 }
