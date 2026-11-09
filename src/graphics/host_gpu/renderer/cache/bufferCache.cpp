@@ -1348,8 +1348,6 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				if (run_pages != 0u) {
 					if (census.active) {
 						NoteRingRunStop(0);
-					} else if (!m_append_pools.empty()) {
-						NoteRingRunStop(1);
 					} else {
 						(void)ExtendDeadRingRun(vaddr, size, run_pages, runs);
 					}
@@ -1610,7 +1608,7 @@ namespace {
 struct RingDeadStats {
 	std::atomic<uint64_t> faults {0}, freed {0}, dropped_bytes {0}, partial {0}, caller_skips {0};
 	std::atomic<uint64_t> run_pages {0}; // KYTY_PERF_RING_RUN: pages released with an earlier fault
-	// KYTY_PERF_RING_RUN, why a scan stopped: 0 census on, 1 append pools, 2 pending eager copy, 3 a live or unknown GPU
+	// KYTY_PERF_RING_RUN, why a scan stopped: 0 census on, 1 an active append pool, 2 pending eager copy, 3 a live or unknown GPU
 	// byte, 4 the window ran out, 5 the ring ended; and the pages without GPU bytes passed over.
 	std::atomic<uint64_t> run_stop[6] {}, run_clean {0};
 };
@@ -2112,6 +2110,13 @@ uint32_t BufferCache::ExtendDeadRingRun(uint64_t vaddr, uint64_t size, uint32_t 
 		if (!m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE)) {
 			g_ring_dead.run_clean.fetch_add(1, std::memory_order_relaxed); // its write faults on the guest thread
 			continue;
+		}
+		// A page of an active append pool goes AppendRelease's way at its own fault (D4b step 1).
+		if (std::ranges::any_of(m_append_pools, [&](const AppendPool& pool) {
+			    return pool.active && pool.base < page + TRACKER_PAGE_SIZE && page < pool.base + pool.size;
+		    })) {
+			stop = 1;
+			break;
 		}
 		if (std::ranges::any_of(m_eager_readbacks, [&](const EagerReadback& entry) {
 			    return page < entry.end && entry.start < page + TRACKER_PAGE_SIZE;
