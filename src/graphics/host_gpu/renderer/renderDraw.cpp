@@ -2126,6 +2126,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			static uint64_t                 draws = 0;
 			static auto                     window = std::chrono::steady_clock::now();
 			for (size_t i = 0; i < 33; i++) sum[i] += t_long_prep_parts[i];
+			static std::array<uint64_t, 6> gw_sum {}; // 43-48: GPU-read SRT words
+			for (size_t i = 0; i < 6; i++) gw_sum[i] += t_long_prep_parts[43 + i];
 			for (size_t i = 0; i < 4; i++)
 				sum[33 + i] += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(marks[i + 1] - marks[i]).count());
 			draws++;
@@ -2136,8 +2138,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 				for (size_t i = 1; i < 33; i++) {
 					if (i < 26 || i > 29) std::fprintf(stderr, " %zu=%.3f", i, sum[i] / n);
 				}
-				std::fprintf(stderr, "\n");
-				sum = {}; draws = 0; window = marks[4];
+				std::fprintf(stderr, " | gw gather=%.3f obtain=%.3f upload=%.3f words=%.2f runs=%.2f direct=%.2f\n",
+				             gw_sum[0] / n, gw_sum[1] / n, gw_sum[2] / n, gw_sum[3] * 1e3 / n, gw_sum[4] * 1e3 / n,
+				             gw_sum[5] * 1e3 / n);
+				sum = {}; gw_sum = {}; draws = 0; window = marks[4];
 			}
 		}
 		if (long_us != 0) {

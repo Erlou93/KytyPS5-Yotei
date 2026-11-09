@@ -4585,6 +4585,16 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	// Before the other bindings, like the record-keyed ranges: a buffer this creates cannot replace one they named.
 	m_gpu_word_patches.clear();
 	if (const auto& words = program.info.srt_gpu_words; !words.empty()) {
+		// KYTY_TRACE_LONG_PREP: the parts 43-45 and counts 46-48 (perfCounters.h).
+		const bool gw_parts = LongPrepPartsOn();
+		auto       gw_last  = gw_parts ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+		const auto gw_mark  = [&](size_t part) {
+			if (!gw_parts) return;
+			const auto now = std::chrono::steady_clock::now();
+			t_long_prep_parts[part] +=
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - gw_last).count());
+			gw_last = now;
+		};
 		const auto& flat = snapshot.flattened_srt;
 		auto&       cache = m_context.GetBufferCache();
 		m_gpu_word_addresses.clear();
@@ -4625,6 +4635,11 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			}
 			stream.Commit();
 		}
+		gw_mark(43);
+		if (gw_parts) {
+			t_long_prep_parts[46] += words.size();
+			t_long_prep_parts[48] += m_gpu_word_values.size();
+		}
 		if (!std::ranges::is_sorted(m_gpu_word_addresses)) std::ranges::sort(m_gpu_word_addresses); // usually in order
 		for (size_t first = 0; first < m_gpu_word_addresses.size();) {
 			// One range per run of words no more than 256 bytes apart inside one 64 KiB block.
@@ -4653,7 +4668,9 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 				m_gpu_word_patches.emplace_back(word.hi, static_cast<uint32_t>(host >> 32u));
 			}
 			first = last + 1u;
+			if (gw_parts) t_long_prep_parts[47]++;
 		}
+		gw_mark(44);
 	}
 	sub_timer.reset();
 	EXIT_IF(prepared.shader_data.size() != layout.ShaderDataDwords());
@@ -4719,6 +4736,8 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		if (prepared.bindless_patches.empty() && m_gpu_word_patches.empty()) {
 			upload_srt(snapshot.flattened_srt);
 		} else {
+			const bool gw_timed = !m_gpu_word_patches.empty() && LongPrepPartsOn(); // KYTY_TRACE_LONG_PREP: part 45
+			const auto gw_start = gw_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 			m_bindless_srt.assign(snapshot.flattened_srt.begin(), snapshot.flattened_srt.end());
 			for (const auto& patch: prepared.bindless_patches) {
 				if (static_cast<size_t>(patch.offset) + 1u < m_bindless_srt.size()) {
@@ -4728,6 +4747,10 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			}
 			for (const auto& [index, value]: m_gpu_word_patches) m_bindless_srt[index] = value; // KYTY_PERF_SRT_GPU_WORDS
 			upload_srt(m_bindless_srt);
+			if (gw_timed) {
+				t_long_prep_parts[45] += static_cast<uint64_t>(
+				    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - gw_start).count());
+			}
 		}
 	}
 	sub_timer.emplace(DispatchSub::DataUpload);
