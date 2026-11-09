@@ -138,7 +138,8 @@ private:
 	// Project 15 N2.2: the resolve helper (KYTY_PERF_RESOLVE_HELPERS=1 or KYTY_CHECK_RESOLVE=2) and the execution
 	// thread's claim of an operation's resolution before it executes (waits for a running one, steals a pending one).
 	void              ResolveHelperThread();
-	void              ClaimResolved(GpuOperation& operation);
+	// busy(context, true) before a wait for the helper, (context, false) after it: the caller's work scopes.
+	void              ClaimResolved(GpuOperation& operation, void (*busy)(void* context, bool waiting), void* busy_context);
 	// Execution thread: runs the queued commands, then lets the blocked queues try again.
 	void              RunCommands();
 	// Execution thread with no operation: waits for work; false when the GPU stops.
@@ -241,7 +242,7 @@ private:
 	std::atomic<uint64_t>                          m_tasks_finished {0};
 	struct HelperStats {
 		std::atomic<uint64_t> tasks {0}, done {0}, empty {0}, stolen {0}, skipped {0}, ready {0}, running {0}, pending {0};
-		std::atomic<uint64_t> waits {0}, wait_ns {0}, wait_max_ns {0}, wait_commands {0}, k_changes {0};
+		std::atomic<uint64_t> waits {0}, wait_ns {0}, wait_cmd_ns {0}, wait_max_ns {0}, wait_commands {0}, k_changes {0};
 		// KYTY_CHECK_RESOLVE=2: both empty, refused, reads differ, compared, bad; the fault test: injected, injected and
 		// compared, detected.
 		std::atomic<uint64_t> both_empty {0}, refused {0}, reads_differ {0}, compared {0}, bad {0};

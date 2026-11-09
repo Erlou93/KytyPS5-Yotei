@@ -968,7 +968,24 @@ void GuestGpu::ExecutionThread() {
 			                         m_operations.SizeApprox() + resolved, resolved, operation->emit_tsc);
 		}
 		if (operation->resolved != nullptr && m_resolve_helper.joinable()) {
-			ClaimResolved(*operation); // project 15 N2.2: a helper may be resolving it
+			// Project 15 N2.2: a helper may be resolving it; its wait is outside the work scopes.
+			struct Scopes {
+				std::optional<PerfScope>*                perf;
+				std::optional<Common::LiveAb::BusyScope>* live;
+			} scopes {&perf_process, &live_busy};
+			ClaimResolved(
+			    *operation,
+			    [](void* context, bool waiting) {
+				    auto* s = static_cast<Scopes*>(context);
+				    if (waiting) {
+					    s->live->reset();
+					    s->perf->reset();
+				    } else {
+					    s->perf->emplace(PerfKind::Process);
+					    s->live->emplace();
+				    }
+			    },
+			    &scopes);
 		}
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
@@ -1211,10 +1228,10 @@ void GuestGpu::ResolveThread() {
 				const auto get = [](const std::atomic<uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
 				std::fprintf(stderr,
 				             "PERF resolve_helper k=%u tasks=%llu done=%llu empty=%llu stolen=%llu skipped=%llu claim[ready|running|stolen]=%llu|%llu|%llu "
-				             "wait=%llu/%.1fms wait_max_us=%.1f wait_commands=%llu k_changes=%llu check[both_empty|refused|reads_differ|compared|bad]=%llu|%llu|%llu|%llu|%llu "
+				             "wait=%llu/%.1fms wait_cmd_ms=%.1f wait_max_us=%.1f wait_commands=%llu k_changes=%llu check[both_empty|refused|reads_differ|compared|bad]=%llu|%llu|%llu|%llu|%llu "
 				             "fault[injected|compared|detected]=%llu|%llu|%llu\n",
 				             k_now, get(hs.tasks), get(hs.done), get(hs.empty), get(hs.stolen), get(hs.skipped), get(hs.ready), get(hs.running),
-				             get(hs.pending), get(hs.waits), static_cast<double>(get(hs.wait_ns)) / 1e6,
+				             get(hs.pending), get(hs.waits), static_cast<double>(get(hs.wait_ns)) / 1e6, static_cast<double>(get(hs.wait_cmd_ns)) / 1e6,
 				             static_cast<double>(get(hs.wait_max_ns)) / 1e3, get(hs.wait_commands), get(hs.k_changes), get(hs.both_empty),
 				             get(hs.refused), get(hs.reads_differ), get(hs.compared), get(hs.bad), get(hs.injected), get(hs.injected_compared),
 				             get(hs.detected));
@@ -1261,33 +1278,43 @@ void GuestGpu::ResolveHelperThread() {
 // with KYTY_CHECK_RESOLVE=2 the helper's result is compared with the reference first; then the resolution is claimed - a
 // running one waited for (serving the other threads' commands meanwhile), a pending one stolen (the operation then
 // selects itself, as without a resolution).
-void GuestGpu::ClaimResolved(GpuOperation& operation) {
+void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context, bool waiting), void* busy_context) {
 	auto* const slot = operation.resolved;
 	auto&       hs   = m_helper_stats;
 	const auto  wait_for = [&](RenderExecutor::ResolvedDraw* r, bool steal) {
 		auto       claim     = RenderExecutor::TryClaimResolvedDraw(r, steal);
 		if (claim != RenderExecutor::ResolvedClaim::Running) return claim;
-		const auto start     = std::chrono::steady_clock::now();
-		bool       commands  = false;
+		hs.running.fetch_add(1, std::memory_order_relaxed);
+		busy(busy_context, true); // the wait is not work (as the idle wait of an empty queue)
+		const auto start       = std::chrono::steady_clock::now();
+		bool       commands    = false;
+		uint64_t   commands_ns = 0;
 		for (Common::SpinWait spin;;) {
 			claim = RenderExecutor::TryClaimResolvedDraw(r, steal);
 			if (claim != RenderExecutor::ResolvedClaim::Running) break;
 			if (m_pending_commands.load(std::memory_order_acquire) != 0) {
+				const auto c0 = std::chrono::steady_clock::now();
 				RunCommands();
+				commands_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - c0).count());
 				commands = true;
 				continue;
 			}
 			if (!spin.Spin()) std::this_thread::yield();
 		}
-		const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+		busy(busy_context, false);
+		const auto all = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+		const auto ns  = all > commands_ns ? all - commands_ns : 0u; // the wait for the helper alone
 		hs.waits.fetch_add(1, std::memory_order_relaxed);
 		hs.wait_ns.fetch_add(ns, std::memory_order_relaxed);
+		hs.wait_cmd_ns.fetch_add(commands_ns, std::memory_order_relaxed);
 		if (commands) hs.wait_commands.fetch_add(1, std::memory_order_relaxed);
 		for (uint64_t max = hs.wait_max_ns.load(std::memory_order_relaxed); ns > max && !hs.wait_max_ns.compare_exchange_weak(max, ns);) {
 		}
-		if (ns > 1000000u) std::fprintf(stderr, "RESOLVE_HELPER wait %.2f ms (sequence %llu)\n", static_cast<double>(ns) / 1e6,
-		                                static_cast<unsigned long long>(operation.sequence));
-		if (ChunkLead::On()) ChunkLead::NoteIdle(ns, 0, commands); // counted as the "resolve" idle cause
+		if (all > 1000000u) {
+			std::fprintf(stderr, "RESOLVE_HELPER wait %.2f ms commands %.2f ms (sequence %llu)\n", static_cast<double>(all) / 1e6,
+			             static_cast<double>(commands_ns) / 1e6, static_cast<unsigned long long>(operation.sequence));
+		}
+		if (ChunkLead::On()) ChunkLead::NoteIdle(all, 0, commands); // counted as the "resolve" idle cause (commands apart)
 		return claim;
 	};
 	if (auto* const helper = RenderExecutor::ResolvedCheckSlot(slot); helper != nullptr) {
