@@ -1111,6 +1111,8 @@ void NoteInvalidateProtectMerge(bool merged) {
 }
 } // namespace
 
+static void NoteRingRunStop(size_t reason); // KYTY_PERF_RING_RUN (after g_ring_dead)
+
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	KYTY_PROFILER_BLOCK("BufferCache::ReadMemory");
 	WaitDirectGpuWrites(vaddr, size); // KYTY_PERF_DIRECT_RANGES
@@ -1345,9 +1347,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				runs.clear();
 				if (run_pages != 0u) {
 					if (census.active) {
-						g_ring_dead.run_stop[0].fetch_add(1, std::memory_order_relaxed);
+						NoteRingRunStop(0);
 					} else if (!m_append_pools.empty()) {
-						g_ring_dead.run_stop[1].fetch_add(1, std::memory_order_relaxed);
+						NoteRingRunStop(1);
 					} else {
 						(void)ExtendDeadRingRun(vaddr, size, run_pages, runs);
 					}
@@ -1616,6 +1618,10 @@ RingDeadStats         g_ring_dead;
 std::atomic<uint64_t> g_ring_game_write_frame {0}; // game threads: the frame whose ring half the game writes now
 uint64_t              g_ring_exec_data_frame = 0;  // execution thread: the frame of the work being recorded
 } // namespace
+
+static void NoteRingRunStop(size_t reason) {
+	g_ring_dead.run_stop[reason].fetch_add(1, std::memory_order_relaxed);
+}
 
 void RingGameWriteFrame(uint64_t frame) {
 	g_ring_game_write_frame.store(frame, std::memory_order_release);
