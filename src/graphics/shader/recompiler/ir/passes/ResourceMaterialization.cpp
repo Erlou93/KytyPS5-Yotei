@@ -530,6 +530,39 @@ void GroupIndirectImageCandidates(const ImageResource& base, std::vector<Descrip
 }
 
 template <typename Specialization, typename Normalize>
+// KYTY_PERF_TABLE_MEMO (project 15, test switch, live A/B; =2: the check): a two-level descriptor table (a record's pointer,
+// the descriptor at pointer + offset; e.g. Proxy Set Cull: ~3 500 records, one hi-Z texture) is read once per
+// materialization: a record's pointer is remembered for the materialization (the image and the sampler of the same table
+// read the same records) and a descriptor under the same pointer as the previous record is the previous one. One
+// materialization reads one snapshot of these bytes already: a repeated read is only compared with the first (AheadRead);
+// a change by the game in between fails the first entry's check at the adoption, as today. =2 reads them anyway and counts
+// the memo's answers that differ (PERF table_memo).
+struct TableMemoEntry {
+	uint64_t                epoch = 0, base = 0, offset = 0;
+	std::array<uint32_t, 2> value {};
+};
+static thread_local std::array<TableMemoEntry, 8192> t_table_memo {};
+static thread_local uint64_t                         t_table_memo_epoch = 1;
+struct TableMemoStats {
+	std::atomic<uint64_t> pointer_hits {0}, descriptor_hits {0}, checked {0}, different {0}, reads {0};
+};
+static TableMemoStats g_table_memo_stats;
+static uint32_t       TableMemoMode() {
+	static const uint32_t fixed = [] {
+		const char* env = std::getenv("KYTY_PERF_TABLE_MEMO");
+		return env != nullptr ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : 0u;
+	}();
+	return Common::LiveAb::Gate(Common::LiveAb::Switch::TableMemo, fixed);
+}
+static void TableMemoReport() {
+	static const bool perf = std::getenv("KYTY_TRACE_PERF") != nullptr;
+	auto&             st   = g_table_memo_stats;
+	if (!perf || ((st.reads.fetch_add(1, std::memory_order_relaxed) + 1) & ((1u << 20u) - 1u)) != 0) return;
+	const auto get = [](const std::atomic<uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
+	std::fprintf(stderr, "PERF table_memo records=%llu pointer_hits=%llu descriptor_hits=%llu checked=%llu different=%llu\n", get(st.reads),
+	             get(st.pointer_hits), get(st.descriptor_hits), get(st.checked), get(st.different));
+}
+
 bool MaterializeIndirectDescriptor(const ResourcePlan&                         program,
                                    const DescriptorSource::IndirectDescriptor& indirect,
                                    uint32_t source_index, uint32_t resource_index, uint32_t dword_count,
@@ -880,6 +913,10 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	const auto key_room = slots ? std::bit_ceil(std::max<size_t>(key_count, 1u)) : key_count;
 	snapshot.flattened_srt.resize(mapping_offset + 1u + key_room * 2u, 0u);
 	snapshot.flattened_srt[mapping_offset] = static_cast<uint32_t>(key_count);
+	const uint32_t          memo_mode = indirect.pointer_offset != UINT32_MAX ? TableMemoMode() : 0u; // KYTY_PERF_TABLE_MEMO
+	uint64_t                last_base = 0;
+	bool                    last_valid = false;
+	std::array<uint32_t, 8> last_descriptor {};
 	for (uint32_t entry = 0; entry < key_count; ++entry) {
 		const auto key = sources.empty() ? keys[entry] : entry;
 		DescriptorValue candidate;
@@ -891,13 +928,54 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			if (indirect.pointer_offset != UINT32_MAX) {
 				// Two-level: the record's pointer, then the descriptor at pointer + pointer_offset.
 				std::array<uint32_t, 2> pointer {};
-				if (!ReadScalarTable(table_base, table_size, table_offset, runtime, pointer))
-					return IndirectFailAt(__LINE__);
+				if (memo_mode == 0u) {
+					if (!ReadScalarTable(table_base, table_size, table_offset, runtime, pointer))
+						return IndirectFailAt(__LINE__);
+				} else {
+					// KYTY_PERF_TABLE_MEMO: the record's pointer once per materialization.
+					auto&      st   = g_table_memo_stats;
+					auto&      slot = t_table_memo[((table_base >> 4u) ^ table_offset ^ (table_offset >> 13u)) & (t_table_memo.size() - 1u)];
+					const bool hit  = slot.epoch == t_table_memo_epoch && slot.base == table_base && slot.offset == table_offset;
+					TableMemoReport();
+					if (hit) {
+						pointer = slot.value;
+						st.pointer_hits.fetch_add(1, std::memory_order_relaxed);
+					}
+					if (!hit || memo_mode == 2u) {
+						std::array<uint32_t, 2> read {};
+						if (!ReadScalarTable(table_base, table_size, table_offset, runtime, read)) return IndirectFailAt(__LINE__);
+						if (hit) {
+							st.checked.fetch_add(1, std::memory_order_relaxed);
+							if (read != pointer) st.different.fetch_add(1, std::memory_order_relaxed);
+						}
+						pointer = read;
+						slot    = {t_table_memo_epoch, table_base, table_offset, read};
+					}
+				}
 				const auto base = (static_cast<uint64_t>(pointer[1] & 0xffffu) << 32u) | pointer[0];
-				if (base == 0u || !ReadScalarTable(base, UINT64_MAX, indirect.pointer_offset, runtime,
-				                                   std::span(candidate.dwords).first(dword_count))) {
+				const auto out  = std::span(candidate.dwords).first(dword_count);
+				if (memo_mode != 0u && base != 0u && last_valid && base == last_base) {
+					// KYTY_PERF_TABLE_MEMO: the descriptor under the same pointer as the previous record's.
+					auto& st = g_table_memo_stats;
+					st.descriptor_hits.fetch_add(1, std::memory_order_relaxed);
+					std::copy_n(last_descriptor.begin(), dword_count, out.begin());
+					if (memo_mode == 2u) {
+						std::array<uint32_t, 8> read {};
+						if (!ReadScalarTable(base, UINT64_MAX, indirect.pointer_offset, runtime, std::span(read).first(dword_count))) {
+							std::fill_n(read.begin(), dword_count, 0u);
+						}
+						st.checked.fetch_add(1, std::memory_order_relaxed);
+						if (!std::equal(read.begin(), read.begin() + dword_count, out.begin())) st.different.fetch_add(1, std::memory_order_relaxed);
+						std::copy_n(read.begin(), dword_count, out.begin());
+					}
+				} else if (base == 0u || !ReadScalarTable(base, UINT64_MAX, indirect.pointer_offset, runtime, out)) {
 					// A record without a table: the null descriptor (never selected in practice).
 					std::fill_n(candidate.dwords.begin(), dword_count, 0u);
+				}
+				if (memo_mode != 0u && base != 0u) {
+					last_base  = base;
+					last_valid = true;
+					std::copy_n(out.begin(), dword_count, last_descriptor.begin());
 				}
 			} else if (!ReadScalarTable(table_base, table_size, table_offset, runtime,
 			                            std::span(candidate.dwords).first(dword_count))) {
@@ -2431,6 +2509,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		return MaterializeFailAt(__LINE__);
 	}
 	MatBegin(); // KYTY_TRACE_CHUNK_LEAD (N2.0b)
+	t_table_memo_epoch++; // KYTY_PERF_TABLE_MEMO: a table's records are remembered for one materialization
 	if (RecordsNullShare()) program.ThreadScratch().null_share_kinds.assign(program.info.buffers.size(), 0u);
 	const bool capture_reads = program.capture_specialization_reads || !program.source_reads.empty();
 	auto& reads = snapshot.specialization_reads;

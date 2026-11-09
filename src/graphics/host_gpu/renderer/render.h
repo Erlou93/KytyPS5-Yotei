@@ -335,6 +335,8 @@ public:
 	// carries (0: none).
 	static void                        ResolveCheckFault(ResolvedDraw& slot, uint32_t fault);
 	[[nodiscard]] static uint32_t      ResolvedFault(const ResolvedDraw* slot) noexcept;
+	// The size of a slot's read log (diagnostics).
+	static void                        ResolvedLogSize(const ResolvedDraw* slot, size_t* entries, size_t* bytes);
 	// KYTY_CHECK_RESOLVE=2, once at start: the resolutions keep what the comparison needs.
 	static void                        SetResolveCheckMode(bool on);
 	[[nodiscard]] bool ResolveDrawInto(ResolvedDraw& draw, const HW::Context& context, const HW::UserConfig& user_config,

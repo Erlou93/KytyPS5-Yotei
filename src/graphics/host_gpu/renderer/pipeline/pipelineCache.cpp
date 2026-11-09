@@ -189,6 +189,11 @@ int ResolvedStagesCompare(const ResolvedStages& a, const ResolvedStages& b, cons
 	return 3;
 }
 
+void ResolvedStagesLogSize(const ResolvedStages& stages, size_t* entries, size_t* bytes) {
+	*entries = stages.log.entries.size();
+	*bytes   = stages.log.bytes.size();
+}
+
 void ResolvedStagesFault(ResolvedStages& stages, uint32_t fault) {
 	if (stages.count == 0) return;
 	auto& r = stages.stages[0];
