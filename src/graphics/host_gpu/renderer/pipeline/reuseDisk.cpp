@@ -30,7 +30,7 @@ int ShaderReuseDiskMode() {
 namespace {
 
 constexpr uint32_t FileMagic    = 0x5552594bu; // "KYRU"
-constexpr uint32_t FileVersion  = 3u;
+constexpr uint32_t FileVersion  = 4u; // 4: ShaderInfo::srt_gpu_words, srt_flat_words
 constexpr uint32_t FrameMagic   = 0x45525546u; // "FURE"
 constexpr uint32_t MaxWords     = 64u << 20u;  // 256 MiB per frame: a damaged size field
 constexpr uint32_t HeadBytes    = 40u;         // {magic, key (2), bytes, program (2), flags, words, hash (2)}
@@ -389,6 +389,14 @@ void PutShaderInfo(Out& o, const IR::ShaderInfo& s) {
 	o.U32(static_cast<uint32_t>(s.instance_offset_sgpr));
 	auto flags = s; // ForEachFlag takes a mutable ShaderInfo
 	ForEachFlag(flags, [&](bool& flag) { o.Bool(flag); });
+	// KYTY_PERF_SRT_GPU_WORDS: the words the shader reads from GPU memory (their flat slots) and the flat word count.
+	o.U32(static_cast<uint32_t>(s.srt_gpu_words.size()));
+	for (const auto& word: s.srt_gpu_words) {
+		o.U32(word.slot);
+		o.U32(word.hi);
+		o.U32(word.verify);
+	}
+	o.U32(s.srt_flat_words);
 }
 
 void GetShaderInfo(In& i, IR::ShaderInfo& s) {
@@ -404,6 +412,13 @@ void GetShaderInfo(In& i, IR::ShaderInfo& s) {
 	s.vertex_offset_sgpr   = static_cast<int32_t>(i.U32());
 	s.instance_offset_sgpr = static_cast<int32_t>(i.U32());
 	ForEachFlag(s, [&](bool& flag) { flag = i.Bool(); });
+	s.srt_gpu_words.resize(i.U32());
+	for (auto& word: s.srt_gpu_words) {
+		word.slot   = i.U32();
+		word.hi     = i.U32();
+		word.verify = i.U32();
+	}
+	s.srt_flat_words = i.U32();
 }
 
 } // namespace
