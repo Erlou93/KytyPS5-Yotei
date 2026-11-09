@@ -1995,7 +1995,9 @@ std::array<uint64_t, ChunkFieldCount> RenderExecutor::ChunkFingerprint(const Dra
 	f[0] = FpMix(0, reinterpret_cast<uint64_t>(plan.pipeline));
 	for (uint32_t k = 0; k < plan.stage_count; k++) {
 		const auto& st = *plan.descriptor_stages[k];
-		for (const auto& b: st.buffers) f[1] = buffer_info(f[1], b.buffer, b.offset, b.range);
+		// The storage buffers by their guest source (a stream copy and the cached buffer of the same bytes are the same
+		// binding: which one a preparation takes depends on what earlier preparations uploaded).
+		for (const auto& src: st.buffer_sources) f[1] = FpMix(FpMix(f[1], src.address), src.size);
 		f[1] = buffer_info(f[1], st.gds.buffer, st.gds.offset, st.gds.range);
 		f[1] = buffer_info(f[1], st.shared_memory.buffer, st.shared_memory.offset, st.shared_memory.range);
 		for (const auto& image: st.images) {
@@ -2012,14 +2014,21 @@ std::array<uint64_t, ChunkFieldCount> RenderExecutor::ChunkFingerprint(const Dra
 		for (const auto& patch: st.bindless_patches) f[3] = FpMix(FpMix(FpMix(f[3], patch.offset), patch.region), patch.entries);
 		f[3] = FpMix(f[3], st.gpu_words_key);
 		f[4] = FpMix(f[4], FpBytes(reinterpret_cast<const uint8_t*>(st.shader_data.data()), st.shader_data.size() * sizeof(uint32_t)));
-		for (const auto id: st.bindless_images) f[5] = FpMix(f[5], (uint64_t {id.generation} << 32u) | id.index);
+		// The tables the stage reads (their regions are in the SRT field); not the draw's image list for layouts, which
+		// a table already listed in this draw leaves out.
+		f[5] = FpMix(f[5], st.bindless_patches.size());
 	}
-	const auto& vb = plan.vertex_bindings;
-	f[6] = FpMix(f[6], vb.count);
-	for (uint32_t i = 0; i < vb.count; i++) f[6] = buffer_info(f[6], vb.buffers[i], vb.offsets[i], vb.sizes[i]);
-	const auto& ib = plan.index_binding;
-	const uint64_t index_bytes = uint64_t {plan.draw.index_count} * (ib.type == vk::IndexType::eUint32 ? 4u : 2u);
-	f[6] = FpMix(buffer_info(f[6], ib.buffer, ib.offset, ib.buffer ? index_bytes : 0u), static_cast<uint64_t>(ib.type));
+	// The vertex and index buffers by their guest ranges (as the storage buffers).
+	if (!plan.mesh_active) {
+		const auto& vin = plan.state->vertex_info[0];
+		f[6] = FpMix(f[6], static_cast<uint64_t>(vin.buffers_num));
+		for (int i = 0; i < vin.buffers_num; i++) {
+			f[6] = FpMix(FpMix(f[6], vin.buffers[i].addr), VertexBufferDescriptorSize(i, vin));
+		}
+		f[6] = FpMix(f[6], plan.vertex_bindings.count);
+	}
+	f[6] = FpMix(FpMix(FpMix(f[6], plan.index_source.address), plan.index_source.guest_element_size),
+	             static_cast<uint64_t>(plan.index_binding.type));
 	if (plan.indirect_args.first != nullptr) {
 		f[7] = buffer_info(f[7], plan.indirect_args.first->Handle(), plan.indirect_args.second, 0u);
 	}
