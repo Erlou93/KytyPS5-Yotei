@@ -72,7 +72,8 @@ public:
 	[[nodiscard]] uint64_t TakeSequence() noexcept { return ++m_emitted; }
 	[[nodiscard]] uint64_t NextSequence() const noexcept { return m_emitted + 1; }
 	// The operation `sequence` and everything before it executed when this returns: their snapshots are free.
-	void WaitForSnapshot(uint64_t sequence);
+	// True when it waited.
+	bool WaitForSnapshot(uint64_t sequence);
 
 	// The journal of writes that are not in guest memory yet, for the reads the stream decides on. Oldest first; the
 	// thread that makes the operations owns it. Based on TheCruZ/KytyPS5-GTA 12ec19890 (graphicsRun.h, graphicsRun.cpp),

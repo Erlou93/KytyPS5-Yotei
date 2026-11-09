@@ -98,6 +98,8 @@ struct GpuOperation {
 	RenderExecutor::ResolvedDraw* resolved = nullptr;
 	// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): the game marker pass it was emitted in.
 	uint16_t pass_id = 0;
+	// KYTY_TRACE_CHUNK_LEAD (project 15 N1): the tsc when the command processor emitted it (0 otherwise).
+	uint64_t emit_tsc = 0;
 	union {
 		DrawIndexArgs       draw_index;
 		DrawAutoArgs        draw_auto;

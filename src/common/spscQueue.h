@@ -247,6 +247,13 @@ public:
 
 	[[nodiscard]] size_t Capacity() const noexcept { return m_capacity; }
 
+	// Any thread: about how many elements are in the ring (the two indices are read at different times).
+	[[nodiscard]] size_t SizeApprox() const noexcept {
+		const auto tail = m_tail.load(std::memory_order_relaxed);
+		const auto head = m_head.load(std::memory_order_relaxed);
+		return tail >= head ? static_cast<size_t>(tail - head) : 0;
+	}
+
 	// Consumer: nothing to pop now (for a consumer that waits for more than this ring).
 	[[nodiscard]] bool Empty() const noexcept {
 		return m_tail.load(std::memory_order_seq_cst) == m_head.load(std::memory_order_relaxed);

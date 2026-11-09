@@ -1,6 +1,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/stallWatch.h"
 #include "graphics/guest_gpu/chunkCensus.h"
+#include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/guest_gpu/drawStateObserver.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cleanDraws.h"
@@ -773,14 +774,18 @@ CommandProcessor& GuestGpu::GetProcessor(uint32_t queue_id) {
 	return *processor;
 }
 
-void GuestGpu::WaitForSnapshot(uint64_t sequence) {
+bool GuestGpu::WaitForSnapshot(uint64_t sequence) {
 	if (sequence <= m_executed.Load()) {
-		return;
+		return false;
 	}
 	if (g_gpu_stage_stats) g_stage_stats.snapshot_waits.fetch_add(1, std::memory_order_relaxed);
 	const auto start = g_gpu_stage_stats ? StageNowNs() : 0;
+	const bool lead  = ChunkLead::On(); // KYTY_TRACE_CHUNK_LEAD: the command processor's state
+	if (lead) ChunkLead::g_cp_state.store(ChunkLead::CpSnapshot, std::memory_order_relaxed);
 	m_executed.WaitFor(sequence);
+	if (lead) ChunkLead::g_cp_state.store(ChunkLead::CpWorking, std::memory_order_relaxed);
 	if (g_gpu_stage_stats) g_stage_stats.slot_waits_ns.fetch_add(StageNowNs() - start, std::memory_order_relaxed);
+	return true;
 }
 
 // Based on TheCruZ/KytyPS5-GTA 12ec19890 (graphicsRun.cpp), GPL-2.0.
@@ -788,7 +793,10 @@ void GuestGpu::EmitOperation(GpuOperation&& operation) {
 	if (g_gpu_stage_stats) {
 		if (!m_operations.TryPush(operation)) {
 			const auto start = StageNowNs();
+			const bool lead  = ChunkLead::On(); // KYTY_TRACE_CHUNK_LEAD
+			if (lead) ChunkLead::g_cp_state.store(ChunkLead::CpRingFull, std::memory_order_relaxed);
 			m_operations.Push(std::move(operation));
+			if (lead) ChunkLead::g_cp_state.store(ChunkLead::CpWorking, std::memory_order_relaxed);
 			g_stage_stats.ring_full.fetch_add(1, std::memory_order_relaxed);
 			g_stage_stats.ring_full_ns.fetch_add(StageNowNs() - start, std::memory_order_relaxed);
 		}
@@ -816,7 +824,10 @@ void GuestGpu::WaitForExecution(GpuDrain reason) {
 		return;
 	}
 	const auto start = StageNowNs();
+	const bool lead  = ChunkLead::On() && reason != GpuDrain::Idle; // KYTY_TRACE_CHUNK_LEAD (idle: the no-work state)
+	if (lead) ChunkLead::g_cp_state.store(ChunkLead::CpDrain, std::memory_order_relaxed);
 	m_executed.WaitFor(m_emitted);
+	if (lead) ChunkLead::g_cp_state.store(ChunkLead::CpWorking, std::memory_order_relaxed);
 	const auto index = static_cast<size_t>(reason);
 	g_stage_stats.drains[index].fetch_add(1, std::memory_order_relaxed);
 	g_stage_stats.drain_ns[index].fetch_add(StageNowNs() - start, std::memory_order_relaxed);
@@ -900,12 +911,28 @@ void GuestGpu::ExecutionThread() {
 			perf_process.reset();
 			in_batch = 0;
 			const auto idle_start = g_gpu_stage_stats ? StageNowNs() : 0;
+			// KYTY_TRACE_CHUNK_LEAD: why the execution thread has nothing (sampled when the wait begins).
+			int        idle_cause = 0;
+			uint64_t   commands0  = 0;
+			if (ChunkLead::On()) {
+				const auto cp = ChunkLead::g_cp_state.load(std::memory_order_relaxed);
+				idle_cause    = ChunkLead::g_resolving.load(std::memory_order_relaxed) || m_operations.SizeApprox() != 0 ? 0
+				                : cp == ChunkLead::CpDrain                                                                ? 1
+				                : cp == ChunkLead::CpBlocked                                                              ? 3
+				                : cp == ChunkLead::CpNoWork                                                               ? 4
+				                                                                                                          : 2;
+				commands0     = g_stage_stats.commands.load(std::memory_order_relaxed);
+			}
 			if (!WaitForOperations()) {
 				break;
 			}
 			if (g_gpu_stage_stats) {
+				const auto idle_ns = StageNowNs() - idle_start;
 				g_stage_stats.execution_idle.fetch_add(1, std::memory_order_relaxed);
-				g_stage_stats.execution_idle_ns.fetch_add(StageNowNs() - idle_start, std::memory_order_relaxed);
+				g_stage_stats.execution_idle_ns.fetch_add(idle_ns, std::memory_order_relaxed);
+				if (ChunkLead::On()) {
+					ChunkLead::NoteIdle(idle_ns, idle_cause, g_stage_stats.commands.load(std::memory_order_relaxed) != commands0);
+				}
 			}
 			continue;
 		}
@@ -921,6 +948,16 @@ void GuestGpu::ExecutionThread() {
 			                  : (kind == GpuOperationKind::DrawIndirect || kind == GpuOperationKind::DispatchIndirect) ? 3
 			                                                                                            : 0;
 			ChunkCensus::t_member = ChunkCensus::IsMember(operation->processor == m_gfx_cp.get(), operation->pass_id, k);
+		}
+		if (ChunkLead::On()) {
+			// KYTY_TRACE_CHUNK_LEAD (project 15 N1): the lead of the chunks (members as in the oracle).
+			const auto kind   = operation->kind;
+			const bool member = operation->processor == m_gfx_cp.get() &&
+			                    (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto ||
+			                     kind == GpuOperationKind::DispatchDirect);
+			const auto resolved = m_resolved.SizeApprox();
+			ChunkLead::NoteOperation(member ? ChunkLead::TargetPass(operation->pass_id) : -1, operation->sequence,
+			                         m_operations.SizeApprox() + resolved, resolved, operation->emit_tsc);
 		}
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
@@ -1017,6 +1054,9 @@ void GuestGpu::ResolveThread() {
 		}
 		// The register snapshots stay valid until the operation executed.
 		const auto& state = operation->state;
+		const bool  lead  = ChunkLead::On(); // KYTY_TRACE_CHUNK_LEAD: the resolve thread's work
+		if (lead) ChunkLead::g_resolving.store(true, std::memory_order_relaxed);
+		const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
 		switch (operation->kind) {
 			case GpuOperationKind::DrawIndex:
 			case GpuOperationKind::DrawAuto:
@@ -1039,6 +1079,12 @@ void GuestGpu::ResolveThread() {
 			}
 			default: break;
 		}
+		if (lead) {
+			const auto kind     = operation->kind;
+			const bool dispatch = kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect;
+			const bool draw     = kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto || kind == GpuOperationKind::DrawIndirect;
+			if (draw || dispatch) ChunkLead::NoteResolve(operation->pass_id, dispatch, ChunkLead::Tsc() - lead_t0, operation->resolved != nullptr);
+		}
 		if (g_gpu_stage_stats) {
 			if (!m_resolved.TryPush(*operation)) {
 				const auto start = StageNowNs();
@@ -1049,6 +1095,7 @@ void GuestGpu::ResolveThread() {
 		} else {
 			m_resolved.Push(std::move(*operation));
 		}
+		if (lead) ChunkLead::g_resolving.store(false, std::memory_order_relaxed);
 		RingExecution();
 	}
 }
@@ -1364,7 +1411,20 @@ T* CommandProcessor::Snapshot(SnapshotRing<T>& ring, const T& live, bool& dirty,
 			ring.last_use = std::make_unique<uint64_t[]>(SnapshotRing<T>::Size);
 		}
 		auto& slot = ring.slots[ring.next];
-		if (auto* const stream = StreamGpu(); stream != nullptr) stream->WaitForSnapshot(ring.last_use[ring.next]);
+		if (ChunkLead::On()) {
+			// KYTY_TRACE_CHUNK_LEAD: the snapshot slots taken and waited for, per register kind and queue.
+			constexpr int kind = std::is_same_v<T, HW::Context> ? 0 : std::is_same_v<T, HW::UserConfig> ? 1 : 2;
+			const bool    compute = IsAsyncComputeQueue();
+			ChunkLead::NoteSnapshotTaken(compute, kind);
+			const auto t0 = std::chrono::steady_clock::now();
+			if (auto* const stream = StreamGpu(); stream != nullptr && stream->WaitForSnapshot(ring.last_use[ring.next])) {
+				ChunkLead::NoteSnapshotWait(compute, kind, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				                                               std::chrono::steady_clock::now() - t0)
+				                                               .count()));
+			}
+		} else if (auto* const stream = StreamGpu(); stream != nullptr) {
+			stream->WaitForSnapshot(ring.last_use[ring.next]);
+		}
 		std::memcpy(static_cast<void*>(&slot.value), &live, sizeof(T));
 		if (g_gpu_stage_stats) g_stage_stats.copied_bytes.fetch_add(sizeof(T), std::memory_order_relaxed);
 		ring.current = ring.next;
@@ -1384,6 +1444,7 @@ GpuRegisterState CommandProcessor::SnapshotState(uint64_t sequence) {
 uint64_t CommandProcessor::Emit(GpuOperation&& operation) {
 	const auto sequence = operation.sequence;
 	if (g_cp_thread) {
+		if (ChunkLead::On()) operation.emit_tsc = ChunkLead::Tsc(); // KYTY_TRACE_CHUNK_LEAD
 		g_stream_gpu->EmitOperation(std::move(operation));
 	} else {
 		Execute(operation);
@@ -1957,6 +2018,7 @@ void GuestGpu::ThreadRun(void* data) {
 			no_work = gpu->m_submission_count == 0 && !gpu->m_stopping;
 		}
 		if (no_work) {
+			if (ChunkLead::On()) ChunkLead::g_cp_state.store(ChunkLead::CpNoWork, std::memory_order_relaxed); // KYTY_TRACE_CHUNK_LEAD
 			gpu->WaitForExecution(GpuDrain::Idle);
 			uint64_t epoch = 0;
 			{
@@ -2008,6 +2070,7 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
+					if (ChunkLead::On()) ChunkLead::g_cp_state.store(ChunkLead::CpBlocked, std::memory_order_relaxed); // KYTY_TRACE_CHUNK_LEAD
 					const auto blocked_start = std::chrono::steady_clock::now();
 					// A wake that came before this wait must not be lost (GuestGpu::Wake; only KYTY_UPSTREAM_FLIP_SUSPEND
 					// wakes the thread this way, so by default the flag is never set).
@@ -2034,6 +2097,7 @@ void GuestGpu::ThreadRun(void* data) {
 				auto& queue = gpu->m_queues[static_cast<uint32_t>(selected_queue)];
 				submission  = std::move(queue.front());
 				queue.pop_front();
+				if (ChunkLead::On()) ChunkLead::g_cp_state.store(ChunkLead::CpWorking, std::memory_order_relaxed); // KYTY_TRACE_CHUNK_LEAD
 				gpu->m_submission_count--;
 				gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
 				gpu->m_processing = true;
