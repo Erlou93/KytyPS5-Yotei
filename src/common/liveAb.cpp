@@ -48,6 +48,9 @@ constexpr SwitchInfo Switches[] = {
     // backing as they are instead of downloading them (no flush, no wait); the bytes stay GPU-dirty, so the next read
     // in the other phase downloads them as before (kernel/memory.cpp TryReadBufferBacking).
     {Switch::DiagCeilingSrtNoWait, "KYTY_DIAG_CEILING_SRT_NO_WAIT", 1},
+    // Measurement only (APPROXIMATION, walk ceiling 9.11): whether a WaitRegMem on a direct-range word drains the
+    // execution queue and the GPU before its test; per wait, nothing outlives it (a failed test suspends and re-reads).
+    {Switch::DiagCeilingNoDirectDrain, "KYTY_DIAG_CEILING_NO_DIRECT_DRAIN", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

@@ -1544,6 +1544,54 @@ void CommandProcessor::MemSemaphore(uint64_t* counter, bool signal, bool write) 
 	}
 }
 
+// KYTY_TRACE_REGMEM_DRAINS=1 (diagnostic, walk 9.11): the WaitRegMem drains for words in a direct range: per word, how
+// often the test passed with the value read before the drain and after it, and how often the drain changed the value;
+// about every 5 s one PERF regmem_drains line (CP thread only).
+namespace {
+struct RegMemDrainStats {
+	struct Word {
+		uint64_t n = 0, changed = 0, pre_pass = 0, post_pass = 0, ns = 0;
+	};
+	std::unordered_map<uint64_t, Word>    words;
+	Word                                  all;
+	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+bool RegMemDrainsTraced() {
+	static const bool on = std::getenv("KYTY_TRACE_REGMEM_DRAINS") != nullptr;
+	return on;
+}
+void RegMemDrainNote(uint64_t addr, bool changed, bool pre_pass, bool post_pass, uint64_t ns) {
+	static std::mutex       mutex;
+	static RegMemDrainStats s;
+	std::scoped_lock        lock(mutex);
+	for (auto* w: {&s.words[addr], &s.all}) {
+		w->n++;
+		w->changed += changed ? 1u : 0u;
+		w->pre_pass += pre_pass ? 1u : 0u;
+		w->post_pass += post_pass ? 1u : 0u;
+		w->ns += ns;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5)) return;
+	s.window = now;
+	std::fprintf(stderr, "PERF regmem_drains n=%llu changed=%llu pre_pass=%llu post_pass=%llu ms=%.1f words=%zu\n",
+	             static_cast<unsigned long long>(s.all.n), static_cast<unsigned long long>(s.all.changed),
+	             static_cast<unsigned long long>(s.all.pre_pass), static_cast<unsigned long long>(s.all.post_pass),
+	             static_cast<double>(s.all.ns) / 1e6, s.words.size());
+	std::vector<std::pair<uint64_t, RegMemDrainStats::Word>> top(s.words.begin(), s.words.end());
+	std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+	for (size_t i = 0; i < top.size() && i < 8u; i++) {
+		const auto& w = top[i].second;
+		std::fprintf(stderr, "PERF regmem_drain addr=0x%llx n=%llu changed=%llu pre_pass=%llu post_pass=%llu ms=%.1f\n",
+		             static_cast<unsigned long long>(top[i].first), static_cast<unsigned long long>(w.n),
+		             static_cast<unsigned long long>(w.changed), static_cast<unsigned long long>(w.pre_pass),
+		             static_cast<unsigned long long>(w.post_pass), static_cast<double>(w.ns) / 1e6);
+	}
+	s.words.clear();
+	s.all = {};
+}
+} // namespace
+
 template <typename T>
 void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t poll,
                                   uint32_t wait_op) {
@@ -1565,11 +1613,28 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 		}
 	};
 	read();
-	if (!covered && m_renderer.GetBufferCache().InDirectRange(reinterpret_cast<uint64_t>(addr), sizeof(T))) {
+	// KYTY_DIAG_CEILING_NO_DIRECT_DRAIN (ceiling test only, APPROXIMATION, live A/B): the word is tested as read, without
+	// the drain; a failed test suspends the stream as always and reads the word again when it resumes.
+	static const uint32_t no_drain_fixed = [] {
+		const char* v = std::getenv("KYTY_DIAG_CEILING_NO_DIRECT_DRAIN");
+		return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
+	}();
+	if (!covered && m_renderer.GetBufferCache().InDirectRange(reinterpret_cast<uint64_t>(addr), sizeof(T)) &&
+	    Common::LiveAb::Gate(Common::LiveAb::Switch::DiagCeilingNoDirectDrain, no_drain_fixed) == 0u) {
+		const T    pre   = value;
+		const bool trace = RegMemDrainsTraced();
+		const auto start = trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		RunOnExecution(GpuDrain::DirectWrites, [this, addr] {
 			m_renderer.GetBufferCache().WaitDirectGpuWrites(reinterpret_cast<uint64_t>(addr), sizeof(T));
 		});
 		read();
+		if (trace) {
+			RegMemDrainNote(reinterpret_cast<uint64_t>(addr), pre != value, TestWaitRegMemValue(pre, ref, mask, func),
+			                TestWaitRegMemValue(value, ref, mask, func),
+			                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                                          std::chrono::steady_clock::now() - start)
+			                                          .count()));
+		}
 	}
 	const bool passed = TestWaitRegMemValue(value, ref, mask, func);
 	if (SyncTimeline::Enabled()) {
