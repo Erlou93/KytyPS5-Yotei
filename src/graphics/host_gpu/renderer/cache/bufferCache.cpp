@@ -1793,10 +1793,10 @@ uint32_t BufferCache::DirectMode() {
 				m_direct_ranges.push_back({0x2010000000ull, 0x2015E00000ull});
 				// Pages the game and the GPU share (project "the GPU reads resources itself", part 2, walk 9.11): the GPU
 				// writes small counters there and a game thread writes next to them every frame, so a tracked page made
-				// the game wait for the GPU (0x5000000090: 257 of 400 long waits; 0x5000001c00, 0x5039c501b0). As on the
-				// console, both write the same memory. (Ranges must be CACHING_PAGESIZE-aligned.)
+				// the game wait for the GPU (0x5000000090: 257 of 400 long waits; 0x5000001c00). As on the console, both write
+				// the same memory. Ranges must be CACHING_PAGESIZE-aligned. (0x5039c50000 grew to ~29 MB with the bindings
+				// over it - host memory for the GPU - and stays tracked.)
 				m_direct_ranges.push_back({0x5000000000ull, 0x5000004000ull}); // CACHING_PAGESIZE-aligned, as parsed ranges
-				m_direct_ranges.push_back({0x5039c50000ull, 0x5039c54000ull});
 			} else {
 				const char* p = value;
 				while (*p != '\0') {
