@@ -309,6 +309,39 @@ public:
 	// (any resolving thread, one slot at a time) and return false when there is nothing to resolve (the caller releases
 	// the slot then).
 	[[nodiscard]] ResolvedDraw& TakeResolvedSlot();
+	// Project 15 N2.2: a draw's or dispatch's resolution handed to the resolve helper: its slot, register snapshots (valid
+	// until the operation executed) and arguments. `fault`: KYTY_CHECK_RESOLVE_FAULT's error number (0: none).
+	struct ResolveTask {
+		ResolvedDraw*          slot        = nullptr;
+		const HW::Context*     context     = nullptr;
+		const HW::UserConfig*  user_config = nullptr;
+		const HW::Shader*      shaders     = nullptr;
+		ShaderIndirectDrawInfo indirect_draw {};
+		uint32_t               groups_x = 0, groups_y = 0, groups_z = 0, mode = 0;
+		bool                   dispatch = false, indirect = false, async_compute = false;
+		uint16_t               pass_id = 0;
+		uint32_t               fault   = 0;
+	};
+	// The helper (or, with KYTY_CHECK_RESOLVE=2, the resolve thread for the reference): resolves the task into `slot`
+	// (the draw's pre-check included) and marks it ready (empty when there was nothing to resolve).
+	bool ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task);
+	// The helper, taking a task: pending -> running; false when the execution thread stole it (the slot is freed then).
+	[[nodiscard]] static bool BeginResolveTask(ResolvedDraw* slot) noexcept;
+	// The execution thread: one look at a slot. Ready / Empty: resolved; Stolen: it was pending and is now the execution
+	// thread's to do itself (the helper frees the slot); Running: a helper resolves it now (or, with steal false, pending).
+	enum class ResolvedClaim : uint8_t { Ready, Empty, Stolen, Running };
+	[[nodiscard]] static ResolvedClaim TryClaimResolvedDraw(ResolvedDraw* resolved, bool steal) noexcept;
+	// KYTY_CHECK_RESOLVE=2: the helper's slot of the operation whose reference `resolved` is, and the comparison of the
+	// two (0 both empty, 1 refused, 2 reads differ, 3 compared and equal, 4 compared and different: `field` names it).
+	[[nodiscard]] static ResolvedDraw* ResolvedCheckSlot(ResolvedDraw* resolved) noexcept;
+	static void                        SetResolvedCheckSlot(ResolvedDraw* resolved, ResolvedDraw* check) noexcept;
+	[[nodiscard]] static int           CompareResolved(const ResolvedDraw& reference, const ResolvedDraw& helper, const char** field);
+	// KYTY_CHECK_RESOLVE_FAULT=N: error number `fault` (1...) put into a helper's result (never used); the error a result
+	// carries (0: none).
+	static void                        ResolveCheckFault(ResolvedDraw& slot, uint32_t fault);
+	[[nodiscard]] static uint32_t      ResolvedFault(const ResolvedDraw* slot) noexcept;
+	// KYTY_CHECK_RESOLVE=2, once at start: the resolutions keep what the comparison needs.
+	static void                        SetResolveCheckMode(bool on);
 	[[nodiscard]] bool ResolveDrawInto(ResolvedDraw& draw, const HW::Context& context, const HW::UserConfig& user_config,
 	                                   const HW::Shader& shaders, const ShaderIndirectDrawInfo& indirect_draw);
 	[[nodiscard]] bool ResolveDispatchInto(ResolvedDraw& draw, const HW::Shader& shaders, uint32_t groups_x, uint32_t groups_y,

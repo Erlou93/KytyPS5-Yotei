@@ -3292,8 +3292,18 @@ struct RenderExecutor::ResolvedDraw {
 	const HW::Shader*      shaders    = nullptr; // the draw's register snapshot
 	bool                   is_compute = false;
 	bool                   consumed   = false; // an indirect packet's CPU expansion: only its first draw asks
-	std::atomic_bool       busy {false};
+	// Project 15 N2.2: the slot's phase (ResolvedPhase): free; pending (taken, its task not begun); running (a helper
+	// resolves it); ready (resolved, `empty`: nothing to resolve); stolen (the execution thread took its operation before
+	// the helper began; the helper frees it when it takes the task).
+	std::atomic<uint8_t>   phase {0};
+	bool                   empty = false;
+	ResolvedDraw*          check = nullptr; // KYTY_CHECK_RESOLVE=2: the helper's slot of the same operation
+	uint32_t               fault = 0;       // KYTY_CHECK_RESOLVE_FAULT: the error put into this (helper's) result
 };
+
+namespace {
+enum ResolvedPhase : uint8_t { PhaseFree = 0, PhasePending = 1, PhaseRunning = 2, PhaseReady = 3, PhaseStolen = 4 };
+} // namespace
 
 // More resolutions than operations can wait between the resolve and execution threads (GuestGpu::ResolvedQueueSize), so
 // the resolve thread only ever waits for room in that queue.
@@ -3310,12 +3320,15 @@ RenderExecutor::ResolvedDraw& RenderExecutor::NextResolvedDraw() {
 	}
 	auto& ring = *m_resolved_ring;
 	auto& draw = ring.draws[ring.next];
-	// The execution thread releases resolutions in order.
-	for (Common::SpinWait wait; draw.busy.load(std::memory_order_acquire);) {
+	// The execution thread releases resolutions in order (a stolen slot: the helper, when it takes its task).
+	for (Common::SpinWait wait; draw.phase.load(std::memory_order_acquire) != PhaseFree;) {
 		if (!wait.Spin()) std::this_thread::yield();
 	}
 	ring.next     = (ring.next + 1) % ResolvedDrawRing::Size;
 	draw.consumed = false;
+	draw.empty    = false;
+	draw.check    = nullptr;
+	draw.fault    = 0;
 	return draw;
 }
 
@@ -3329,15 +3342,16 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDrawAhead(const HW::Context
 	auto& draw = TakeResolvedSlot();
 	slot_timer.reset();
 	if (!ResolveDrawInto(draw, context, user_config, shaders, indirect_draw)) {
-		draw.busy.store(false, std::memory_order_release);
+		draw.phase.store(PhaseFree, std::memory_order_release);
 		return nullptr;
 	}
+	draw.phase.store(PhaseReady, std::memory_order_release);
 	return &draw;
 }
 
 RenderExecutor::ResolvedDraw& RenderExecutor::TakeResolvedSlot() {
 	auto& draw = NextResolvedDraw();
-	draw.busy.store(true, std::memory_order_relaxed); // busy from its allocation (published with the operation that carries it)
+	draw.phase.store(PhasePending, std::memory_order_relaxed); // taken from its allocation (published with its operation or task)
 	return draw;
 }
 
@@ -3369,9 +3383,10 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDispatchAhead(const HW::Sha
                                                                    bool indirect, bool async_compute) {
 	auto& draw = TakeResolvedSlot();
 	if (!ResolveDispatchInto(draw, shaders, groups_x, groups_y, groups_z, mode, indirect, async_compute)) {
-		draw.busy.store(false, std::memory_order_release);
+		draw.phase.store(PhaseFree, std::memory_order_release);
 		return nullptr;
 	}
+	draw.phase.store(PhaseReady, std::memory_order_release);
 	return &draw;
 }
 
@@ -3415,7 +3430,97 @@ bool RenderExecutor::TakeResolvedDispatch(ShaderComputeInputInfo& input_info, Sh
 }
 
 void RenderExecutor::ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept {
-	resolved->busy.store(false, std::memory_order_release);
+	resolved->phase.store(PhaseFree, std::memory_order_release);
+}
+
+// Project 15 N2.2: the helper's resolution of a task (the draw's pre-check included) and the phases around it.
+bool RenderExecutor::ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task) {
+	bool ok = false;
+	if (task.dispatch) {
+		ok = ResolveDispatchInto(slot, *task.shaders, task.groups_x, task.groups_y, task.groups_z, task.mode, task.indirect,
+		                         task.async_compute);
+	} else {
+		const auto mode = task.context->GetColorControl().mode;
+		ok              = (mode == 0u || mode == 1u) && DrawHasValidVertexShader(*task.shaders) &&
+		     ResolveDrawInto(slot, *task.context, *task.user_config, *task.shaders, task.indirect_draw);
+	}
+	if (ok && task.fault != 0u) { // KYTY_CHECK_RESOLVE_FAULT
+		ResolveCheckFault(slot, task.fault);
+		slot.fault = task.fault;
+	}
+	slot.empty = !ok;
+	slot.phase.store(PhaseReady, std::memory_order_release);
+	return ok;
+}
+
+bool RenderExecutor::BeginResolveTask(ResolvedDraw* slot) noexcept {
+	uint8_t expected = PhasePending;
+	if (slot->phase.compare_exchange_strong(expected, PhaseRunning, std::memory_order_acq_rel)) return true;
+	// Stolen: the execution thread went on without it; this task was its last user.
+	slot->phase.store(PhaseFree, std::memory_order_release);
+	return false;
+}
+
+RenderExecutor::ResolvedClaim RenderExecutor::TryClaimResolvedDraw(ResolvedDraw* resolved, bool steal) noexcept {
+	uint8_t phase = resolved->phase.load(std::memory_order_acquire);
+	if (phase == PhasePending && steal &&
+	    resolved->phase.compare_exchange_strong(phase, PhaseStolen, std::memory_order_acq_rel)) {
+		return ResolvedClaim::Stolen;
+	}
+	if (phase == PhaseReady) return resolved->empty ? ResolvedClaim::Empty : ResolvedClaim::Ready;
+	return ResolvedClaim::Running;
+}
+
+RenderExecutor::ResolvedDraw* RenderExecutor::ResolvedCheckSlot(ResolvedDraw* resolved) noexcept {
+	return resolved->check;
+}
+
+void RenderExecutor::SetResolvedCheckSlot(ResolvedDraw* resolved, ResolvedDraw* check) noexcept {
+	resolved->check = check;
+}
+
+int RenderExecutor::CompareResolved(const ResolvedDraw& reference, const ResolvedDraw& helper, const char** field) {
+	*field = nullptr;
+	if (reference.empty && helper.empty) return 0;
+	if (reference.empty != helper.empty) {
+		*field = "empty";
+		return 1;
+	}
+	const int stages = ResolvedStagesCompare(*reference.stages, *helper.stages, field);
+	if (stages != 3) return stages;
+	const auto bad = [&](const char* name) {
+		*field = name;
+		return 4;
+	};
+	if (reference.is_compute != helper.is_compute) return bad("is_compute");
+	if (reference.shaders != helper.shaders) return bad("shaders");
+	if (reference.is_compute) {
+		if (!std::ranges::equal(reference.compute.workgroup_counts, helper.compute.workgroup_counts)) return bad("compute_groups");
+	} else {
+		if (reference.state.ps_active != helper.state.ps_active) return bad("ps_active");
+		if (reference.state.indirect_draw.Key() != helper.state.indirect_draw.Key()) return bad("indirect_draw");
+	}
+	return 3;
+}
+
+uint32_t RenderExecutor::ResolvedFault(const ResolvedDraw* slot) noexcept {
+	return slot->fault;
+}
+
+void RenderExecutor::SetResolveCheckMode(bool on) {
+	SetResolveCheck(on);
+}
+
+void RenderExecutor::ResolveCheckFault(ResolvedDraw& slot, uint32_t fault) {
+	if (fault % 7u == 6u && !slot.is_compute) {
+		slot.state.ps_active = !slot.state.ps_active;
+		return;
+	}
+	if (fault % 7u == 5u && slot.is_compute) {
+		slot.compute.workgroup_counts[0]++;
+		return;
+	}
+	ResolvedStagesFault(*slot.stages, fault);
 }
 
 // KYTY_DIAG_GPU_BURN_NS=<ns> (measurement only, default 0; KYTY_LIVE_AB toggles 0/8000 or NAME=<ns>): the GPU thread spins

@@ -38,6 +38,13 @@ struct ResolvedStages;
 [[nodiscard]] ResolvedStages* NewResolvedStages();
 void                          DeleteResolvedStages(ResolvedStages* stages);
 [[nodiscard]] bool            ResolvedStagesEmpty(const ResolvedStages& stages) noexcept;
+// KYTY_CHECK_RESOLVE=2 (project 15 N2.2): SetResolveCheck(true) once at start keeps each stage's active sources for the
+// comparison; ResolvedStagesCompare compares two resolutions of one operation: 1 refused (stage count, or a stage not
+// ok), 2 reads differ (the read logs), 3 equal, 4 different (`field` names the first difference). ResolvedStagesFault
+// puts KYTY_CHECK_RESOLVE_FAULT's error `fault` into a result that is only compared.
+void               SetResolveCheck(bool on);
+[[nodiscard]] int  ResolvedStagesCompare(const ResolvedStages& a, const ResolvedStages& b, const char** field);
+void               ResolvedStagesFault(ResolvedStages& stages, uint32_t fault);
 inline thread_local ResolvedStages* t_resolved_stages = nullptr;
 // KYTY_TRACE_DISPATCH_CENSUS: how ProgramCache::Get<Compute> got the last compute stage's resources on this thread
 // (2 materialized, 3 the resolve thread's result, 4 compiled: a program miss). Not touched when the selection is adopted.

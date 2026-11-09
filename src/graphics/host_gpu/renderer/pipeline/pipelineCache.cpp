@@ -88,7 +88,9 @@ struct ResolvedStage {
 	ShaderRecompiler::IR::ResourceSpecialization specialization;
 	std::vector<uint8_t>                         null_share_kinds;
 	StageF::ResolveRecordPtr                     record; // FindBuffers' sources, found ahead
+	std::vector<uint8_t>                         active_sources; // KYTY_CHECK_RESOLVE=2 only: the plan's, for the comparison
 };
+bool g_resolve_check = false; // KYTY_CHECK_RESOLVE=2 (set once at start)
 // Why the execution thread materialized a stage itself.
 enum class ResolveMiss : uint32_t { NoResolution, Refused, Stale, NoMatch, Taken, Count };
 // PERF_RESOLVE_STAGES: stages made, without a program (which never compiles ahead) and refused by reason; taken, whole
@@ -129,6 +131,95 @@ void DeleteResolvedStages(ResolvedStages* stages) {
 }
 [[nodiscard]] bool ResolvedStagesEmpty(const ResolvedStages& stages) noexcept {
 	return stages.count == 0;
+}
+
+void SetResolveCheck(bool on) {
+	g_resolve_check = on;
+}
+
+int ResolvedStagesCompare(const ResolvedStages& a, const ResolvedStages& b, const char** field) {
+	*field = nullptr;
+	if (a.count != b.count) {
+		*field = "count";
+		return 1;
+	}
+	for (uint32_t i = 0; i < a.count; i++) {
+		if (!a.stages[i].ok || !b.stages[i].ok) {
+			*field = "ok";
+			return 1;
+		}
+	}
+	// The same reads with the same bytes: the same inputs, so the results must be equal.
+	const auto& la = a.log;
+	const auto& lb = b.log;
+	if (la.entries.size() != lb.entries.size() || la.bytes != lb.bytes) return 2;
+	for (size_t i = 0; i < la.entries.size(); i++) {
+		const auto& x = la.entries[i];
+		const auto& y = lb.entries[i];
+		if (x.address != y.address || x.size != y.size || x.first != y.first || x.kind != y.kind || x.ok != y.ok) return 2;
+	}
+	const auto bad = [&](const char* name) {
+		*field = name;
+		return 4;
+	};
+	if (a.push_start != b.push_start) return bad("push_start");
+	if (a.adoptable != b.adoptable) return bad("adoptable");
+	for (uint32_t i = 0; i < a.count; i++) {
+		const auto& x = a.stages[i];
+		const auto& y = b.stages[i];
+		if (x.stage != y.stage) return bad("stage");
+		if (x.plan != y.plan || x.entry != y.entry) return bad("program");
+		if (x.shader_base != y.shader_base) return bad("shader_base");
+		if (x.user_data_count != y.user_data_count ||
+		    !std::equal(x.user_data.begin(), x.user_data.begin() + x.user_data_count, y.user_data.begin())) {
+			return bad("user_data");
+		}
+		if (x.workgroup_counts != y.workgroup_counts) return bad("workgroup_counts");
+		if (x.null_share_kinds != y.null_share_kinds) return bad("null_share_kinds");
+		if (x.resources.flattened_srt != y.resources.flattened_srt) return bad("flat_srt");
+		if (x.resources.buffers != y.resources.buffers) return bad("buffers");
+		if (x.resources.images != y.resources.images) return bad("images");
+		if (const char* diff = ShaderRecompiler::IR::AheadResultDifference(x.resources, x.specialization, x.active_sources, y.resources,
+		                                                                   y.specialization, y.active_sources);
+		    diff != nullptr) {
+			return bad(diff);
+		}
+		if (x.permutation != nullptr && y.permutation != nullptr && x.permutation != y.permutation) return bad("permutation");
+	}
+	return 3;
+}
+
+void ResolvedStagesFault(ResolvedStages& stages, uint32_t fault) {
+	if (stages.count == 0) return;
+	auto& r = stages.stages[0];
+	switch (fault % 5u) {
+		case 0:
+			if (!r.resources.flattened_srt.empty()) {
+				r.resources.flattened_srt[0] ^= 1u;
+				return;
+			}
+			break;
+		case 1:
+			if (!r.resources.buffers.empty()) {
+				r.resources.buffers[0].dwords[0] ^= 1u;
+				return;
+			}
+			break;
+		case 2:
+			if (!r.resources.images.empty()) {
+				r.resources.images[0].dwords[0] ^= 1u;
+				return;
+			}
+			break;
+		case 3:
+			if (r.user_data_count != 0) {
+				r.user_data[0] ^= 1u;
+				return;
+			}
+			break;
+		default: break;
+	}
+	stages.push_start++; // the fallback error, every result has it
 }
 
 namespace {
@@ -1057,6 +1148,7 @@ struct PipelineCache::ProgramCache {
 			return;
 		}
 		r.null_share_kinds = r.plan->scratch[ShaderRecompiler::IR::t_ahead_scratch_slot].null_share_kinds; // N2.1: this thread's slot
+		if (g_resolve_check) r.active_sources = r.plan->scratch[ShaderRecompiler::IR::t_ahead_scratch_slot].active_sources;
 		{
 			const ChunkLead::PartTimer src_timer(ChunkLead::RpSources); // KYTY_TRACE_CHUNK_LEAD (N2.0)
 			StageF::BuildResolveRecord(renderer, r.resources, r.record); // FindBuffers' sources for this snapshot

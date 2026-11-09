@@ -296,6 +296,26 @@ void ConfigureGpuStageThread(GpuStageThread stage) {
 		const char* value = std::getenv("KYTY_GPU_THREAD_PRIORITY");
 		return value == nullptr || std::string_view(value) != "0";
 	}();
+	if (stage == GpuStageThread::ResolveHelper) {
+		Common::Thread::PinCurrent(cpus[static_cast<uint32_t>(GpuStageThread::Resolve)]);
+		return;
+	}
+	if (stage == GpuStageThread::ResolveDispatcher) {
+		// The SMT sibling of the command processor's processor: the operations it writes are in that core's caches.
+		static const int sibling = [] {
+			const int cp = cpus[static_cast<uint32_t>(GpuStageThread::CommandProcessor)];
+			if (cp < 0) return -1;
+			const auto all  = Common::Thread::SystemLogicalCpus();
+			const auto self = std::find_if(all.begin(), all.end(), [&](const Common::LogicalCpu& c) { return c.logical == cp; });
+			if (self == all.end()) return -1;
+			for (const auto& c: all) {
+				if (c.core == self->core && c.logical != cp) return c.logical;
+			}
+			return -1;
+		}();
+		if (sibling >= 0) Common::Thread::PinCurrent(sibling);
+		return;
+	}
 	if (high_priority && (stage == GpuStageThread::Execution || stage == GpuStageThread::CommandProcessor)) {
 		Common::Thread::RaiseCurrentPriority();
 	}

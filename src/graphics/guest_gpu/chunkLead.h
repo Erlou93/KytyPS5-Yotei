@@ -21,8 +21,8 @@ namespace Libs::Graphics::ChunkLead {
 // The command processor thread's state (written only while On()).
 enum CpState : uint8_t { CpWorking = 0, CpSnapshot = 1, CpDrain = 2, CpRingFull = 8, CpBlocked = 9, CpNoWork = 10 };
 inline std::atomic<uint8_t> g_cp_state {CpWorking};
-// The resolve thread holds an operation (written only while On()).
-inline std::atomic<bool> g_resolving {false};
+// How many resolving threads hold an operation (written only while On(); project 15 N2.2: the helper too).
+inline std::atomic<int> g_resolving {0};
 
 // Execution thread, every operation: its project pass (0..2, -1 not a chunk member), sequence, the leads and its emit tsc.
 void NoteOperation(int pass, uint64_t sequence, size_t raw, size_t resolved, uint64_t emit_tsc);
@@ -41,7 +41,7 @@ void NoteAdopt(uint64_t ticks, size_t entries, size_t bytes);
 
 // Resolve thread start: the N2.0b materialization parts (ResourceMaterialization.h g_mat_trace) and, with
 // KYTY_TRACE_PERF=1 KYTY_TRACE_PERF_SAMPLE=resolve, the sampler of the resolve thread (PERF_SAMPLE_RESOLVE lines).
-void ResolveThreadStart();
+void ResolveThreadStart(bool sampler, const char* name);
 // Resolve thread, before each operation: its materialization counters reset.
 void ResolveOperationStart();
 

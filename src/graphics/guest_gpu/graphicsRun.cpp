@@ -40,6 +40,7 @@
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
 #include "graphics/guest_gpu/command_processor/passCensus.h"
+#include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "kernel/memory.h"
 #include "libs/agc.h"
 #include "libs/errno.h"
@@ -609,6 +610,10 @@ GuestGpu::GuestGpu(RenderContext& renderer)
 	m_gfx_cp->Reset();
 	m_executor = std::jthread([this] { ExecutionThread(); });
 	m_resolver = std::jthread([this] { ResolveThread(); });
+	if (ResolveHelperPossible()) { // project 15 N2.2
+		RenderExecutor::SetResolveCheckMode(ResolveCheckOn());
+		m_resolve_helper = std::jthread([this] { ResolveHelperThread(); });
+	}
 	m_thread   = std::jthread(ThreadRun, this);
 	StallWatch::StartIfEnabled(); // KYTY_DIAG_STALL_WATCH (diagnostic)
 }
@@ -959,6 +964,9 @@ void GuestGpu::ExecutionThread() {
 			ChunkLead::NoteOperation(member ? ChunkLead::TargetPass(operation->pass_id) : -1, operation->sequence,
 			                         m_operations.SizeApprox() + resolved, resolved, operation->emit_tsc);
 		}
+		if (operation->resolved != nullptr && m_resolve_helper.joinable()) {
+			ClaimResolved(*operation); // project 15 N2.2: a helper may be resolving it
+		}
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
 			const auto kind  = operation->kind;
@@ -1038,11 +1046,52 @@ void GuestGpu::ExecutionThread() {
 static const char* IndirectDrawLayout(const IndirectDrawRegisters& registers, ShaderIndirectDrawInfo& sgprs);
 
 // Based on TheCruZ/KytyPS5-GTA daaf45201 (graphicsRun.cpp), GPL-2.0.
+// Project 15 N2.2 (design: the analysis session's n2-2-doprecyzowanie.md): KYTY_PERF_RESOLVE_HELPERS=1 (test switch, live
+// A/B) - a helper thread resolves the draws and dispatches, the resolve thread hands it tasks in stream order;
+// KYTY_CHECK_RESOLVE=2 (diagnostic) - the resolve thread resolves each one itself (the reference, used) and the helper
+// too (compared before the operation executes); KYTY_CHECK_RESOLVE_FAULT=N - every N-th helper result gets an error.
+static uint32_t ResolveHelpersFixed() {
+	static const uint32_t value = [] {
+		const char* env = std::getenv("KYTY_PERF_RESOLVE_HELPERS");
+		return env != nullptr && env[0] == '1' ? 1u : 0u;
+	}();
+	return value;
+}
+static bool ResolveCheckOn() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_CHECK_RESOLVE");
+		const bool  o   = env != nullptr && env[0] == '2';
+		if (o) std::fprintf(stderr, "CHECK_RESOLVE=2: the resolve thread and the helper resolve every operation; compared\n");
+		return o;
+	}();
+	return on;
+}
+static uint32_t ResolveFaultEvery() {
+	static const uint32_t every = [] {
+		const char* env = std::getenv("KYTY_CHECK_RESOLVE_FAULT");
+		return env != nullptr ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : 0u;
+	}();
+	return every;
+}
+static bool ResolveHelperPossible() {
+	return ResolveCheckOn() || Common::LiveAb::Possible(Common::LiveAb::Switch::ResolveHelpers, ResolveHelpersFixed());
+}
+
+// Based on TheCruZ/KytyPS5-GTA daaf45201 (graphicsRun.cpp), GPL-2.0.
 void GuestGpu::ResolveThread() {
 	KYTY_PROFILER_THREAD("Thread_GpuResolve");
 	Config::ConfigureGpuStageThread(Config::GpuStageThread::Resolve);
-	if (ChunkLead::On()) ChunkLead::ResolveThreadStart(); // KYTY_TRACE_CHUNK_LEAD (N2.0b)
-	auto& executor = m_renderer.GetRenderExecutor();
+	// KYTY_TRACE_CHUNK_LEAD (N2.0b); the sampler on the helper when there is one.
+	if (ChunkLead::On()) ChunkLead::ResolveThreadStart(!ResolveHelperPossible(), "resolve");
+	auto&          executor   = m_renderer.GetRenderExecutor();
+	const bool     check      = ResolveCheckOn();
+	const bool     possible   = ResolveHelperPossible();
+	const uint32_t fixed_k    = ResolveHelpersFixed();
+	const uint32_t fault_each = check ? ResolveFaultEvery() : 0u;
+	uint32_t       k_now      = 0;
+	uint64_t       members    = 0;
+	auto&          hs         = m_helper_stats;
+	auto           report_at  = std::chrono::steady_clock::now();
 	for (;;) {
 		auto operation = m_operations.TryPop();
 		if (!operation) {
@@ -1054,42 +1103,91 @@ void GuestGpu::ResolveThread() {
 			if (g_gpu_stage_stats) g_stage_stats.resolve_idle_ns.fetch_add(StageNowNs() - idle_start, std::memory_order_relaxed);
 		}
 		// The register snapshots stay valid until the operation executed.
-		const auto& state = operation->state;
-		const bool  lead  = ChunkLead::On(); // KYTY_TRACE_CHUNK_LEAD: the resolve thread's work
-		if (lead) ChunkLead::g_resolving.store(true, std::memory_order_relaxed);
-		if (lead) {
-			std::fill(std::begin(ChunkLead::t_parts), std::end(ChunkLead::t_parts), uint64_t {0}); // N2.0: this operation's parts
-			ChunkLead::t_part_buffers = 0;
-			ChunkLead::ResolveOperationStart();
+		const auto& state    = operation->state;
+		const auto  kind     = operation->kind;
+		const bool  dispatch = kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect;
+		const bool  draw     = kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto || kind == GpuOperationKind::DrawIndirect;
+		// Who resolves (N2.2): changed over only when the helper finished every task, so one thread makes each resolution.
+		const uint32_t k = check ? 1u : possible ? Common::LiveAb::Gate(Common::LiveAb::Switch::ResolveHelpers, fixed_k) : 0u;
+		if (k != k_now) {
+			for (Common::SpinWait wait; m_tasks_finished.load(std::memory_order_acquire) != m_tasks_pushed;) {
+				if (!wait.Spin()) std::this_thread::yield();
+			}
+			k_now = k;
+			Config::ConfigureGpuStageThread(k_now != 0 ? Config::GpuStageThread::ResolveDispatcher : Config::GpuStageThread::Resolve);
+			hs.k_changes.fetch_add(1, std::memory_order_relaxed);
 		}
-		const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
-		switch (operation->kind) {
-			case GpuOperationKind::DrawIndex:
-			case GpuOperationKind::DrawAuto:
-				operation->resolved = executor.ResolveDrawAhead(*state.context, *state.user_config, *state.shaders, {});
-				break;
-			case GpuOperationKind::DrawIndirect: {
-				// The layout a GPU indirect draw gets (none: the packet expands on the CPU, with patched registers).
-				ShaderIndirectDrawInfo indirect_draw;
-				if (IndirectDrawLayout(operation->draw_indirect.registers, indirect_draw) != nullptr) indirect_draw = {};
+		ShaderIndirectDrawInfo indirect_draw;
+		if (kind == GpuOperationKind::DrawIndirect) {
+			// The layout a GPU indirect draw gets (none: the packet expands on the CPU, with patched registers).
+			if (IndirectDrawLayout(operation->draw_indirect.registers, indirect_draw) != nullptr) indirect_draw = {};
+		}
+		const bool lead = ChunkLead::On(); // KYTY_TRACE_CHUNK_LEAD: the resolve thread's work
+		if ((draw || dispatch) && k_now != 0) {
+			RenderExecutor::ResolveTask task;
+			task.context       = state.context;
+			task.user_config   = state.user_config;
+			task.shaders       = state.shaders;
+			task.indirect_draw = indirect_draw;
+			task.dispatch      = dispatch;
+			task.pass_id       = operation->pass_id;
+			if (dispatch) {
+				const auto& d      = operation->dispatch;
+				task.groups_x      = d.thread_group_x;
+				task.groups_y      = d.thread_group_y;
+				task.groups_z      = d.thread_group_z;
+				task.mode          = d.mode;
+				task.indirect      = kind == GpuOperationKind::DispatchIndirect;
+				task.async_compute = operation->processor->IsAsyncComputeQueue();
+			}
+			auto& slot = executor.TakeResolvedSlot();
+			if (check) {
+				// The reference: this thread resolves it as the helper will (the same function), the helper's result is
+				// compared with it before the operation executes; the operation uses the reference.
+				if (lead) {
+					ChunkLead::g_resolving.fetch_add(1, std::memory_order_relaxed);
+					std::fill(std::begin(ChunkLead::t_parts), std::end(ChunkLead::t_parts), uint64_t {0});
+					ChunkLead::t_part_buffers = 0;
+					ChunkLead::ResolveOperationStart();
+				}
+				const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
+				task.slot             = &slot;
+				const bool ok         = executor.ResolveTaskInto(slot, task);
+				if (lead) {
+					ChunkLead::NoteResolve(operation->pass_id, dispatch, ChunkLead::Tsc() - lead_t0, ok);
+					ChunkLead::g_resolving.fetch_sub(1, std::memory_order_relaxed);
+				}
+				auto& helper_slot = executor.TakeResolvedSlot();
+				RenderExecutor::SetResolvedCheckSlot(&slot, &helper_slot);
+				task.slot  = &helper_slot;
+				task.fault = fault_each != 0 && ++members % fault_each == 0 ? static_cast<uint32_t>(members / fault_each) : 0u;
+			} else {
+				task.slot = &slot;
+			}
+			if (!m_tasks.TryPush(task)) EXIT("resolve helper: the task queue is full\n"); // a task holds a slot: never full
+			m_tasks_pushed++;
+			hs.tasks.fetch_add(1, std::memory_order_relaxed);
+			operation->resolved = &slot;
+		} else if (draw || dispatch) {
+			if (lead) {
+				ChunkLead::g_resolving.fetch_add(1, std::memory_order_relaxed);
+				std::fill(std::begin(ChunkLead::t_parts), std::end(ChunkLead::t_parts), uint64_t {0}); // N2.0: this operation's parts
+				ChunkLead::t_part_buffers = 0;
+				ChunkLead::ResolveOperationStart();
+			}
+			const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
+			if (draw) {
 				operation->resolved = executor.ResolveDrawAhead(*state.context, *state.user_config, *state.shaders, indirect_draw);
-				break;
+			} else {
+				const auto& d       = operation->dispatch;
+				operation->resolved = executor.ResolveDispatchAhead(*state.shaders, d.thread_group_x, d.thread_group_y, d.thread_group_z,
+				                                                    d.mode, kind == GpuOperationKind::DispatchIndirect,
+				                                                    operation->processor->IsAsyncComputeQueue());
 			}
-			case GpuOperationKind::DispatchDirect:
-			case GpuOperationKind::DispatchIndirect: {
-				const auto& dispatch = operation->dispatch;
-				operation->resolved  = executor.ResolveDispatchAhead(
-				    *state.shaders, dispatch.thread_group_x, dispatch.thread_group_y, dispatch.thread_group_z, dispatch.mode,
-				    operation->kind == GpuOperationKind::DispatchIndirect, operation->processor->IsAsyncComputeQueue());
-				break;
+			if (lead) {
+				ChunkLead::NoteResolve(operation->pass_id, dispatch, ChunkLead::Tsc() - lead_t0, operation->resolved != nullptr);
+				ChunkLead::g_resolving.fetch_sub(1, std::memory_order_relaxed);
 			}
-			default: break;
-		}
-		if (lead) {
-			const auto kind     = operation->kind;
-			const bool dispatch = kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect;
-			const bool draw     = kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto || kind == GpuOperationKind::DrawIndirect;
-			if (draw || dispatch) ChunkLead::NoteResolve(operation->pass_id, dispatch, ChunkLead::Tsc() - lead_t0, operation->resolved != nullptr);
 		}
 		if (g_gpu_stage_stats) {
 			if (!m_resolved.TryPush(*operation)) {
@@ -1101,8 +1199,131 @@ void GuestGpu::ResolveThread() {
 		} else {
 			m_resolved.Push(std::move(*operation));
 		}
-		if (lead) ChunkLead::g_resolving.store(false, std::memory_order_relaxed);
 		RingExecution();
+		if (possible && g_gpu_stage_stats) {
+			// PERF resolve_helper every ~5 s (N2.2): the helper's tasks, the execution thread's claims and waits.
+			const auto now = std::chrono::steady_clock::now();
+			if (now - report_at >= std::chrono::seconds(5)) {
+				report_at      = now;
+				const auto get = [](const std::atomic<uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
+				std::fprintf(stderr,
+				             "PERF resolve_helper k=%u tasks=%llu done=%llu empty=%llu stolen=%llu skipped=%llu claim[ready|running|stolen]=%llu|%llu|%llu "
+				             "wait=%llu/%.1fms wait_max_us=%.1f wait_commands=%llu k_changes=%llu check[both_empty|refused|reads_differ|compared|bad]=%llu|%llu|%llu|%llu|%llu "
+				             "fault[injected|compared|detected]=%llu|%llu|%llu\n",
+				             k_now, get(hs.tasks), get(hs.done), get(hs.empty), get(hs.stolen), get(hs.skipped), get(hs.ready), get(hs.running),
+				             get(hs.pending), get(hs.waits), static_cast<double>(get(hs.wait_ns)) / 1e6,
+				             static_cast<double>(get(hs.wait_max_ns)) / 1e3, get(hs.wait_commands), get(hs.k_changes), get(hs.both_empty),
+				             get(hs.refused), get(hs.reads_differ), get(hs.compared), get(hs.bad), get(hs.injected), get(hs.injected_compared),
+				             get(hs.detected));
+			}
+		}
+	}
+}
+
+// Project 15 N2.2: the resolve helper. It resolves the tasks in order into their slots; a task whose slot the execution
+// thread stole is skipped (its slot freed). It never waits for the resolve or execution thread.
+void GuestGpu::ResolveHelperThread() {
+	KYTY_PROFILER_THREAD("Thread_GpuResolveHelper");
+	ShaderRecompiler::IR::t_ahead_scratch_slot = 3; // a slot of its own (>= 3: ShaderIR.h RecordsNullShare)
+	Config::ConfigureGpuStageThread(Config::GpuStageThread::ResolveHelper);
+	const bool lead = ChunkLead::On();
+	if (lead) ChunkLead::ResolveThreadStart(true, "helper");
+	auto& executor = m_renderer.GetRenderExecutor();
+	auto& hs       = m_helper_stats;
+	while (auto task = m_tasks.Pop()) {
+		if (!RenderExecutor::BeginResolveTask(task->slot)) {
+			hs.skipped.fetch_add(1, std::memory_order_relaxed);
+			m_tasks_finished.fetch_add(1, std::memory_order_release);
+			continue;
+		}
+		if (lead) {
+			ChunkLead::g_resolving.fetch_add(1, std::memory_order_relaxed);
+			std::fill(std::begin(ChunkLead::t_parts), std::end(ChunkLead::t_parts), uint64_t {0});
+			ChunkLead::t_part_buffers = 0;
+			ChunkLead::ResolveOperationStart();
+		}
+		const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
+		const bool     ok      = executor.ResolveTaskInto(*task->slot, *task);
+		if (lead) {
+			ChunkLead::NoteResolve(task->pass_id, task->dispatch, ChunkLead::Tsc() - lead_t0, ok);
+			ChunkLead::g_resolving.fetch_sub(1, std::memory_order_relaxed);
+		}
+		hs.done.fetch_add(1, std::memory_order_relaxed);
+		if (!ok) hs.empty.fetch_add(1, std::memory_order_relaxed);
+		m_tasks_finished.fetch_add(1, std::memory_order_release);
+	}
+}
+
+// Project 15 N2.2: the execution thread, before the operation executes (no lock held, the registers not yet swapped):
+// with KYTY_CHECK_RESOLVE=2 the helper's result is compared with the reference first; then the resolution is claimed - a
+// running one waited for (serving the other threads' commands meanwhile), a pending one stolen (the operation then
+// selects itself, as without a resolution).
+void GuestGpu::ClaimResolved(GpuOperation& operation) {
+	auto* const slot = operation.resolved;
+	auto&       hs   = m_helper_stats;
+	const auto  wait_for = [&](RenderExecutor::ResolvedDraw* r, bool steal) {
+		auto       claim     = RenderExecutor::TryClaimResolvedDraw(r, steal);
+		if (claim != RenderExecutor::ResolvedClaim::Running) return claim;
+		const auto start     = std::chrono::steady_clock::now();
+		bool       commands  = false;
+		for (Common::SpinWait spin;;) {
+			claim = RenderExecutor::TryClaimResolvedDraw(r, steal);
+			if (claim != RenderExecutor::ResolvedClaim::Running) break;
+			if (m_pending_commands.load(std::memory_order_acquire) != 0) {
+				RunCommands();
+				commands = true;
+				continue;
+			}
+			if (!spin.Spin()) std::this_thread::yield();
+		}
+		const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+		hs.waits.fetch_add(1, std::memory_order_relaxed);
+		hs.wait_ns.fetch_add(ns, std::memory_order_relaxed);
+		if (commands) hs.wait_commands.fetch_add(1, std::memory_order_relaxed);
+		for (uint64_t max = hs.wait_max_ns.load(std::memory_order_relaxed); ns > max && !hs.wait_max_ns.compare_exchange_weak(max, ns);) {
+		}
+		if (ns > 1000000u) std::fprintf(stderr, "RESOLVE_HELPER wait %.2f ms (sequence %llu)\n", static_cast<double>(ns) / 1e6,
+		                                static_cast<unsigned long long>(operation.sequence));
+		if (ChunkLead::On()) ChunkLead::NoteIdle(ns, 0, commands); // counted as the "resolve" idle cause
+		return claim;
+	};
+	if (auto* const helper = RenderExecutor::ResolvedCheckSlot(slot); helper != nullptr) {
+		(void)wait_for(helper, false);
+		const char* field = nullptr;
+		const int   klass = RenderExecutor::CompareResolved(*slot, *helper, &field);
+		const bool  fault = RenderExecutor::ResolvedFault(helper) != 0;
+		static std::atomic<uint32_t> logged {0};
+		if (fault) {
+			hs.injected.fetch_add(1, std::memory_order_relaxed);
+			if (klass >= 3) hs.injected_compared.fetch_add(1, std::memory_order_relaxed);
+			if (klass == 4) hs.detected.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			std::atomic<uint64_t>* counters[5] = {&hs.both_empty, &hs.refused, &hs.reads_differ, &hs.compared, &hs.bad};
+			counters[klass]->fetch_add(1, std::memory_order_relaxed);
+			if (klass == 4) counters[3]->fetch_add(1, std::memory_order_relaxed);
+			if (klass == 4 && logged.fetch_add(1, std::memory_order_relaxed) < 40u) {
+				std::fprintf(stderr, "CHECK_RESOLVE mismatch field=%s kind=%u pass=[%s] sequence=%llu\n", field != nullptr ? field : "?",
+				             static_cast<uint32_t>(operation.kind), PassCensus::PassName(operation.pass_id).c_str(),
+				             static_cast<unsigned long long>(operation.sequence));
+			}
+		}
+		RenderExecutor::SetResolvedCheckSlot(slot, nullptr);
+		RenderExecutor::ReleaseResolvedDraw(helper);
+	}
+	const auto claim = wait_for(slot, true);
+	switch (claim) {
+		case RenderExecutor::ResolvedClaim::Ready: hs.ready.fetch_add(1, std::memory_order_relaxed); break;
+		case RenderExecutor::ResolvedClaim::Empty:
+			hs.ready.fetch_add(1, std::memory_order_relaxed);
+			RenderExecutor::ReleaseResolvedDraw(slot);
+			operation.resolved = nullptr;
+			break;
+		case RenderExecutor::ResolvedClaim::Stolen:
+			hs.pending.fetch_add(1, std::memory_order_relaxed);
+			hs.stolen.fetch_add(1, std::memory_order_relaxed);
+			operation.resolved = nullptr; // the helper frees the slot when it takes the task
+			break;
+		default: break;
 	}
 }
 
@@ -1111,6 +1332,10 @@ void GuestGpu::StopExecution() {
 	m_operations.Stop();
 	if (m_resolver.joinable()) {
 		m_resolver.join();
+	}
+	m_tasks.Stop(); // project 15 N2.2: after the resolve thread, the only producer of tasks
+	if (m_resolve_helper.joinable()) {
+		m_resolve_helper.join();
 	}
 	m_execution_stop.store(true, std::memory_order_seq_cst);
 	RingExecution();

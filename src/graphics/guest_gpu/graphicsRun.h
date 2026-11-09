@@ -135,6 +135,10 @@ private:
 	void              BecomeRendererOwner();
 	void              ExecutionThread();
 	void              ResolveThread();
+	// Project 15 N2.2: the resolve helper (KYTY_PERF_RESOLVE_HELPERS=1 or KYTY_CHECK_RESOLVE=2) and the execution
+	// thread's claim of an operation's resolution before it executes (waits for a running one, steals a pending one).
+	void              ResolveHelperThread();
+	void              ClaimResolved(GpuOperation& operation);
 	// Execution thread: runs the queued commands, then lets the blocked queues try again.
 	void              RunCommands();
 	// Execution thread with no operation: waits for work; false when the GPU stops.
@@ -230,8 +234,22 @@ private:
 	// GPU thread, the queue waits guard: when a slice last ran a packet, and whether the current slice did.
 	std::chrono::steady_clock::time_point m_last_progress {};
 	bool                                  m_slice_progressed = false;
+	// Project 15 N2.2: the resolve thread's tasks for the helper (each task holds a slot of the 320-slot ring, so 512 never
+	// fill), the tasks pushed (resolve thread) and finished (helper), and the counters of PERF resolve_helper.
+	Common::SpscQueue<RenderExecutor::ResolveTask> m_tasks {512};
+	uint64_t                                       m_tasks_pushed = 0;
+	std::atomic<uint64_t>                          m_tasks_finished {0};
+	struct HelperStats {
+		std::atomic<uint64_t> tasks {0}, done {0}, empty {0}, stolen {0}, skipped {0}, ready {0}, running {0}, pending {0};
+		std::atomic<uint64_t> waits {0}, wait_ns {0}, wait_max_ns {0}, wait_commands {0}, k_changes {0};
+		// KYTY_CHECK_RESOLVE=2: both empty, refused, reads differ, compared, bad; the fault test: injected, injected and
+		// compared, detected.
+		std::atomic<uint64_t> both_empty {0}, refused {0}, reads_differ {0}, compared {0}, bad {0};
+		std::atomic<uint64_t> injected {0}, injected_compared {0}, detected {0};
+	} m_helper_stats;
 	std::jthread    m_executor;
 	std::jthread    m_resolver;
+	std::jthread    m_resolve_helper;
 	std::jthread    m_thread;
 
 	friend class CommandProcessor;

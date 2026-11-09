@@ -185,7 +185,11 @@ bool SkipNoticeScreen();
 // Threads of the emulated GPU's stages. KYTY_GPU_THREAD_CPUS lists the logical processors the execution, recording,
 // resolve and command processor threads are pinned to ("off" leaves them unpinned); KYTY_GPU_THREAD_PRIORITY=0 keeps
 // the normal priority of the execution and command processor threads.
-enum class GpuStageThread : uint32_t { Execution = 0, Recording = 1, Resolve = 2, CommandProcessor = 3 };
+// Project 15 N2.2: ResolveHelper (the resolve helper) takes the resolve stage's processor; ResolveDispatcher (the resolve
+// thread while a helper resolves) the SMT sibling of the command processor's (unpinned when there is none).
+enum class GpuStageThread : uint32_t {
+	Execution = 0, Recording = 1, Resolve = 2, CommandProcessor = 3, ResolveHelper = 4, ResolveDispatcher = 5
+};
 // Applies the priority and affinity of `stage` to the calling thread.
 void ConfigureGpuStageThread(GpuStageThread stage);
 bool     PrecompileOnly();

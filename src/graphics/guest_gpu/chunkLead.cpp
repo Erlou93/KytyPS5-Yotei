@@ -344,9 +344,11 @@ void NoteAdopt(uint64_t ticks, size_t entries, size_t bytes) {
 	a[3] += bytes;
 }
 
-void ResolveThreadStart() {
+static thread_local const char* t_resolve_name = "resolve";
+void ResolveThreadStart(bool sampler, const char* name) {
+	t_resolve_name = name;
 	ShaderRecompiler::IR::g_mat_trace.store(true, std::memory_order_relaxed);
-	PerfSamplerStartForResolveThread();
+	if (sampler) PerfSamplerStartForResolveThread();
 }
 
 void ResolveOperationStart() {
@@ -356,7 +358,7 @@ void ResolveOperationStart() {
 }
 
 void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
-	static ResolveState s; // resolve thread
+	static thread_local ResolveState s; // per resolving thread (project 15 N2.2)
 	if (pass >= s.pass.size()) s.pass.resize(static_cast<size_t>(pass) + 1u);
 	auto& p = s.pass[pass];
 	if (dispatch) {
@@ -424,8 +426,8 @@ void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
 	}
 	const auto ops = total.draws + total.dispatches;
 	std::fprintf(stderr,
-	             "PERF resolve_work frames=%u work_ms/frame=%.2f draws/frame=%.0f us/draw=%.2f dispatches/frame=%.0f us/dispatch=%.2f resolved%%=%.1f%s\n",
-	             frames, static_cast<double>(total.draw_ticks + total.dispatch_ticks) / rate / 1e6 / f, total.draws / f,
+	             "PERF resolve_work thread=%s frames=%u work_ms/frame=%.2f draws/frame=%.0f us/draw=%.2f dispatches/frame=%.0f us/dispatch=%.2f resolved%%=%.1f%s\n",
+	             t_resolve_name, frames, static_cast<double>(total.draw_ticks + total.dispatch_ticks) / rate / 1e6 / f, total.draws / f,
 	             total.draws != 0 ? static_cast<double>(total.draw_ticks) / rate / 1e3 / static_cast<double>(total.draws) : 0.0,
 	             total.dispatches / f,
 	             total.dispatches != 0 ? static_cast<double>(total.dispatch_ticks) / rate / 1e3 / static_cast<double>(total.dispatches) : 0.0,
