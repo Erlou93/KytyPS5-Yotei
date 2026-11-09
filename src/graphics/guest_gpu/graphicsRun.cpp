@@ -596,6 +596,9 @@ static bool GraphicsRunDebugDumpEnabled() {
 	       Config::GetPrintfDirection() != Config::LogDirection::Silent;
 }
 
+static bool ResolveHelperPossible(); // project 15 N2.2 (below, with the resolve thread)
+static bool ResolveCheckOn();
+
 GuestGpu::GuestGpu(RenderContext& renderer)
     : m_renderer(renderer), m_operations(OperationQueueSize), m_resolved(ResolvedQueueSize),
       m_neutral_state {&m_neutral_context, &m_neutral_user_config, &m_neutral_shaders} {
