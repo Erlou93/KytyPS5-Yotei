@@ -249,7 +249,7 @@ void DefineBvhIntersect(EmitterState& s) {
 	s.bvh_intersect_function = s.builder.AllocateId();
 	s.builder.AddName(s.bvh_intersect_function, "bvh_intersect");
 	s.builder.AddFunction(spv::OpFunction, vec4, s.bvh_intersect_function,
-	                      InlineTest(s, 4u) ? spv::FunctionControlInlineMask : spv::FunctionControlMaskNone, signature);
+	                      spv::FunctionControlMaskNone, signature);
 	std::array<uint32_t, 6> args;
 	const std::array types {vec4, wide, f, vec3, vec3, vec3};
 	for (uint32_t i = 0; i < args.size(); ++i) {

@@ -2901,31 +2901,8 @@ void DefineIndirectFormattedLoadFunctions(ValueEmitContext& ctx) {
 // indirect_raw_x3's return (Branch Resolving); inlined, its GPU time per call went 20.5 -> 9.2 us and the cutscene's
 // part 2 frame 120.9 -> 110.1 and 115.9 -> 109.9 ms (two run pairs, warm caches). Inline in every program ran the
 // driver's compiler out of memory (CS fbdb4e82: 41 s, then "LLVM ERROR: out of memory"), hence the limit.
-// KYTY_PERF_INLINE_TEST=<kinds>:<hash,hash,...|all> (test switch 9.11, default off): functions of the listed shaders
-// marked Inline (kinds: 1 the raw-load functions whatever their count, 2 get_bda_pointer, 4 bvh_intersect).
-bool InlineTest(const EmitterState& state, uint32_t kind) {
-	static const std::pair<uint32_t, std::string> test = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_PERF_INLINE_TEST");
-		std::pair<uint32_t, std::string> t {0u, std::string()};
-		if (value == nullptr) return t;
-		const std::string v(value);
-		const auto        colon = v.find(':');
-		if (colon == std::string::npos) return t;
-		t.first  = static_cast<uint32_t>(std::strtoul(v.substr(0, colon).c_str(), nullptr, 10));
-		t.second = v.substr(colon + 1);
-		std::fprintf(stderr, "PERF_INLINE_TEST kinds=%u %s\n", t.first, t.second.c_str());
-		return t;
-	}();
-	if ((test.first & kind) == 0u) return false;
-	if (test.second == "all") return true;
-	char text[17];
-	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(state.program.shader_hash));
-	return test.second.find(text) != std::string::npos;
-}
-
 static constexpr uint32_t RawInlineMaxLoads = 16;
 static spv::FunctionControlMask IndirectRawControl(const EmitterState& state) {
-	if (InlineTest(state, 1u)) return spv::FunctionControlInlineMask;
 	uint32_t loads = 0;
 	for (const auto* block: state.program.blocks) {
 		for (const auto& inst: *block) {
@@ -3354,8 +3331,7 @@ void DefineGetBdaPointer(EmitterState& state) {
 	const auto entry_label     = state.builder.AllocateId();
 	state.builder.AddName(state.bda_pointer_function, "get_bda_pointer");
 	state.builder.AddFunction(spv::OpFunction, type, state.bda_pointer_function,
-	                          InlineTest(state, 2u) ? spv::FunctionControlInlineMask : spv::FunctionControlMaskNone,
-	                          function_type);
+	                          spv::FunctionControlMaskNone, function_type);
 	state.builder.AddFunction(spv::OpFunctionParameter, type, address);
 	EmitLabel(state, entry_label);
 

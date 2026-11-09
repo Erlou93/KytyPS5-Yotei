@@ -5,8 +5,6 @@
 #include <bit>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
-// KYTY_PERF_INLINE_TEST (test switch, spirvEmitterMemory.cpp): mark the function kind Inline in this shader.
-bool InlineTest(const EmitterState& state, uint32_t kind);
 uint32_t EmitIdentity(ValueEmitContext& ctx, uint32_t value);
 
 // Operand signatures distinguish SPIR-V IDs (uint32_t), raw literals/values
