@@ -1256,6 +1256,25 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				if (plan.tick != 0) {
 					if (attempt != 0 && plan.tick > last_tick) m_caller_stats.new_writer.fetch_add(1, std::memory_order_relaxed);
 					if (allow_defer) {
+						// KYTY_TRACE_CALLER_WAITS: the GPU-written intervals of the faulting page and their write tick.
+						static const bool page_trace = std::getenv("KYTY_TRACE_CALLER_WAITS") != nullptr;
+						if (page_trace && DebugPresentCount().load() >= 3200u) {
+							static std::atomic<uint32_t> lines {0};
+							if (lines.fetch_add(1, std::memory_order_relaxed) < 200u) {
+								std::string ranges;
+								const uint64_t page = vaddr & ~uint64_t {0xfff};
+								m_gpu_modified_ranges.ForEachInRange(page, 0x1000, [&](uint64_t start, uint64_t end) {
+									char item[48];
+									std::snprintf(item, sizeof(item), " %llx-%llx", static_cast<unsigned long long>(start),
+									              static_cast<unsigned long long>(end));
+									if (ranges.size() < 400u) ranges += item;
+								});
+								std::fprintf(stderr, "CALLER_PAGE addr=0x%llx write=%d tick=%llu cur=%llu gpu:%s\n",
+								             static_cast<unsigned long long>(vaddr), is_write ? 1 : 0,
+								             static_cast<unsigned long long>(plan.tick),
+								             static_cast<unsigned long long>(m_scheduler.CurrentTick()), ranges.c_str());
+							}
+						}
 						if (plan.tick >= m_scheduler.CurrentTick()) m_scheduler.Flush();
 						*defer                = plan.tick;
 						caller_timer.deferred = true;
