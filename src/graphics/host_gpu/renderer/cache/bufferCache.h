@@ -674,6 +674,12 @@ private:
 	};
 	std::vector<DirectRange>    m_direct_ranges;
 	std::vector<DirectGpuWrite> m_direct_gpu_writes;
+	// Per direct range: the span of its listed GPU writes (a superset after removals; rebuilt with them), so a read outside
+	// every span needs no scan of the list (WaitDirectGpuWrites, ~1 M calls per second).
+	std::vector<std::pair<uint64_t, uint64_t>> m_direct_write_spans;
+	bool                                     m_direct_write_unspanned = false; // a listed write in no range: scan
+	void                                     RebuildDirectWriteSpans();
+	[[nodiscard]] bool                       DirectWritesMayOverlap(uint64_t vaddr, uint64_t size) const;
 	// The pending command-processor writes the last WaitDirectGpuWrites left to the reader.
 	std::vector<DirectGpuWrite> m_direct_cp_overlay;
 	uint32_t                    m_direct_mode_seen = 0;

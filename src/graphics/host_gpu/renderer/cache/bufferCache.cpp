@@ -1913,12 +1913,36 @@ void BufferCache::DeactivateDirect(DirectRange& range, bool replace) {
 	m_scheduler.Finish();
 	DeleteBuffer(range.id);
 	m_memory_tracker.UntrackMemory(range.start, range.end - range.start);
-	std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return w.start < range.end && range.start < w.end; });
+	std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return w.start < range.end && range.start < w.end; }); RebuildDirectWriteSpans();
 	range.id     = {};
 	range.active = false;
 	// An ordinary buffer over the whole range at once: without one, shaders reading the range through pointers (the BDA
 	// table) would read nothing until a binding created one (black squares at every live A/B switch to off).
 	if (replace) (void)CreateBuffer(range.start, range.end - range.start);
+}
+
+void BufferCache::RebuildDirectWriteSpans() {
+	m_direct_write_spans.assign(m_direct_ranges.size(), {UINT64_MAX, 0});
+	m_direct_write_unspanned = false;
+	for (const auto& w: m_direct_gpu_writes) {
+		bool spanned = false;
+		for (size_t r = 0; r < m_direct_ranges.size(); r++) {
+			if (w.start < m_direct_ranges[r].end && m_direct_ranges[r].start < w.end) {
+				m_direct_write_spans[r].first  = std::min(m_direct_write_spans[r].first, w.start);
+				m_direct_write_spans[r].second = std::max(m_direct_write_spans[r].second, w.end);
+				spanned                        = true;
+			}
+		}
+		if (!spanned) m_direct_write_unspanned = true;
+	}
+}
+
+bool BufferCache::DirectWritesMayOverlap(uint64_t vaddr, uint64_t size) const {
+	if (m_direct_write_unspanned || m_direct_write_spans.size() != m_direct_ranges.size()) return true; // scan
+	for (const auto& [lo, hi]: m_direct_write_spans) {
+		if (lo < vaddr + size && vaddr < hi) return true;
+	}
+	return false;
 }
 
 bool BufferCache::InDirectRange(uint64_t vaddr, uint64_t size) const {
@@ -1998,9 +2022,19 @@ void BufferCache::NoteDirectGpuWrite(uint64_t vaddr, uint64_t size, const void* 
 	if (m_direct_gpu_writes.size() >= 64u) {
 		auto& master = m_scheduler.GetMasterSemaphore();
 		master.Refresh(); // once, not per listed write
-		std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return master.IsFree(w.tick); });
+		std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return master.IsFree(w.tick); }); RebuildDirectWriteSpans();
 	}
 	auto& write = m_direct_gpu_writes.emplace_back(DirectGpuWrite {vaddr, vaddr + size, m_scheduler.CurrentTick()});
+	if (m_direct_write_spans.size() != m_direct_ranges.size()) RebuildDirectWriteSpans();
+	bool spanned = false;
+	for (size_t r = 0; r < m_direct_ranges.size(); r++) {
+		if (vaddr < m_direct_ranges[r].end && m_direct_ranges[r].start < vaddr + size) {
+			m_direct_write_spans[r].first  = std::min(m_direct_write_spans[r].first, vaddr);
+			m_direct_write_spans[r].second = std::max(m_direct_write_spans[r].second, vaddr + size);
+			spanned                        = true;
+		}
+	}
+	if (!spanned) m_direct_write_unspanned = true;
 	if (PerfEnabled()) {
 		write.noted_us = std::chrono::duration_cast<std::chrono::microseconds>(
 		                     std::chrono::steady_clock::now().time_since_epoch())
@@ -2045,9 +2079,9 @@ bool BufferCache::WaitDirectGpuWrites(uint64_t vaddr, uint64_t size, bool cp_ove
 	// ~1.2 million calls per second at the torii gate (the walker and the page checks of the read logs).
 	auto& master = m_scheduler.GetMasterSemaphore();
 	if (!m_direct_gpu_writes.empty() && master.IsFree(m_direct_gpu_writes.front().tick)) {
-		std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return master.IsFree(w.tick); });
+		std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return master.IsFree(w.tick); }); RebuildDirectWriteSpans();
 	}
-	if (m_direct_gpu_writes.empty()) return false;
+	if (m_direct_gpu_writes.empty() || !DirectWritesMayOverlap(vaddr, size)) return false;
 	g_direct_stats.checks.fetch_add(1, std::memory_order_relaxed);
 	// With the overlay, only writes of unknown bytes are waited for here.
 	uint64_t tick    = 0; // newest overlapping write
@@ -2115,7 +2149,7 @@ bool BufferCache::WaitDirectGpuWrites(uint64_t vaddr, uint64_t size, bool cp_ove
 	};
 	if (!cp_overlay) {
 		if (wait_for(tick)) {
-			std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return m_scheduler.IsFree(w.tick); });
+			std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return m_scheduler.IsFree(w.tick); }); RebuildDirectWriteSpans();
 		}
 		return false;
 	}
