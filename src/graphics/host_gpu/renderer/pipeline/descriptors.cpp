@@ -4578,6 +4578,51 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 				m_context.GetBufferCache().NoteRecordKeyedWrite(range.address, range.resident);
 		}
 	}
+	// KYTY_PERF_SRT_GPU_WORDS: the shader reads its shader-only SRT words from GPU memory. Each word's guest address
+	// (the flat words the materialization wrote) becomes the device address of the cached buffer that holds it:
+	// ObtainBdaRange finds or creates that buffer and uploads its CPU-modified bytes, so the shader reads the bytes
+	// guest memory holds for it when it runs (GPU writes in place, CPU writes uploaded), as the walker did after waiting.
+	// Before the other bindings, like the record-keyed ranges: a buffer this creates cannot replace one they named.
+	m_gpu_word_patches.clear();
+	if (const auto& words = program.info.srt_gpu_words; !words.empty()) {
+		const auto& flat = snapshot.flattened_srt;
+		m_gpu_word_addresses.clear();
+		for (const auto& word: words) {
+			EXIT_IF(word.slot >= flat.size() || word.hi >= flat.size());
+			const uint64_t address = (uint64_t {flat[word.hi]} << 32u) | flat[word.slot];
+			if (address != 0u) m_gpu_word_addresses.emplace_back(address, static_cast<uint32_t>(&word - words.data()));
+		}
+		std::ranges::sort(m_gpu_word_addresses);
+		auto& cache = m_context.GetBufferCache();
+		for (size_t first = 0; first < m_gpu_word_addresses.size();) {
+			// One range per run of words no more than 256 bytes apart inside one 64 KiB block.
+			const uint64_t start = m_gpu_word_addresses[first].first;
+			size_t         last  = first;
+			while (last + 1u < m_gpu_word_addresses.size() &&
+			       m_gpu_word_addresses[last + 1u].first <= m_gpu_word_addresses[last].first + 4u + 256u &&
+			       (m_gpu_word_addresses[last + 1u].first >> 16u) == (start >> 16u)) {
+				++last;
+			}
+			const uint64_t end              = m_gpu_word_addresses[last].first + sizeof(uint32_t);
+			const auto [buffer, offset]     = cache.ObtainBdaRange(start, end - start, false);
+			const vk::DeviceAddress device = buffer->BufferDeviceAddress() + offset;
+			for (size_t i = first; i <= last; ++i) {
+				const auto& word = words[m_gpu_word_addresses[i].second];
+				const auto  host = device + (m_gpu_word_addresses[i].first - start);
+				if (word.verify != UINT32_MAX) {
+					// Bits 56..: what was over the word when it was bound (1 deferred label, 2 pending CP write, 4 GPU-modified
+					// page, 8 GPU-dirty bytes).
+					const uint64_t guest = m_gpu_word_addresses[i].first;
+					uint64_t       flags = GuestGpu::PendingWriteKind(guest);
+					if (cache.IsRegionGpuModified(guest, 4u)) flags |= 4u | (cache.HasGpuDirtyBytes(guest, 4u) ? 8u : 0u);
+					BufferCache::NoteGpuWordBind(host, guest | (flags << 56u));
+				}
+				m_gpu_word_patches.emplace_back(word.slot, static_cast<uint32_t>(host));
+				m_gpu_word_patches.emplace_back(word.hi, static_cast<uint32_t>(host >> 32u));
+			}
+			first = last + 1u;
+		}
+	}
 	sub_timer.reset();
 	EXIT_IF(prepared.shader_data.size() != layout.ShaderDataDwords());
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
@@ -4639,7 +4684,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	sub_timer.emplace(DispatchSub::SrtUpload);
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0 || srt_uniform) {
 		if (DescriptorTrace::SrtDumpOn()) DescriptorTrace::SrtDump(program.shader_hash, snapshot.flattened_srt);
-		if (prepared.bindless_patches.empty()) {
+		if (prepared.bindless_patches.empty() && m_gpu_word_patches.empty()) {
 			upload_srt(snapshot.flattened_srt);
 		} else {
 			m_bindless_srt.assign(snapshot.flattened_srt.begin(), snapshot.flattened_srt.end());
@@ -4649,6 +4694,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 					m_bindless_srt[patch.offset + 1u] = patch.entries;
 				}
 			}
+			for (const auto& [index, value]: m_gpu_word_patches) m_bindless_srt[index] = value; // KYTY_PERF_SRT_GPU_WORDS
 			upload_srt(m_bindless_srt);
 		}
 	}

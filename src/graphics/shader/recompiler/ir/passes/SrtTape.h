@@ -80,6 +80,10 @@ public:
 		bool           has_inst    = false;
 		ValueOpcode    opcode      = ValueOpcode::Void;
 		uint32_t       pc          = 0;
+		// KYTY_PERF_SRT_GPU_WORDS: the flat words of a slot the shader reads from GPU memory (ShaderInfo::SrtGpuWord;
+		// None: an ordinary slot).
+		uint32_t       gpu_hi      = None;
+		uint32_t       gpu_verify  = None;
 	};
 
 	struct MemoEntry {
@@ -126,6 +130,12 @@ public:
 // Returns null when the plan uses anything the tape does not model (the legacy walker is then used).
 std::shared_ptr<SrtTape> BuildSrtTape(const ResourcePlan& plan);
 
+// KYTY_PERF_SRT_GPU_WORDS=<hex hash,...> | all (default off; =0 off) and KYTY_PERF_SRT_GPU_WORDS_VERIFY=1: before the
+// SPIR-V emission of a listed shader, marks its shader-only SRT words (scalar reads through a pointer whose value no
+// CPU evaluation needs: no descriptor, address, branch condition, indirect value or fill uses it) in
+// program.info.srt_gpu_words: the shader reads them from GPU memory and the CPU only computes their addresses.
+void PlanSrtGpuWords(Program& program);
+
 // Mirrors SrtWalker for one evaluation session. `context` picks the memo (0 main, 1 clean).
 class SrtTapeWalker {
 public:
@@ -152,6 +162,9 @@ private:
 	bool Eval(uint32_t index, uint64_t& result);
 	bool Run(uint32_t index, const SrtNode& node, uint64_t& result);
 	bool ReadRaw(const SrtNode& node, uint64_t& result);
+	// KYTY_PERF_SRT_GPU_WORDS: the guest address a scalar (non-vector) RawRead reads, evaluated as ReadRaw
+	// does without reading it; 0 when ReadRaw would read zero without touching memory (the null page).
+	bool RawAddress(const SrtNode& node, uint64_t& address);
 	// The scalar RawRead node that evaluating `root` through this walker reads (the node itself, or the
 	// slot of an unflagged ReadConst), or SrtTape::None.
 	uint32_t FusableRead(uint32_t root) const;

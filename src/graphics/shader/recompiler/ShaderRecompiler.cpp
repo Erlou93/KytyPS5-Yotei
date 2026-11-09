@@ -20,6 +20,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
+#include "graphics/shader/recompiler/ir/passes/SrtTape.h"
 #include "graphics/shader/recompiler/ir/passes/SsaRewrite.h"
 
 #include <algorithm>
@@ -898,6 +899,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 		}
 	}
 	IR::TrackResources(ir, decoded, native_cfg);
+	IR::PlanSrtGpuWords(ir); // KYTY_PERF_SRT_GPU_WORDS
 	TranslateResult result;
 	result.program = std::move(ir);
 	if (options.dump_ir) {
