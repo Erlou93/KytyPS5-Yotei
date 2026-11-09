@@ -4,6 +4,7 @@
 #include "common/profiler.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
+#include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "kernel/memory.h"
 
@@ -20,6 +21,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -38,6 +40,71 @@
 #else
 #include <unistd.h>
 #endif
+
+namespace Libs::Graphics {
+// KYTY_TRACE_HOT_PAGES=1 (diagnostic, part 2 9.11): the tracker protections per 4 KiB page in 5 s windows. A page with
+// at least one protection per presented frame on average is hot (the CPU-write cycle: upload, protect, write fault,
+// open). One PERF hot_pages line per window: all calls (GPU thread / others, ms), the hot pages and their calls, and
+// the 64 KiB groups with the most calls.
+namespace HotPages {
+bool On() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_TRACE_HOT_PAGES");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+struct State {
+	std::mutex                                mutex;
+	std::unordered_map<uint64_t, uint32_t>    pages;
+	uint64_t                                  calls[2] {}, ns[2] {};
+	uint32_t                                  frame0 = 0;
+	std::chrono::steady_clock::time_point     window = std::chrono::steady_clock::now();
+};
+State& Get() {
+	static State state;
+	return state;
+}
+void Note(uint64_t vaddr, uint64_t size, bool gpu, uint64_t ns) {
+	auto&           st = Get();
+	std::scoped_lock lock(st.mutex);
+	st.calls[gpu ? 0 : 1]++;
+	st.ns[gpu ? 0 : 1] += ns;
+	const uint64_t first = vaddr >> 12u, count = std::min<uint64_t>((size + 4095u) >> 12u, 1024u);
+	for (uint64_t i = 0; i < count; i++) st.pages[first + i]++;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - st.window < std::chrono::seconds(5)) return;
+	const uint32_t frame  = Libs::Graphics::DebugPresentCount().load();
+	const uint32_t frames = std::max<uint32_t>(1u, frame - st.frame0);
+	uint64_t       hot = 0, hot_calls = 0, all_calls = 0;
+	std::unordered_map<uint64_t, uint64_t> groups;
+	for (const auto& [page, n]: st.pages) {
+		all_calls += n;
+		if (n < frames) continue;
+		hot++;
+		hot_calls += n;
+		groups[page >> 4u] += n;
+	}
+	std::vector<std::pair<uint64_t, uint64_t>> top(groups.begin(), groups.end());
+	std::ranges::sort(top, [](const auto& a, const auto& b) { return a.second > b.second; });
+	std::fprintf(stderr, "PERF hot_pages frames=%u calls_gpu=%llu/%.1fms calls_other=%llu/%.1fms pages=%zu page_calls=%llu "
+	                     "hot_pages=%llu hot_page_calls=%llu", frames, static_cast<unsigned long long>(st.calls[0]),
+	             static_cast<double>(st.ns[0]) / 1e6, static_cast<unsigned long long>(st.calls[1]), static_cast<double>(st.ns[1]) / 1e6,
+	             st.pages.size(), static_cast<unsigned long long>(all_calls), static_cast<unsigned long long>(hot),
+	             static_cast<unsigned long long>(hot_calls));
+	for (size_t i = 0; i < top.size() && i < 8u; i++) {
+		std::fprintf(stderr, " [0x%llx0000 x%llu]", static_cast<unsigned long long>(top[i].first),
+		             static_cast<unsigned long long>(top[i].second));
+	}
+	std::fprintf(stderr, "\n");
+	st.pages.clear();
+	st.calls[0] = st.calls[1] = st.ns[0] = st.ns[1] = 0;
+	st.frame0 = frame;
+	st.window = now;
+}
+} // namespace HotPages
+
+} // namespace Libs::Graphics
 
 namespace Libs::Graphics {
 namespace {
@@ -309,9 +376,15 @@ struct PageManager::Impl {
 			ProtectTimer() {
 				if (on) start = std::chrono::steady_clock::now();
 			}
+			uint64_t vaddr = 0, size = 0; // KYTY_TRACE_HOT_PAGES
 			~ProtectTimer() {
 				if (!on) return;
 				const auto kind = PerfIsGpuThread() ? 0u : 1u;
+				if (HotPages::On()) {
+					HotPages::Note(vaddr, size, kind == 0u,
+					               static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+					                   std::chrono::steady_clock::now() - start).count()));
+				}
 				PerfLocks().protects[kind].fetch_add(1, std::memory_order_relaxed);
 				PerfLocks().protect_nanos[kind].fetch_add(
 				    static_cast<uint64_t>(
@@ -319,6 +392,8 @@ struct PageManager::Impl {
 				    std::memory_order_relaxed);
 			}
 		} protect_timer;
+		protect_timer.vaddr = vaddr;
+		protect_timer.size  = size;
 		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));
