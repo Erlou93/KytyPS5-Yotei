@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include <optional>
 #include "common/threads.h"
+#include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -483,31 +484,38 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	std::optional<DispatchSubTimer> sub_timer(std::in_place, DispatchSub::Pipeline); // KYTY_TRACE_DISPATCH_CENSUS
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
-	sub_timer.emplace(DispatchSub::PrepareBindings);
-	PrepareBindings(input_info.stage, bindings);
-	sub_timer.reset();
-	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
-		std::copy(std::begin(input_info.dispatch_threads_num), std::end(input_info.dispatch_threads_num),
-		          bindings.shader_data.begin() + program.bindings.dispatch_thread_dword);
-	}
 	PreparedBindings* descriptor_stage = &bindings;
-	census_timer.Mark(4);
-	sub_timer.emplace(DispatchSub::FindBuffers);
-	FindBuffers(std::span {&descriptor_stage, 1u});
-	sub_timer.emplace(DispatchSub::PrepareBda);
-	if (program.info.uses_dma) {
-		m_context.PrepareBda();
+	// KYTY_CHECK_CHUNKS=2 (project 15, the oracle v2): a chunk-member dispatch is prepared once more before its preparation;
+	// the two preparations' prints must be equal (renderDraw.cpp ChunkCheckFirst; the commit uses the second).
+	const bool chunk_check = ChunkCensus::CheckOn() && ChunkCensus::t_member;
+	for (uint32_t preparation = chunk_check ? 0u : 1u; preparation < 2u; preparation++) {
+		sub_timer.emplace(DispatchSub::PrepareBindings);
+		PrepareBindings(input_info.stage, bindings);
+		sub_timer.reset();
+		if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
+			std::copy(std::begin(input_info.dispatch_threads_num), std::end(input_info.dispatch_threads_num),
+			          bindings.shader_data.begin() + program.bindings.dispatch_thread_dword);
+		}
+		census_timer.Mark(4);
+		sub_timer.emplace(DispatchSub::FindBuffers);
+		FindBuffers(std::span {&descriptor_stage, 1u});
+		sub_timer.emplace(DispatchSub::PrepareBda);
+		if (program.info.uses_dma) {
+			m_context.PrepareBda();
+		}
+		sub_timer.emplace(DispatchSub::RebindImages);
+		if (program.info.uses_image_heap) {
+			m_context.GetImageHeap().Rebind(*this);
+		}
+		RebindImages(bindings);
+		sub_timer.emplace(DispatchSub::SharedMemory);
+		BindSharedMemory(m_context, input_info, bindings);
+		sub_timer.emplace(DispatchSub::RebindBuffers);
+		RebindBuffers(bindings);
+		sub_timer.reset();
+		if (preparation == 0u) ChunkCheckFirst(std::span {&descriptor_stage, 1u}, nullptr);
 	}
-	sub_timer.emplace(DispatchSub::RebindImages);
-	if (program.info.uses_image_heap) {
-		m_context.GetImageHeap().Rebind(*this);
-	}
-	RebindImages(bindings);
-	sub_timer.emplace(DispatchSub::SharedMemory);
-	BindSharedMemory(m_context, input_info, bindings);
-	sub_timer.emplace(DispatchSub::RebindBuffers);
-	RebindBuffers(bindings);
-	sub_timer.reset();
+	if (chunk_check) ChunkCheckSecond(std::span {&descriptor_stage, 1u}, nullptr, true);
 	census_timer.Mark(5);
 
 	auto              vk_buffer        = buffer.Handle();

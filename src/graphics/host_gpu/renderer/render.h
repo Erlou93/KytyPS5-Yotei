@@ -291,9 +291,6 @@ private:
 	friend class CommandScheduler;
 };
 
-// KYTY_CHECK_CHUNKS=2 (project 15 S1.2): the fields of a draw plan's fingerprint (RenderExecutor::ChunkFingerprint).
-inline constexpr uint32_t ChunkFieldCount = 8;
-
 class RenderExecutor {
 public:
 	explicit RenderExecutor(RenderContext& context): m_context(context) {}
@@ -434,10 +431,11 @@ private:
 	// S1: the part of a draw after its "cannot touch guest memory" point,
 	// from what ExecutePreparedDraw prepared (the plan).
 	void CommitPreparedDraw(DrawPlan& plan);
-	// KYTY_CHECK_CHUNKS=2 (project 15 S1.2): a prepared plan's fingerprint by field (pipeline, storage buffers, images and
-	// samplers, SRT, shader data, bindless images, vertex and index buffers, indirect arguments); the stream ring's uploads by
-	// content, not offset.
-	[[nodiscard]] std::array<uint64_t, ChunkFieldCount> ChunkFingerprint(const DrawPlan& plan);
+	// KYTY_CHECK_CHUNKS=2 (project 15, the oracle v2, renderDraw.cpp): a chunk member is prepared twice. ChunkCheckFirst
+	// takes the print of the first preparation (with KYTY_CHECK_CHUNKS_FAULT's error in it, when due), ChunkCheckSecond
+	// compares the second's with it (PERF chunk_check). `plan`: the draw's (vertex and index buffers), null for a dispatch.
+	void ChunkCheckFirst(std::span<PreparedBindings* const> stages, DrawPlan* plan);
+	void ChunkCheckSecond(std::span<PreparedBindings* const> stages, const DrawPlan* plan, bool dispatch);
 	// The steps the draw entries share. DrawEntryStart: DrawIndex and DrawAuto.
 	// ColorOperationInstead: a metadata, copy or resolve operation took the place of the draw (true: it ends here).
 	void DrawEntryStart(CommandBuffer& buffer);
