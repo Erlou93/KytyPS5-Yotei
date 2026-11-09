@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <map>
 #include <string>
@@ -2494,21 +2495,15 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 	    });
 }
 
-// KYTY_PERF_FORMATTED_INLINE (test switch 9.11, default off; a list of shader hashes or "all"): the formatted-load
-// functions below are marked Inline instead of DontInline in the listed shaders - the same code, the driver expands it
-// at the calls (as RawInlineMaxLoads for the raw loads: b0c4f2a6 20.5 -> 9.2 us per call).
+// The formatted-load functions below are marked Inline instead of DontInline in these shaders - the same code, the
+// driver expands it at the calls (as RawInlineMaxLoads for the raw loads). Measured 9.11 (cutscene after the Snake
+// fight, part 2, GPU time per call, warm caches): 91451da6 (BVH) 6.60 -> 4.35 ms, 455a480b 1.75 -> 0.99, 6c9184bb
+// 0.59 -> 0.39, 039ed97b 0.51 -> 0.45; run-to-run 3 pairs +9.3 / +6.0 / +10.5% fps. Not a rule by load count: inlined,
+// 4ca0cf7e (27 calls) went 1.47 -> 1.81 ms, c1989e05 (12 calls) 0.80 -> 0.87, e8e38335 0.36 -> 0.45.
 static bool FormattedInline(const EmitterState& state) {
-	static const std::string list = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_PERF_FORMATTED_INLINE");
-		std::string v     = value != nullptr ? std::string(value) : std::string();
-		if (!v.empty() && v != "0") std::fprintf(stderr, "PERF_FORMATTED_INLINE %s\n", v.c_str());
-		return v;
-	}();
-	if (list.empty() || list == "0") return false;
-	if (list == "1" || list == "all") return true;
-	char text[17];
-	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(state.program.shader_hash));
-	return list.find(text) != std::string::npos;
+	constexpr std::array<uint64_t, 4> Inlined {0x91451da6526e1954ull, 0x455a480b7aae67dcull, 0x6c9184bb2721d580ull,
+	                                           0x039ed97b41485281ull};
+	return std::ranges::find(Inlined, state.program.shader_hash) != Inlined.end();
 }
 
 // One DontInline function per shape of the formatted loads through GPU-selected
