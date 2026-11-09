@@ -1962,7 +1962,7 @@ bool LongPrepPartsOn() {
 // offsets of cached buffers (stable within a run), the stream ring's uploads by their bytes (their offsets depend on the
 // order of uploads), the SRT words as the shader reaches them (PreparedBindings::gpu_words_key), the draw's data words.
 namespace {
-const char* const ChunkFieldNames[RenderExecutor::ChunkFieldCount] = {"pipeline", "buffers", "images", "srt",
+const char* const ChunkFieldNames[ChunkFieldCount] = {"pipeline", "buffers", "images", "srt",
                                                                     "data",     "bindless", "vertex", "indirect"};
 inline uint64_t FpMix(uint64_t h, uint64_t v) {
 	return (h ^ (v + 0x9E3779B97F4A7C15ull + (h << 6u) + (h >> 2u))) * 0x100000001B3ull;
@@ -1974,16 +1974,16 @@ uint64_t FpBytes(const uint8_t* data, size_t size) {
 }
 struct ChunkCheckStats {
 	uint64_t                              draws = 0, bad_draws = 0;
-	std::array<uint64_t, RenderExecutor::ChunkFieldCount> mismatches {};
+	std::array<uint64_t, ChunkFieldCount> mismatches {};
 	uint32_t                              logged = 0;
 	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
 ChunkCheckStats g_chunk_check; // execution thread
 } // namespace
 
-std::array<uint64_t, RenderExecutor::ChunkFieldCount> RenderExecutor::ChunkFingerprint(const DrawPlan& plan) {
+std::array<uint64_t, ChunkFieldCount> RenderExecutor::ChunkFingerprint(const DrawPlan& plan) {
 	std::array<uint64_t, ChunkFieldCount> f {};
-	auto&       stream        = m_context.GetBufferCache().Stream();
+	auto&       stream        = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
 	const auto  stream_handle = stream.Handle();
 	const auto  mapped        = stream.Mapped();
 	const auto  buffer_info   = [&](uint64_t h, vk::Buffer buffer, uint64_t offset, uint64_t range) {
@@ -2029,12 +2029,12 @@ std::array<uint64_t, RenderExecutor::ChunkFieldCount> RenderExecutor::ChunkFinge
 	return f;
 }
 
-static void ChunkCheckCompare(const std::array<uint64_t, RenderExecutor::ChunkFieldCount>& first,
-                              const std::array<uint64_t, RenderExecutor::ChunkFieldCount>& second, const DrawPlan& plan) {
+static void ChunkCheckCompare(const std::array<uint64_t, ChunkFieldCount>& first,
+                              const std::array<uint64_t, ChunkFieldCount>& second, const DrawPlan& plan) {
 	auto& s = g_chunk_check;
 	s.draws++;
 	bool bad = false;
-	for (uint32_t i = 0; i < RenderExecutor::ChunkFieldCount; i++) {
+	for (uint32_t i = 0; i < ChunkFieldCount; i++) {
 		if (first[i] == second[i]) continue;
 		s.mismatches[i]++;
 		bad = true;
@@ -2052,7 +2052,7 @@ static void ChunkCheckCompare(const std::array<uint64_t, RenderExecutor::ChunkFi
 	const auto now = std::chrono::steady_clock::now();
 	if (now - s.window < std::chrono::seconds(5)) return;
 	std::string fields;
-	for (uint32_t i = 0; i < RenderExecutor::ChunkFieldCount; i++) {
+	for (uint32_t i = 0; i < ChunkFieldCount; i++) {
 		fields += std::string(i == 0 ? "" : " ") + ChunkFieldNames[i] + "=" + std::to_string(s.mismatches[i]);
 	}
 	std::fprintf(stderr, "PERF chunk_check draws=%llu bad_draws=%llu mismatches[%s]\n", static_cast<unsigned long long>(s.draws),
