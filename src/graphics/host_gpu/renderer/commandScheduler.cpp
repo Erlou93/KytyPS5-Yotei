@@ -598,8 +598,24 @@ void CommandScheduler::NoteGpuCommand() {
 
 // Called before each draw/dispatch is recorded; m_commands_since_submit counts it, so `count - 1` draws/dispatches are
 // already in the open buffer.
+// KYTY_PERF_SUBMIT_POLICY (test switch 9.11, default 0): 1 = the batching decisions below query the GPU's progress first
+// (MasterSemaphore::Refresh, at most every 100 us) instead of the last known tick; 2 = also SubmitEvery 32. Only submission
+// points move.
+static uint32_t SubmitPolicy() {
+	static const uint32_t mode = [] {
+		const char*    v = std::getenv("KYTY_PERF_SUBMIT_POLICY");
+		const uint32_t m = v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
+		if (m != 0) std::fprintf(stderr, "PERF_SUBMIT_POLICY=%u\n", m);
+		return m;
+	}();
+	return mode;
+}
+
 void CommandScheduler::NoteGpuCommandBatched() {
 	const auto count = ++m_commands_since_submit;
+	const uint32_t policy = SubmitPolicy();
+	if (policy != 0) m_master.Refresh();
+	const uint32_t submit_every = policy >= 2 ? 32u : SubmitEvery;
 	if (count == 1 && !m_batch_idle_armed && m_last_submit_reason == SubmitReason::Other) {
 		// The buffer's first draw/dispatch after a slice end, wait or flip: did the GPU run dry before it?
 		// After a batch submission (periodic, interrupt, idle early) the GPU was just handed work, and an
@@ -612,8 +628,8 @@ void CommandScheduler::NoteGpuCommandBatched() {
 			return;
 		}
 	}
-	if (count <= SubmitEvery) return;
-	const bool boundary = count == SubmitEvery + 1u;
+	if (count <= submit_every) return;
+	const bool boundary = count == submit_every + 1u;
 	if (GpuIdle()) {
 		FlushFor(boundary ? SubmitReason::Periodic : SubmitReason::PeriodicLate);
 		return;
