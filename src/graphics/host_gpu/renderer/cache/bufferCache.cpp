@@ -2760,6 +2760,7 @@ constexpr size_t kObtainMemoSlots = 8192;
 ObtainMemoEntry  g_obtain_memo[kObtainMemoSlots]; // GPU thread
 struct ObtainMemoStats {
 	uint64_t hits = 0, misses = 0, stores = 0;
+	uint64_t miss[5] {}; // empty slot, other range, buffer epoch, CPU-dirty region epoch, image page sum
 };
 ObtainMemoStats              g_obtain_memo_stats_shared;
 } // namespace
@@ -2792,15 +2793,31 @@ bool ObtainMemoRegions(uint64_t vaddr, uint64_t size, uint64_t& first, uint32_t&
 const ObtainMemoEntry* ObtainMemoFind(uint64_t vaddr, uint64_t size) {
 	const ObtainMemoEntry* entry = &g_obtain_memo[ObtainMemoIndex(vaddr, size)];
 	const auto&            e     = *entry;
-	if (e.regions == 0 || e.vaddr != vaddr || e.size != size ||
-	    e.buffer_epoch != DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire)) {
+	auto&                  miss  = ObtainMemoStatsRef().miss;
+	if (e.regions == 0) {
+		miss[0]++;
+		return nullptr;
+	}
+	if (e.vaddr != vaddr || e.size != size) {
+		miss[1]++;
+		return nullptr;
+	}
+	if (e.buffer_epoch != DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire)) {
+		miss[2]++;
 		return nullptr;
 	}
 	auto* table = g_cpu_dirty_region_epochs.load(std::memory_order_acquire);
 	for (uint32_t i = 0; i < e.regions; i++) {
-		if (table[e.region + i].load(std::memory_order_acquire) != e.epochs[i]) return nullptr;
+		if (table[e.region + i].load(std::memory_order_acquire) != e.epochs[i]) {
+			miss[3]++;
+			return nullptr;
+		}
 	}
-	return DrawRepeat::ImagePageEpochSum(vaddr, size) == e.image_sum ? entry : nullptr;
+	if (DrawRepeat::ImagePageEpochSum(vaddr, size) != e.image_sum) {
+		miss[4]++;
+		return nullptr;
+	}
+	return entry;
 }
 
 void ObtainMemoStore(uint64_t vaddr, uint64_t size, const ObtainMemoEntry& fresh) {
@@ -2810,8 +2827,11 @@ void ObtainMemoStore(uint64_t vaddr, uint64_t size, const ObtainMemoEntry& fresh
 void ObtainMemoReport() {
 	auto& s = ObtainMemoStatsRef();
 	if (((s.hits + s.misses) & 0x3ffffu) != 0 || !Common::EnvRead::PerfLines()) return;
-	std::fprintf(stderr, "PERF obtain_memo hits=%llu misses=%llu stores=%llu\n", static_cast<unsigned long long>(s.hits),
-	             static_cast<unsigned long long>(s.misses), static_cast<unsigned long long>(s.stores));
+	std::fprintf(stderr, "PERF obtain_memo hits=%llu misses=%llu stores=%llu miss(empty/range/buffers/cpu/images)=%llu/%llu/%llu/%llu/%llu\n",
+	             static_cast<unsigned long long>(s.hits), static_cast<unsigned long long>(s.misses),
+	             static_cast<unsigned long long>(s.stores), static_cast<unsigned long long>(s.miss[0]),
+	             static_cast<unsigned long long>(s.miss[1]), static_cast<unsigned long long>(s.miss[2]),
+	             static_cast<unsigned long long>(s.miss[3]), static_cast<unsigned long long>(s.miss[4]));
 }
 } // namespace
 
