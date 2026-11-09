@@ -13,6 +13,7 @@
 #include "common/file.h"
 #include "common/liveAb.h"
 #include "graphics/guest_gpu/chunkCensus.h"
+#include "graphics/guest_gpu/chunkLead.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
 #include "common/profiler.h"
@@ -3324,6 +3325,7 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDrawAhead(const HW::Context
 	// A metadata, copy or resolve operation in place of the draw selects nothing.
 	const auto mode = context.GetColorControl().mode;
 	if ((mode != 0u && mode != 1u) || !DrawHasValidVertexShader(shaders)) return nullptr;
+	std::optional<ChunkLead::PartTimer> slot_timer(std::in_place, ChunkLead::RpSlot); // KYTY_TRACE_CHUNK_LEAD (N2.0)
 	auto& draw = NextResolvedDraw();
 	auto& state = draw.state;
 	ResetDrawState(state);
@@ -3335,6 +3337,7 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDrawAhead(const HW::Context
 	state.ps_active               = shaders.GetPs().ps_regs.data_addr != 0 &&
 	                  (color_output_mask != 0 || PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
 	const auto target_export_mapping = TargetExportMapping(context, color_output_mask);
+	slot_timer.reset();
 	m_context.GetPipelineCache().ResolveGraphicsPrograms(m_context, shaders.GetVs(), shaders.GetPs(), shader_regs, context,
 	                                                     user_config, target_export_mapping, state.ps_active, state.vertex_info,
 	                                                     state.ps_input_info, indirect_draw, state.programs, *draw.stages);

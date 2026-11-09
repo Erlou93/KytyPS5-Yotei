@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/guest_gpu/chunkCensus.h"
+#include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheTrace.h"
 
@@ -987,6 +988,7 @@ struct PipelineCache::ProgramCache {
 		} else {
 			stage = ShaderType::Compute;
 		}
+		std::optional<ChunkLead::PartTimer> key_timer(std::in_place, ChunkLead::RpKey); // KYTY_TRACE_CHUNK_LEAD (N2.0)
 		ahead_key.stage           = stage;
 		ahead_key.hash            = params.hash;
 		ahead_key.user_data_count = params.user_data_count;
@@ -997,6 +999,7 @@ struct PipelineCache::ProgramCache {
 			std::shared_lock lock(programs_mutex);
 			if (const auto found = programs.find(ahead_key); found != programs.end()) entry = &found->second;
 		}
+		key_timer.reset();
 		if (entry == nullptr || entry->call_source || results.count >= results.stages.size()) {
 			g_resolve_stats.no_program.fetch_add(1, std::memory_order_relaxed);
 			results.adoptable = false;
@@ -1026,18 +1029,25 @@ struct PipelineCache::ProgramCache {
 			runtime.workgroup_counts = std::span<const uint32_t>(r.workgroup_counts.data(), 3);
 		}
 		auto refusal = ShaderRecompiler::IR::AheadRefusal::None;
-		r.ok = ShaderRecompiler::IR::MaterializeResourcesAhead(*r.plan, runtime, r.resources, r.specialization, results.log,
-		                                                       &refusal);
+		{
+			const ChunkLead::PartTimer mat_timer(ChunkLead::RpMaterialize); // KYTY_TRACE_CHUNK_LEAD (N2.0)
+			r.ok = ShaderRecompiler::IR::MaterializeResourcesAhead(*r.plan, runtime, r.resources, r.specialization, results.log,
+			                                                       &refusal);
+		}
 		if (!r.ok) {
 			g_resolve_stats.refused[static_cast<size_t>(refusal)].fetch_add(1, std::memory_order_relaxed);
 			results.adoptable = false;
 			return;
 		}
 		r.null_share_kinds = r.plan->scratch[ResolveScratchSlot].null_share_kinds;
-		StageF::BuildResolveRecord(renderer, r.resources, r.record); // FindBuffers' sources for this snapshot
+		{
+			const ChunkLead::PartTimer src_timer(ChunkLead::RpSources); // KYTY_TRACE_CHUNK_LEAD (N2.0)
+			StageF::BuildResolveRecord(renderer, r.resources, r.record); // FindBuffers' sources for this snapshot
+		}
 		g_resolve_stats.made.fetch_add(1, std::memory_order_relaxed);
 		Permutation* permutation = nullptr;
 		{
+			const ChunkLead::PartTimer perm_timer(ChunkLead::RpPermutation); // KYTY_TRACE_CHUNK_LEAD (N2.0)
 			std::shared_lock lock(programs_mutex);
 			permutation = entry->FindPermutationAhead(push_data_cursor, r.specialization);
 		}
@@ -2020,6 +2030,7 @@ void PipelineCache::ResolveGraphicsPrograms(RenderContext& renderer, const HW::V
 	ShaderParams                pixel_params;
 	uint32_t                    push_data_cursor = 0;
 	{
+		const ChunkLead::PartTimer   inputs_timer(ChunkLead::RpInputs); // KYTY_TRACE_CHUNK_LEAD (N2.0)
 		const ShaderGuestReaderScope reader(&ReadProgramInputAhead, &results);
 		GraphicsProgramInputs(m_graphics, vertex_regs, pixel_regs, sh, context, user_config, target_export_mapping, pixel_active,
 		                      vertex_info, pixel_info, indirect_draw, vertex_params, pixel_params, &push_data_cursor);

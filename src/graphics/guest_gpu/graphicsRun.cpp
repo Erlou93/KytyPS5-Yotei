@@ -1056,6 +1056,10 @@ void GuestGpu::ResolveThread() {
 		const auto& state = operation->state;
 		const bool  lead  = ChunkLead::On(); // KYTY_TRACE_CHUNK_LEAD: the resolve thread's work
 		if (lead) ChunkLead::g_resolving.store(true, std::memory_order_relaxed);
+		if (lead) {
+			std::fill(std::begin(ChunkLead::t_parts), std::end(ChunkLead::t_parts), uint64_t {0}); // N2.0: this operation's parts
+			ChunkLead::t_part_buffers = 0;
+		}
 		const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
 		switch (operation->kind) {
 			case GpuOperationKind::DrawIndex:

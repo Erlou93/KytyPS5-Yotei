@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/chunkCensus.h"
+#include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorsTrace.h"
@@ -1320,7 +1321,13 @@ void BuildBufferSources(RenderContext& renderer, const ShaderRecompiler::IR::Res
 			size       = std::min({size, uint64_t {256} * 1024 * 1024, sentinel_limit});
 		}
 		uint64_t generation = 0;
-		if (Libs::LibKernel::Memory::ClampRangeSizeAhead(address, size, &generation) != size) {
+		uint64_t clamped    = 0;
+		{
+			const ChunkLead::PartTimer clamp_timer(ChunkLead::RpClamp); // KYTY_TRACE_CHUNK_LEAD (N2.0)
+			ChunkLead::t_part_buffers++;
+			clamped = Libs::LibKernel::Memory::ClampRangeSizeAhead(address, size, &generation);
+		}
+		if (clamped != size) {
 			b.outcome = BufferOutcome::Clamped;
 			continue;
 		}

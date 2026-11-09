@@ -41,6 +41,27 @@ void NoteSnapshotWait(bool compute, int kind, uint64_t ns);
 
 [[nodiscard]] uint64_t Tsc();
 
+// N2.0 (resolve parts, resolve thread): ticks per part of one resolution, reset per operation, summed per pass by
+// NoteResolve. Slot: the result slot and the draw state's reset; inputs: GraphicsProgramInputs; key: the program key and
+// its lookup; materialize: MaterializeResourcesAhead; sources: StageF::BuildResolveRecord, clamp: its
+// ClampRangeSizeAhead calls (the game memory manager's lock); permutation: FindPermutationAhead.
+enum ResolvePart : uint32_t { RpSlot, RpInputs, RpKey, RpMaterialize, RpSources, RpClamp, RpPermutation, RpCount };
+inline thread_local uint64_t t_parts[RpCount] {};
+inline thread_local uint32_t t_part_buffers = 0;
+class PartTimer {
+public:
+	explicit PartTimer(ResolvePart part): m_part(part), m_t0(On() ? Tsc() : 0) {}
+	~PartTimer() {
+		if (m_t0 != 0) t_parts[m_part] += Tsc() - m_t0;
+	}
+	PartTimer(const PartTimer&)            = delete;
+	PartTimer& operator=(const PartTimer&) = delete;
+
+private:
+	ResolvePart m_part;
+	uint64_t    m_t0;
+};
+
 } // namespace Libs::Graphics::ChunkLead
 
 #endif // EMULATOR_SRC_GRAPHICS_GUEST_GPU_CHUNKLEAD_H_

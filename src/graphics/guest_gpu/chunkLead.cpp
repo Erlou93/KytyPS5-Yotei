@@ -228,6 +228,8 @@ void Report(ExecState& s) {
 struct ResolveState {
 	struct Pass {
 		uint64_t draw_ticks = 0, draws = 0, dispatch_ticks = 0, dispatches = 0, resolved = 0;
+		std::array<uint64_t, RpCount> parts {}; // N2.0
+		uint64_t                      buffers = 0;
 	};
 	std::vector<Pass>                     pass;
 	uint64_t                              ops = 0;
@@ -328,6 +330,8 @@ void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
 		p.draws++;
 	}
 	if (resolved) p.resolved++;
+	for (uint32_t i = 0; i < RpCount; i++) p.parts[i] += t_parts[i];
+	p.buffers += t_part_buffers;
 	if ((++s.ops & 1023u) != 0) return;
 	const auto now = std::chrono::steady_clock::now();
 	if (now - s.window < std::chrono::seconds(5)) return;
@@ -352,10 +356,14 @@ void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
 	for (size_t i = 0; i < order.size() && i < 8; i++) {
 		const auto& q   = s.pass[order[i].second];
 		const auto  ops = q.draws + q.dispatches;
-		char        buf[160];
-		std::snprintf(buf, sizeof(buf), " | \"%s\" ms/frame=%.2f ops/frame=%.0f us/op=%.2f", PassCensus::PassName(order[i].second).c_str(),
-		              static_cast<double>(order[i].first) / rate / 1e6 / f, ops / f,
-		              ops != 0 ? static_cast<double>(order[i].first) / rate / 1e3 / static_cast<double>(ops) : 0.0);
+		char        buf[400];
+		const auto  per_op = [&](uint64_t ticks) { return ops != 0 ? static_cast<double>(ticks) / rate / 1e3 / static_cast<double>(ops) : 0.0; };
+		std::snprintf(buf, sizeof(buf),
+		              " | \"%s\" ms/frame=%.2f ops/frame=%.0f us/op=%.2f parts_us[slot|inputs|key|mat|sources(clamp)|perm]=%.2f|%.2f|%.2f|%.2f|%.2f(%.2f)|%.2f buffers/op=%.1f",
+		              PassCensus::PassName(order[i].second).c_str(), static_cast<double>(order[i].first) / rate / 1e6 / f, ops / f,
+		              per_op(order[i].first), per_op(q.parts[RpSlot]), per_op(q.parts[RpInputs]), per_op(q.parts[RpKey]),
+		              per_op(q.parts[RpMaterialize]), per_op(q.parts[RpSources]), per_op(q.parts[RpClamp]), per_op(q.parts[RpPermutation]),
+		              ops != 0 ? static_cast<double>(q.buffers) / static_cast<double>(ops) : 0.0);
 		top += buf;
 	}
 	const auto ops = total.draws + total.dispatches;
