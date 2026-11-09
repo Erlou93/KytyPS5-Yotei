@@ -172,24 +172,25 @@ void Marker(const void* cp, const char* push_name) {
 	Switch(cp, state.key);
 }
 
-bool Packet(const void* cp, bool dispatch) {
-	if (!Active()) return false;
-	auto& state = t_processors[cp];
-	if (t_active != cp) Switch(cp, state.key);
-	const bool skip = state.free && CeilingOn();
-	// KYTY_DIAG_CEILING_FREE_BURN_NS=<ns> (the ceiling with the remainder):
-	// a left-out packet still costs the GPU thread that much (busy wait) - the in-order work a parallel translation
-	// keeps per draw.
+// KYTY_DIAG_CEILING_FREE_BURN_NS=<ns> (the ceiling with the remainder): a left-out packet still costs the execution thread
+// that much, in order (pm4Handlers.cpp FreePacket: a callback that busy-waits) - the in-order work a parallel translation
+// keeps per draw. (Until 9.11 this tree spent it here, on the PM4 parser thread: since the 1.11 pipeline that is another
+// thread, so such a ceiling counted the draws as free - 6.11 project branch 9a771a87a.)
+uint64_t BurnNs() {
 	static const uint64_t burn_ns = [] {
 		const char* value = std::getenv("KYTY_DIAG_CEILING_FREE_BURN_NS");
 		const auto  ns    = value != nullptr ? std::strtoull(value, nullptr, 10) : 0ull;
 		if (ns != 0u) std::fprintf(stderr, "DIAG_CEILING_FREE_BURN_NS %llu\n", ns);
 		return static_cast<uint64_t>(ns);
 	}();
-	if (skip && burn_ns != 0u) {
-		const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(burn_ns);
-		while (std::chrono::steady_clock::now() < until) {}
-	}
+	return burn_ns;
+}
+
+bool Packet(const void* cp, bool dispatch) {
+	if (!Active()) return false;
+	auto& state = t_processors[cp];
+	if (t_active != cp) Switch(cp, state.key);
+	const bool skip = state.free && CeilingOn();
 	if (Enabled()) {
 		auto&            c = Global();
 		std::scoped_lock lock(c.mutex);

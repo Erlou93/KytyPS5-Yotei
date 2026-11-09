@@ -20,6 +20,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <string>
 #include <tuple>
@@ -61,6 +62,29 @@
 namespace Libs::Graphics {
 
 namespace {
+
+// KYTY_DIAG_CEILING_FREE_PASSES with KYTY_DIAG_CEILING_FREE_BURN_NS (measurement only): a left-out packet still costs the
+// execution thread the remainder, in order (a callback that busy-waits), as the parallel translation would keep it.
+uint32_t FreePacket(CommandProcessor& cp, uint32_t cmd_id) {
+	if (const uint64_t ns = PassCensus::BurnNs(); ns != 0u) {
+		cp.EmitCallback([ns] {
+			const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(ns);
+			while (std::chrono::steady_clock::now() < until) {}
+		});
+	}
+	return KYTY_PM4_LEN(cmd_id) - 1;
+}
+
+// KYTY_DIAG_CEILING_FREE_KEEP_INDIRECT=1 (measurement only): indirect draws/dispatches inside the listed passes are never left
+// out (the parallel translation keeps them in order), so the ceiling covers only what the project can move.
+bool FreeKeepIndirect() {
+	static const bool keep = [] {
+		const char* value = std::getenv("KYTY_DIAG_CEILING_FREE_KEEP_INDIRECT");
+		return value != nullptr && value[0] == '1';
+	}();
+	return keep;
+}
+
 
 constexpr uint32_t GcrGl2MetadataInvalidate = 1u << 1u;
 constexpr uint32_t GcrGl0VectorInvalidate   = 1u << 2u;
@@ -1309,7 +1333,7 @@ KYTY_CP_OP_PARSER(CpOpAcquireMem) {
 
 KYTY_CP_OP_PARSER(CpOpDispatchDirect) {
 	KYTY_PROFILER_FUNCTION();
-	if (PassCensus::Packet(&cp, true)) return KYTY_PM4_LEN(cmd_id) - 1; // KYTY_DIAG_CEILING_FREE_PASSES
+	if (PassCensus::Packet(&cp, true)) return FreePacket(cp, cmd_id); // KYTY_DIAG_CEILING_FREE_PASSES
 
 	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_DISPATCH_DIRECT);
 	EXIT_NOT_IMPLEMENTED(KYTY_PM4_LEN(cmd_id) != 5u);
@@ -1326,7 +1350,7 @@ KYTY_CP_OP_PARSER(CpOpDispatchDirect) {
 
 KYTY_CP_OP_PARSER(CpOpDispatchIndirect) {
 	KYTY_PROFILER_FUNCTION();
-	if (PassCensus::Packet(&cp, true)) return KYTY_PM4_LEN(cmd_id) - 1; // KYTY_DIAG_CEILING_FREE_PASSES
+	if (!FreeKeepIndirect() && PassCensus::Packet(&cp, true)) return FreePacket(cp, cmd_id); // KYTY_DIAG_CEILING_FREE_PASSES
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0011600 && cmd_id != 0xc0021600);
 
@@ -1698,7 +1722,7 @@ KYTY_CP_OP_PARSER(CpOpDmaData) {
 
 KYTY_CP_OP_PARSER(CpOpDrawIndex) {
 	KYTY_PROFILER_FUNCTION();
-	if (PassCensus::Packet(&cp, false)) return KYTY_PM4_LEN(cmd_id) - 1; // KYTY_DIAG_CEILING_FREE_PASSES
+	if (PassCensus::Packet(&cp, false)) return FreePacket(cp, cmd_id); // KYTY_DIAG_CEILING_FREE_PASSES
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0073a00 && cmd_id != 0xc0042700);
 
@@ -1756,7 +1780,7 @@ static void TraceIndirectSgprDestinations(const char* name, uint32_t w1, uint32_
 
 KYTY_CP_OP_PARSER(CpOpDrawIndirect) {
 	KYTY_PROFILER_FUNCTION();
-	if (PassCensus::Packet(&cp, false)) return KYTY_PM4_LEN(cmd_id) - 1; // KYTY_DIAG_CEILING_FREE_PASSES
+	if (!FreeKeepIndirect() && PassCensus::Packet(&cp, false)) return FreePacket(cp, cmd_id); // KYTY_DIAG_CEILING_FREE_PASSES
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0032400 && cmd_id != 0xc0032500);
 
@@ -1776,7 +1800,7 @@ KYTY_CP_OP_PARSER(CpOpDrawIndirect) {
 
 KYTY_CP_OP_PARSER(CpOpDrawIndirectMulti) {
 	KYTY_PROFILER_FUNCTION();
-	if (PassCensus::Packet(&cp, false)) return KYTY_PM4_LEN(cmd_id) - 1; // KYTY_DIAG_CEILING_FREE_PASSES
+	if (!FreeKeepIndirect() && PassCensus::Packet(&cp, false)) return FreePacket(cp, cmd_id); // KYTY_DIAG_CEILING_FREE_PASSES
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0082c00 && cmd_id != 0xc0083800);
 
@@ -1808,7 +1832,7 @@ KYTY_CP_OP_PARSER(CpOpDrawIndirectMulti) {
 
 KYTY_CP_OP_PARSER(CpOpDrawIndexOffset) {
 	KYTY_PROFILER_FUNCTION();
-	if (PassCensus::Packet(&cp, false)) return KYTY_PM4_LEN(cmd_id) - 1; // KYTY_DIAG_CEILING_FREE_PASSES
+	if (PassCensus::Packet(&cp, false)) return FreePacket(cp, cmd_id); // KYTY_DIAG_CEILING_FREE_PASSES
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0033500);
 
@@ -1827,7 +1851,7 @@ KYTY_CP_OP_PARSER(CpOpDrawIndexOffset) {
 
 KYTY_CP_OP_PARSER(CpOpDrawIndexAuto) {
 	KYTY_PROFILER_FUNCTION();
-	if (PassCensus::Packet(&cp, false)) return KYTY_PM4_LEN(cmd_id) - 1; // KYTY_DIAG_CEILING_FREE_PASSES
+	if (PassCensus::Packet(&cp, false)) return FreePacket(cp, cmd_id); // KYTY_DIAG_CEILING_FREE_PASSES
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0012d00);
 

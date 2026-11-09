@@ -22,6 +22,8 @@ inline thread_local uint64_t t_wait_ns = 0;
 void Marker(const void* cp, const char* push_name);
 // A draw (or dispatch) packet of `cp`; true when the ceiling leaves it out.
 [[nodiscard]] bool Packet(const void* cp, bool dispatch);
+// KYTY_DIAG_CEILING_FREE_BURN_NS: the remainder a left-out packet costs the execution thread (0: none).
+uint64_t BurnNs();
 // A dispatch's compute shader (the code hash; the census lists each pass's shaders: PASS_CENSUS shaders lines).
 void NoteShader(uint64_t hash);
 
