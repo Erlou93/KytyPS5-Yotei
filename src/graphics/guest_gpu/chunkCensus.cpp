@@ -114,28 +114,6 @@ void Report(State& s) {
 	s.window_frame    = frame;
 }
 
-// KYTY_CHUNK_SUBMIT: the submissions at chunk boundaries, one PERF chunk_submit line every ~5 s (execution thread).
-void NoteSubmit(bool open) {
-	static uint64_t opens = 0, closes = 0;
-	static auto     window = std::chrono::steady_clock::now();
-	static uint32_t frame0 = 0;
-	(open ? opens : closes)++;
-	const auto now = std::chrono::steady_clock::now();
-	if (now - window < std::chrono::seconds(5)) return;
-	const uint32_t frame  = DebugPresentCount().load(std::memory_order_relaxed);
-	const double   frames = frame > frame0 ? frame - frame0 : 1u;
-	std::fprintf(stderr, "PERF chunk_submit opens/frame=%.1f closes/frame=%.1f\n", opens / frames, closes / frames);
-	opens = closes = 0;
-	window = now;
-	frame0 = frame;
-}
-
-// KYTY_CHUNK_SUBMIT: the open chunk (execution thread).
-struct SubmitState {
-	bool     open  = false;
-	uint32_t count = 0;
-};
-
 } // namespace
 
 bool IsMember(bool gfx_queue, uint16_t pass, int kind) {
@@ -150,26 +128,6 @@ bool CheckOn() {
 		return o;
 	}();
 	return on;
-}
-
-bool SubmitBefore(bool gfx_queue, uint16_t pass, int kind) {
-	static SubmitState st;
-	const bool member = IsMember(gfx_queue, pass, kind);
-	if (!member) {
-		const bool close = st.open;
-		if (close) NoteSubmit(false);
-		st.open           = false;
-		st.count          = 0;
-		return close;
-	}
-	if (!st.open || st.count == ChunkCap) {
-		st.open  = true;
-		st.count = 1;
-		NoteSubmit(true);
-		return true;
-	}
-	st.count++;
-	return false;
 }
 
 bool Enabled() {

@@ -27,13 +27,8 @@ inline thread_local uint64_t t_downloads = 0, t_image_creates = 0, t_pipelines =
 // Execution thread, after each operation.
 void Note(const OpInfo& op);
 
-// KYTY_CHUNK_SUBMIT=1 (project 15 S1.1, test switch, live A/B): chunk boundaries are command buffer boundaries. A chunk is a
-// run of at most 128 non-indirect draws/dispatches of the graphics queue inside the project's passes (the census's rule
-// without holes, which are known only after the fact). Execution thread, before each operation: true when the open
-// command buffer must be submitted first (a chunk opens, closes or reaches 128).
-[[nodiscard]] bool SubmitBefore(bool gfx_queue, uint16_t pass, int kind);
-
-// Whether an operation is a chunk member (the rule of SubmitBefore). Execution thread.
+// Whether an operation is a chunk member: a non-indirect draw/dispatch of the graphics queue inside the project's passes
+// (KYTY_TRACE_CHUNK_PASSES, default the three passes). Execution thread.
 [[nodiscard]] bool IsMember(bool gfx_queue, uint16_t pass, int kind);
 
 // KYTY_CHECK_CHUNKS=2 (project 15 S1.2, the oracle): every chunk-member draw is prepared twice and the two plans' fingerprints

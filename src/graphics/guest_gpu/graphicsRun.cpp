@@ -913,22 +913,14 @@ void GuestGpu::ExecutionThread() {
 			perf_process.emplace(PerfKind::Process);
 			live_busy.emplace();
 		}
-		{
-			// KYTY_CHUNK_SUBMIT (project 15 S1.1, test switch, live A/B): a chunk starts and ends a command buffer.
-			static const uint32_t chunk_fixed = std::getenv("KYTY_CHUNK_SUBMIT") != nullptr && std::getenv("KYTY_CHUNK_SUBMIT")[0] == '1' ? 1u : 0u;
-			const bool submit_on = Common::LiveAb::Gate(Common::LiveAb::Switch::ChunkSubmit, chunk_fixed) != 0u;
-			if (submit_on || ChunkCensus::CheckOn()) {
-				const auto kind = operation->kind;
-				const int  k    = (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto) ? 1
-				                  : kind == GpuOperationKind::DispatchDirect                                 ? 2
-				                  : (kind == GpuOperationKind::DrawIndirect || kind == GpuOperationKind::DispatchIndirect) ? 3
-				                                                                                            : 0;
-				const bool gfx = operation->processor == m_gfx_cp.get();
-				ChunkCensus::t_member = ChunkCensus::IsMember(gfx, operation->pass_id, k); // KYTY_CHECK_CHUNKS
-				if (submit_on && ChunkCensus::SubmitBefore(gfx, operation->pass_id, k)) {
-					m_renderer.GetCommandScheduler().Flush();
-				}
-			}
+		if (ChunkCensus::CheckOn()) {
+			// KYTY_CHECK_CHUNKS=2 (project 15, the oracle): whether this operation is a chunk member.
+			const auto kind = operation->kind;
+			const int  k    = (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto) ? 1
+			                  : kind == GpuOperationKind::DispatchDirect                                 ? 2
+			                  : (kind == GpuOperationKind::DrawIndirect || kind == GpuOperationKind::DispatchIndirect) ? 3
+			                                                                                            : 0;
+			ChunkCensus::t_member = ChunkCensus::IsMember(operation->processor == m_gfx_cp.get(), operation->pass_id, k);
 		}
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.

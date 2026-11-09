@@ -174,8 +174,8 @@ bool Enabled() {
 }
 
 static bool Active() {
-	// KYTY_CHUNK_SUBMIT (project 15 S1.1) needs the pass ids too.
-	static const bool active = Enabled() || !FreeList().empty() || std::getenv("KYTY_CHUNK_SUBMIT") != nullptr || std::getenv("KYTY_CHECK_CHUNKS") != nullptr ||
+	// KYTY_CHECK_CHUNKS (project 15) needs the pass ids too.
+	static const bool active = Enabled() || !FreeList().empty() || std::getenv("KYTY_CHECK_CHUNKS") != nullptr ||
 	                           std::getenv("KYTY_LIVE_AB") != nullptr;
 	return active;
 }
@@ -197,7 +197,7 @@ void Marker(const void* cp, const char* push_name) {
 	}
 	const auto n = state.stack.size();
 	state.key    = n == 0 ? std::string("-") : n == 1 ? state.stack.back() : state.stack[n - 2] + ">" + state.stack.back();
-	state.id = Intern(state.key); // the pass ids also for KYTY_CHUNK_SUBMIT / KYTY_CHECK_CHUNKS (project 15)
+	state.id = Intern(state.key); // the pass ids also for KYTY_CHECK_CHUNKS (project 15)
 	state.free   = false;
 	for (const auto& s: FreeList()) {
 		if (state.key.find(s) != std::string::npos) state.free = true;

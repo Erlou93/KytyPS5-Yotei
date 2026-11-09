@@ -51,9 +51,6 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
-    // Project 15 S1.1: whether the execution thread submits the open command buffer before an operation that opens or
-    // closes a chunk; read once per operation, only submission timing depends on it.
-    {Switch::ChunkSubmit, "KYTY_CHUNK_SUBMIT", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
