@@ -4091,6 +4091,29 @@ void Report() {
 
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
+	if (LongPrepPartsOn()) {
+		// KYTY_TRACE_LONG_PREP: the repeat census (t_long_prep_parts 49-54, perfCounters.h).
+		struct Last {
+			uint64_t images = 0, buffers = 0, srt = 0, heaps = 0;
+		};
+		static thread_local std::unordered_map<const void*, Last> last;
+		const auto& s   = *runtime.resources;
+		const Last  now {BindReplay::Mix(BindReplay::Mix(0, s.images), s.samplers), BindReplay::Mix(0, s.buffers),
+		                 BindReplay::Mix(0, s.flattened_srt), BindReplay::Mix(0, s.bindless_heaps)};
+		if (last.size() >= 100000u) last.clear();
+		const auto [it, inserted] = last.try_emplace(runtime.program, now);
+		t_long_prep_parts[49]++;
+		if (!inserted) {
+			const bool img = it->second.images == now.images, buf = it->second.buffers == now.buffers;
+			const bool heaps = it->second.heaps == now.heaps;
+			t_long_prep_parts[50] += img ? 1u : 0u;
+			t_long_prep_parts[51] += buf ? 1u : 0u;
+			t_long_prep_parts[52] += it->second.srt == now.srt ? 1u : 0u;
+			t_long_prep_parts[53] += heaps ? 1u : 0u;
+			t_long_prep_parts[54] += img && buf && heaps ? 1u : 0u;
+			it->second = now;
+		}
+	}
 	if (!BindReplay::On() || !GuestGpu::IsGpuThread() || !runtime.resources->indirect_ranges.empty()) {
 		if (BindReplay::On()) BindReplay::GetStats().skipped++;
 		PrepareBindingsToday(runtime, prepared);

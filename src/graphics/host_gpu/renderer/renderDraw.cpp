@@ -2128,6 +2128,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			for (size_t i = 0; i < 33; i++) sum[i] += t_long_prep_parts[i];
 			static std::array<uint64_t, 6> gw_sum {}; // 43-48: GPU-read SRT words
 			for (size_t i = 0; i < 6; i++) gw_sum[i] += t_long_prep_parts[43 + i];
+			static std::array<uint64_t, 6> rep_sum {}; // 49-54: the repeat census
+			for (size_t i = 0; i < 6; i++) rep_sum[i] += t_long_prep_parts[49 + i];
 			for (size_t i = 0; i < 4; i++)
 				sum[33 + i] += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(marks[i + 1] - marks[i]).count());
 			draws++;
@@ -2141,7 +2143,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 				std::fprintf(stderr, " | gw gather=%.3f obtain=%.3f upload=%.3f words=%.2f runs=%.2f direct=%.2f\n",
 				             gw_sum[0] / n, gw_sum[1] / n, gw_sum[2] / n, gw_sum[3] * 1e3 / n, gw_sum[4] * 1e3 / n,
 				             gw_sum[5] * 1e3 / n);
-				sum = {}; gw_sum = {}; draws = 0; window = marks[4];
+				const double stages = std::max<double>(1.0, static_cast<double>(rep_sum[0]));
+				std::fprintf(stderr, "PERF prep_repeat draws=%llu stages_per_draw=%.2f img=%.3f buf=%.3f srt=%.3f heaps=%.3f ibh=%.3f\n",
+				             static_cast<unsigned long long>(draws), rep_sum[0] * 1e3 / n, rep_sum[1] / stages, rep_sum[2] / stages,
+				             rep_sum[3] / stages, rep_sum[4] / stages, rep_sum[5] / stages);
+				sum = {}; gw_sum = {}; rep_sum = {}; draws = 0; window = marks[4];
 			}
 		}
 		if (long_us != 0) {
