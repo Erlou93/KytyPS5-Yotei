@@ -70,8 +70,6 @@ namespace Libs::Graphics {
 
 namespace {
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values);
-// The scratch slot of MaterializeResourcesAhead on the resolve thread (ir/ShaderIR.h).
-constexpr uint32_t ResolveScratchSlot = 1;
 // A stage the resolve thread resolved (see ResolvedStages in pipelineCache.h).
 struct ResolvedStage {
 	ShaderType                                   stage      = ShaderType::Unknown;
@@ -448,17 +446,28 @@ struct PipelineCache::ProgramCache {
 			const auto matches = [&](const Permutation& candidate) {
 				return candidate.program.bindings.PushStartMatches(push_data_cursor) && candidate.specialization == specialization;
 			};
-			if (ahead_permutation < permutations.size() && matches(permutations[ahead_permutation])) {
-				return &permutations[ahead_permutation];
+			const size_t hint = ahead_permutation.value.load(std::memory_order_relaxed);
+			if (hint < permutations.size() && matches(permutations[hint])) {
+				return &permutations[hint];
 			}
 			for (size_t index = 0; index < permutations.size(); index++) {
 				if (!matches(permutations[index])) continue;
-				ahead_permutation = index;
+				ahead_permutation.value.store(index, std::memory_order_relaxed);
 				return &permutations[index];
 			}
 			return nullptr;
 		}
-		size_t ahead_permutation = SIZE_MAX;
+		// Project 15 N2.1: a hint only (checked by `matches`), so resolving threads may race on it; atomic, relaxed.
+		struct RelaxedIndex {
+			std::atomic<size_t> value {SIZE_MAX};
+			RelaxedIndex() = default;
+			RelaxedIndex(const RelaxedIndex& other): value(other.value.load(std::memory_order_relaxed)) {}
+			RelaxedIndex& operator=(const RelaxedIndex& other) {
+				value.store(other.value.load(std::memory_order_relaxed), std::memory_order_relaxed);
+				return *this;
+			}
+		};
+		RelaxedIndex ahead_permutation;
 
 		std::unique_ptr<ShaderRecompiler::ShaderSource> call_source;
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
@@ -991,6 +1000,12 @@ struct PipelineCache::ProgramCache {
 			stage = ShaderType::Compute;
 		}
 		std::optional<ChunkLead::PartTimer> key_timer(std::in_place, ChunkLead::RpKey); // KYTY_TRACE_CHUNK_LEAD (N2.0)
+		// Project 15 N2.1: the resolving thread's own key (several threads resolve).
+		thread_local ProgramKey ahead_key = [] {
+			ProgramKey key;
+			key.static_state.reserve(MaxStaticKeyWords);
+			return key;
+		}();
 		ahead_key.stage           = stage;
 		ahead_key.hash            = params.hash;
 		ahead_key.user_data_count = params.user_data_count;
@@ -1041,7 +1056,7 @@ struct PipelineCache::ProgramCache {
 			results.adoptable = false;
 			return;
 		}
-		r.null_share_kinds = r.plan->scratch[ResolveScratchSlot].null_share_kinds;
+		r.null_share_kinds = r.plan->scratch[ShaderRecompiler::IR::t_ahead_scratch_slot].null_share_kinds; // N2.1: this thread's slot
 		{
 			const ChunkLead::PartTimer src_timer(ChunkLead::RpSources); // KYTY_TRACE_CHUNK_LEAD (N2.0)
 			StageF::BuildResolveRecord(renderer, r.resources, r.record); // FindBuffers' sources for this snapshot
@@ -1093,7 +1108,6 @@ struct PipelineCache::ProgramCache {
 	ProgramCache(GraphicContext& graphics, ShaderRecompiler::IR::ImageHeapSource* image_heap)
 	    : device(graphics.device), graphics(graphics), image_heap(image_heap), profile(ShaderCompileProfile(graphics)) {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
-		ahead_key.static_state.reserve(MaxStaticKeyWords);
 	}
 	~ProgramCache() {
 		for (const auto& [key, entry]: programs) {
@@ -1106,7 +1120,6 @@ struct PipelineCache::ProgramCache {
 
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	ProgramKey                                                  lookup_key;
-	ProgramKey                                                  ahead_key; // the resolve thread's
 	vk::Device                                                  device;
 	GraphicContext&                                             graphics;
 	// Upstream's image heap source (27dc7c281): always null here (RenderContext m_image_heap, SESJA-SYNC1).
@@ -1935,10 +1948,10 @@ ShaderProgram PipelineCache::GetComputeProgramTwin(const HW::ComputeShaderInfo& 
 
 // Every 64k stages, on the resolve thread.
 static void ReportResolveStats(uint32_t count) {
-	static uint64_t stages = 0;
-	const uint64_t  before = stages;
-	stages += count + 1u;
-	if ((before >> 16u) == (stages >> 16u) || !Common::EnvRead::PerfLines()) return;
+	static std::atomic<uint64_t> stages {0}; // project 15 N2.1: several resolving threads
+	const uint64_t before = stages.fetch_add(count + 1u, std::memory_order_relaxed);
+	const uint64_t after  = before + count + 1u;
+	if ((before >> 16u) == (after >> 16u) || !Common::EnvRead::PerfLines()) return;
 	using Ir          = ShaderRecompiler::IR::AheadRefusal;
 	auto&       s     = g_resolve_stats;
 	const auto  total = [](const std::atomic<uint64_t>& a) -> unsigned long long { return a.load(std::memory_order_relaxed); };

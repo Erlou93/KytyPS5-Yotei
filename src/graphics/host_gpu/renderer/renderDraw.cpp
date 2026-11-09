@@ -3326,7 +3326,24 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDrawAhead(const HW::Context
 	const auto mode = context.GetColorControl().mode;
 	if ((mode != 0u && mode != 1u) || !DrawHasValidVertexShader(shaders)) return nullptr;
 	std::optional<ChunkLead::PartTimer> slot_timer(std::in_place, ChunkLead::RpSlot); // KYTY_TRACE_CHUNK_LEAD (N2.0)
+	auto& draw = TakeResolvedSlot();
+	slot_timer.reset();
+	if (!ResolveDrawInto(draw, context, user_config, shaders, indirect_draw)) {
+		draw.busy.store(false, std::memory_order_release);
+		return nullptr;
+	}
+	return &draw;
+}
+
+RenderExecutor::ResolvedDraw& RenderExecutor::TakeResolvedSlot() {
 	auto& draw = NextResolvedDraw();
+	draw.busy.store(true, std::memory_order_relaxed); // busy from its allocation (published with the operation that carries it)
+	return draw;
+}
+
+bool RenderExecutor::ResolveDrawInto(ResolvedDraw& draw, const HW::Context& context, const HW::UserConfig& user_config,
+                                     const HW::Shader& shaders, const ShaderIndirectDrawInfo& indirect_draw) {
+	std::optional<ChunkLead::PartTimer> slot_timer(std::in_place, ChunkLead::RpSlot); // KYTY_TRACE_CHUNK_LEAD (N2.0)
 	auto& state = draw.state;
 	ResetDrawState(state);
 	state.indirect_draw = indirect_draw;
@@ -3341,24 +3358,31 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDrawAhead(const HW::Context
 	m_context.GetPipelineCache().ResolveGraphicsPrograms(m_context, shaders.GetVs(), shaders.GetPs(), shader_regs, context,
 	                                                     user_config, target_export_mapping, state.ps_active, state.vertex_info,
 	                                                     state.ps_input_info, indirect_draw, state.programs, *draw.stages);
-	if (ResolvedStagesEmpty(*draw.stages)) return nullptr;
+	if (ResolvedStagesEmpty(*draw.stages)) return false;
 	draw.shaders    = &shaders;
 	draw.is_compute = false;
-	draw.busy.store(true, std::memory_order_relaxed); // published with the operation that carries it
-	return &draw;
+	return true;
 }
 
 RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDispatchAhead(const HW::Shader& shaders, uint32_t groups_x,
                                                                    uint32_t groups_y, uint32_t groups_z, uint32_t mode,
                                                                    bool indirect, bool async_compute) {
-	auto& draw = NextResolvedDraw();
+	auto& draw = TakeResolvedSlot();
+	if (!ResolveDispatchInto(draw, shaders, groups_x, groups_y, groups_z, mode, indirect, async_compute)) {
+		draw.busy.store(false, std::memory_order_release);
+		return nullptr;
+	}
+	return &draw;
+}
+
+bool RenderExecutor::ResolveDispatchInto(ResolvedDraw& draw, const HW::Shader& shaders, uint32_t groups_x, uint32_t groups_y,
+                                         uint32_t groups_z, uint32_t mode, bool indirect, bool async_compute) {
 	m_context.GetPipelineCache().ResolveDispatchPrograms(m_context, shaders.GetCs(), groups_x, groups_y, groups_z, mode, indirect,
 	                                                     async_compute, draw.compute, draw.compute_program, *draw.stages);
-	if (ResolvedStagesEmpty(*draw.stages)) return nullptr;
+	if (ResolvedStagesEmpty(*draw.stages)) return false;
 	draw.shaders    = &shaders;
 	draw.is_compute = true;
-	draw.busy.store(true, std::memory_order_relaxed);
-	return &draw;
+	return true;
 }
 
 void RenderExecutor::UseResolvedDraw(ResolvedDraw* resolved) noexcept {

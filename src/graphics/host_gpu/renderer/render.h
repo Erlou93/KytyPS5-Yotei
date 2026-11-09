@@ -304,6 +304,15 @@ public:
 	                                             const HW::Shader& shaders, const ShaderIndirectDrawInfo& indirect_draw);
 	[[nodiscard]] ResolvedDraw* ResolveDispatchAhead(const HW::Shader& shaders, uint32_t groups_x, uint32_t groups_y,
 	                                                 uint32_t groups_z, uint32_t mode, bool indirect, bool async_compute);
+	// Project 15 N2.1: the two halves of ResolveDrawAhead / ResolveDispatchAhead. TakeResolvedSlot (the thread that keeps
+	// the stream order) gives the next slot of the ring, marked busy at once; ResolveDrawInto / ResolveDispatchInto fill it
+	// (any resolving thread, one slot at a time) and return false when there is nothing to resolve (the caller releases
+	// the slot then).
+	[[nodiscard]] ResolvedDraw& TakeResolvedSlot();
+	[[nodiscard]] bool ResolveDrawInto(ResolvedDraw& draw, const HW::Context& context, const HW::UserConfig& user_config,
+	                                   const HW::Shader& shaders, const ShaderIndirectDrawInfo& indirect_draw);
+	[[nodiscard]] bool ResolveDispatchInto(ResolvedDraw& draw, const HW::Shader& shaders, uint32_t groups_x, uint32_t groups_y,
+	                                       uint32_t groups_z, uint32_t mode, bool indirect, bool async_compute);
 	// The execution thread, around the operation. Release gives the resolution back.
 	void        UseResolvedDraw(ResolvedDraw* resolved) noexcept;
 	static void ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept;
