@@ -51,6 +51,9 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
+    // Part 2 (9.11): whether a data-ring write fault whose page the GPU bytes of which are all dead also releases the
+    // following dead pages (bufferCache.cpp ExtendDeadRingRun); read once per write request, nothing left depends on it.
+    {Switch::RingRun, "KYTY_PERF_RING_RUN", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
