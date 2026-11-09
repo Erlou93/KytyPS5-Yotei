@@ -1566,36 +1566,34 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	};
 	read();
 	if (!covered && m_renderer.GetBufferCache().InDirectRange(reinterpret_cast<uint64_t>(addr), sizeof(T))) {
-		// KYTY_PERF_REGMEM_NO_DRAIN (test, live A/B; walk 9.11: the drain never changed the word): the word is tested as
-		// read, without draining the execution queue and the GPU first; a failed test suspends the stream and reads the
-		// word again when it resumes. =2 (the check): the execution thread, at the place of the drain, waits for the
-		// GPU's writes of the word and counts the waits whose test it would have decided otherwise.
+		// KYTY_PERF_REGMEM_NO_DRAIN (test, live A/B; walk 9.11): a word that fails the test as read is not drained for: the
+		// stream suspends as after a failed test and reads the word again when it resumes (a write the drain would have
+		// waited for only makes a later read pass). A word that passes as read is drained for as before. =2 (the check):
+		// the execution thread, at the place of the skipped drain, waits for the GPU's writes of the word and counts the
+		// skipped drains after which the word would have passed (the stream passes later instead).
 		static const uint32_t no_drain_fixed = [] {
 			const char* v = std::getenv("KYTY_PERF_REGMEM_NO_DRAIN");
 			return v != nullptr ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u;
 		}();
 		const uint32_t no_drain = Common::LiveAb::Gate(Common::LiveAb::Switch::RegMemNoDrain, no_drain_fixed);
-		if (no_drain == 0u) {
+		if (no_drain == 0u || TestWaitRegMemValue(value, ref, mask, func)) {
 			RunOnExecution(GpuDrain::DirectWrites, [this, addr] {
 				m_renderer.GetBufferCache().WaitDirectGpuWrites(reinterpret_cast<uint64_t>(addr), sizeof(T));
 			});
 			read();
 		} else if (no_drain == 2u) {
-			const uint64_t decided = value;
 			const uint64_t wref = ref, wmask = mask;
-			EmitCallback([this, addr, decided, wref, wmask, func] {
+			EmitCallback([this, addr, wref, wmask, func] {
 				m_renderer.GetBufferCache().WaitDirectGpuWrites(reinterpret_cast<uint64_t>(addr), sizeof(T));
 				T now {};
 				CopyFromGuest(&now, addr, sizeof(T));
-				static std::atomic<uint64_t> checks {0}, changed {0}, differed {0};
-				const bool diff = TestWaitRegMemValue(now, wref, wmask, func) != TestWaitRegMemValue(decided, wref, wmask, func);
-				if (static_cast<uint64_t>(now) != decided) changed.fetch_add(1, std::memory_order_relaxed);
-				if (diff) differed.fetch_add(1, std::memory_order_relaxed);
-				const auto n = checks.fetch_add(1, std::memory_order_relaxed) + 1u;
-				if (diff || (n & 0x3ffu) == 0u) {
-					std::fprintf(stderr, "PERF regmem_no_drain checks=%llu changed=%llu decided_otherwise=%llu\n",
-					             static_cast<unsigned long long>(n), static_cast<unsigned long long>(changed.load()),
-					             static_cast<unsigned long long>(differed.load()));
+				static std::atomic<uint64_t> skipped {0}, later {0};
+				const bool pass = TestWaitRegMemValue(now, wref, wmask, func);
+				if (pass) later.fetch_add(1, std::memory_order_relaxed);
+				const auto n = skipped.fetch_add(1, std::memory_order_relaxed) + 1u;
+				if ((n & 0x3ffu) == 0u) {
+					std::fprintf(stderr, "PERF regmem_no_drain skipped=%llu would_pass=%llu\n", static_cast<unsigned long long>(n),
+					             static_cast<unsigned long long>(later.load()));
 				}
 			});
 		}
