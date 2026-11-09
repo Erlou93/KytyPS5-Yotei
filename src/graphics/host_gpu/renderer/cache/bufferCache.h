@@ -685,6 +685,7 @@ private:
 	void                   DeactivateDirect(DirectRange& range, bool replace = true);
 	void                   NoteDirectGpuWrite(uint64_t vaddr, uint64_t size, const void* cp_data = nullptr);
 	[[nodiscard]] bool     DropDeadRingBytes(uint64_t vaddr);
+	[[nodiscard]] bool     RingBytesAllDead(uint64_t vaddr); // its verdict without the changes
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);

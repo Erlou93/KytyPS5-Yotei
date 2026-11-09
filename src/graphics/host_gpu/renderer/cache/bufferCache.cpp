@@ -1248,7 +1248,11 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			// publishes) itself. Serving the request later is what the GPU thread would do if the faulting thread had
 			// been descheduled until then: the same code moves the same bytes and changes the same states, only after
 			// the GPU finished them, while the GPU thread kept translating.
-			if (caller_eligible) {
+			// A write into a data-ring page whose GPU bytes are all dead (DropDeadRingBytes below drops them without a
+			// download) waits for nothing: the caller wait would only delay the same outcome (walk 9.11: ~150 waits of
+			// ~3.4 ms per ring half every other frame, with the GPU-read SRT words).
+			const bool ring_all_dead = caller_eligible && is_write && RingBytesAllDead(vaddr);
+			if (caller_eligible && !ring_all_dead) {
 				const auto plan = PlanCallerWait(vaddr, size, is_write);
 				if (plan.fallback != CallerFallback::None) {
 					m_caller_stats.fallback[static_cast<uint32_t>(plan.fallback)].fetch_add(1, std::memory_order_relaxed);
@@ -1560,7 +1564,7 @@ void ReportDirectStats(size_t pending) {
 
 namespace {
 struct RingDeadStats {
-	std::atomic<uint64_t> faults {0}, freed {0}, dropped_bytes {0}, partial {0};
+	std::atomic<uint64_t> faults {0}, freed {0}, dropped_bytes {0}, partial {0}, caller_skips {0};
 };
 RingDeadStats         g_ring_dead;
 std::atomic<uint64_t> g_ring_game_write_frame {0}; // game threads: the frame whose ring half the game writes now
@@ -1926,6 +1930,21 @@ bool BufferCache::InDirectRange(uint64_t vaddr, uint64_t size) const {
 // bytes whose frame is not known, are downloaded as before. Returns true when no GPU byte is left in the page. Frames
 // are the game's, from its submissions (GuestGpu::Enqueue); 8.11: ~99% of the ring write faults are dropped (the
 // execution-thread frame boundary used before dropped ~60% in the cutscene, ~10% walking), Rafał's play: image OK.
+// DropDeadRingBytes' verdict without its changes: the page is in the data ring and it has GPU bytes, all of them dead.
+bool BufferCache::RingBytesAllDead(uint64_t vaddr) {
+	const uint64_t write_frame = g_ring_game_write_frame.load(std::memory_order_acquire);
+	if (vaddr < 0x2002600000ull || vaddr >= 0x2010000000ull || write_frame < 2) return false;
+	bool any = false, live = false;
+	m_gpu_modified_ranges.ForEachInRange(vaddr & ~uint64_t {0xfff}, 4096, [&](uint64_t start, uint64_t end) {
+		any                   = true;
+		const uint64_t frame1 = QueryTicks(m_write_frames, start, end); // frame + 1; 0: part of it unknown
+		if (!(frame1 != 0 && frame1 + 1u <= write_frame)) live = true;
+	});
+	if (!any || live) return false;
+	g_ring_dead.caller_skips.fetch_add(1, std::memory_order_relaxed);
+	return true;
+}
+
 bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 	const uint64_t write_frame = g_ring_game_write_frame.load(std::memory_order_acquire);
 	if (vaddr < 0x2002600000ull || vaddr >= 0x2010000000ull || write_frame < 2) return false;
@@ -1958,11 +1977,12 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 	if (window_start == 0) window_start = now;
 	if (now - window_start >= 5000 && Common::EnvRead::PerfLines()) {
 		window_start = now;
-		std::fprintf(stderr, "PERF ring_dead faults=%llu freed=%llu partial=%llu dropped_KiB=%llu\n",
+		std::fprintf(stderr, "PERF ring_dead faults=%llu freed=%llu partial=%llu dropped_KiB=%llu caller_skips=%llu\n",
 		             static_cast<unsigned long long>(g_ring_dead.faults.exchange(0)),
 		             static_cast<unsigned long long>(g_ring_dead.freed.exchange(0)),
 		             static_cast<unsigned long long>(g_ring_dead.partial.exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.dropped_bytes.exchange(0) / 1024u));
+		             static_cast<unsigned long long>(g_ring_dead.dropped_bytes.exchange(0) / 1024u),
+		             static_cast<unsigned long long>(g_ring_dead.caller_skips.exchange(0)));
 	}
 	return !live;
 }
