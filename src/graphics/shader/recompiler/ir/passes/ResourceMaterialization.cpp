@@ -13,6 +13,11 @@
 #include "graphics/shader/shaderBindings.h"
 
 #include <atomic>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
 #include <algorithm>
 #include <span>
 #include <chrono>
@@ -2195,6 +2200,20 @@ thread_local uint32_t                    t_ahead_epoch = 1;
 // refusal marks the thread's call as failed and zero-fills the destination; the call goes on with zeros until
 // it returns (its result is discarded), so the readers need no way to unwind it. Returns whether the read is
 // good. Only runs inside an ahead call (t_ahead.log is set).
+// KYTY_TRACE_CHUNK_LEAD (N2.0b): the parts of an ahead materialization (ResourceMaterialization.h t_mat_parts).
+static thread_local uint64_t t_mat_last = 0;
+static thread_local bool     t_mat_on   = false;
+static void MatBegin() {
+	t_mat_on = g_mat_trace.load(std::memory_order_relaxed) && t_ahead.log != nullptr;
+	if (t_mat_on) t_mat_last = __rdtsc();
+}
+static void MatMark(MatPart part) {
+	if (!t_mat_on) return;
+	const uint64_t now = __rdtsc();
+	t_mat_parts[part] += now - t_mat_last;
+	t_mat_last = now;
+}
+
 bool AheadRead(ReadLog::Kind kind, uint64_t address, void* data, uint64_t size) {
 	auto&      state = t_ahead;
 	auto&      log   = *state.log;
@@ -2241,12 +2260,22 @@ bool AheadRead(ReadLog::Kind kind, uint64_t address, void* data, uint64_t size) 
 		const auto& known = log.entries[seen.index];
 		if (known.address == address && known.size == size && known.kind == kind &&
 		    std::memcmp(log.bytes.data() + known.first, source, size) == 0) {
+			if (g_mat_trace.load(std::memory_order_relaxed)) { // KYTY_TRACE_CHUNK_LEAD (N2.0b)
+				t_mat_reads++;
+				t_mat_bytes += size;
+				t_mat_dedupe++;
+			}
 			return true;
 		}
 	}
 	seen = {t_ahead_epoch, static_cast<uint32_t>(log.entries.size())};
 	log.entries.push_back(entry);
 	log.bytes.insert(log.bytes.end(), source, source + size);
+	if (g_mat_trace.load(std::memory_order_relaxed)) { // KYTY_TRACE_CHUNK_LEAD (N2.0b)
+		t_mat_reads++;
+		t_mat_bytes += size;
+		t_mat_logged++;
+	}
 	return true;
 }
 
@@ -2401,6 +2430,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	     runtime.read_specialization_memory == nullptr)) {
 		return MaterializeFailAt(__LINE__);
 	}
+	MatBegin(); // KYTY_TRACE_CHUNK_LEAD (N2.0b)
 	if (RecordsNullShare()) program.ThreadScratch().null_share_kinds.assign(program.info.buffers.size(), 0u);
 	const bool capture_reads = program.capture_specialization_reads || !program.source_reads.empty();
 	auto& reads = snapshot.specialization_reads;
@@ -2448,10 +2478,12 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	IndirectEvaluator clean_indirect(clean, tape != nullptr ? &*tape_clean : nullptr);
 	// KYTY_PERF_SRT_GPU_WORDS: only the tape writes the address words the shader expects.
 	EXIT_IF(tape == nullptr && !program.info.srt_gpu_words.empty());
+	MatMark(MpSetup);
 	if (!(tape != nullptr ? tape_walker->RefreshFlatBuffer(program, snapshot.flattened_srt)
 	                      : walker->RefreshFlatBuffer(snapshot.flattened_srt))) {
 		return MaterializeFailAt(__LINE__);
 	}
+	MatMark(MpFlat);
 	const auto active = std::span<const uint8_t>(program.ThreadScratch().active_sources);
 	snapshot.uniform_fill = {};
 	snapshot.bindless_heaps.clear();
@@ -2468,6 +2500,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		snapshot.uniform_fill = fill.fill;
 		snapshot.uniform_fill.value = stored[0];
 	}
+	MatMark(MpFill);
 	const auto evaluate = [&](uint32_t source, DescriptorValue& value, bool written = false) {
 		if (source >= program.descriptor_sources.size()) {
 			return MaterializeFailAt(__LINE__);
@@ -2600,6 +2633,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			}
 		}
 	}
+	MatMark(MpBuffers);
 	snapshot.images.resize(program.info.images.size());
 	specialization.images.resize(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
@@ -2648,6 +2682,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			}
 		}
 	}
+	MatMark(MpImages);
 	snapshot.samplers.resize(program.info.samplers.size());
 	specialization.samplers.assign(program.info.samplers.size(), {});
 	for (uint32_t i = 0; i < program.info.samplers.size(); ++i) {
@@ -2690,11 +2725,15 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			}
 		}
 	}
+	MatMark(MpSamplers);
 	if (!MaterializeIndirectRanges(program, observed, clean_indirect, active, snapshot)) {
 		return MaterializeFailAt(__LINE__);
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	return BuildResourceSpecialization(program, snapshot, specialization);
+	MatMark(MpRanges);
+	const bool specialized = BuildResourceSpecialization(program, snapshot, specialization);
+	MatMark(MpSpec);
+	return specialized;
 }
 
 // KYTY_FIX_SRT_TAPE_VERIFY=1: materializes with the tape into scratch copies, then with SrtWalker

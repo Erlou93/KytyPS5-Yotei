@@ -289,6 +289,15 @@ uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value);
 // root's view of a heap.
 ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind);
 
+// KYTY_TRACE_CHUNK_LEAD (project 15 N2.0b, measurement only): the parts of an ahead materialization in tsc ticks (setup,
+// the flat SRT, the uniform fill, the buffer, image and sampler loops, the indirect ranges, the specialization) and the
+// ahead reads (reads, bytes, entries logged, reads the log already held). Thread state of the resolving thread, reset
+// by its caller per operation; g_mat_trace is set once when the trace is on.
+enum MatPart : uint32_t { MpSetup, MpFlat, MpFill, MpBuffers, MpImages, MpSamplers, MpRanges, MpSpec, MpCount };
+inline std::atomic<bool>     g_mat_trace {false};
+inline thread_local uint64_t t_mat_parts[MpCount] {};
+inline thread_local uint64_t t_mat_reads = 0, t_mat_bytes = 0, t_mat_logged = 0, t_mat_dedupe = 0;
+
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_RESOURCEMATERIALIZATION_H_ */

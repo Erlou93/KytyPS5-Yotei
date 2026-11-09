@@ -2,6 +2,8 @@
 
 #include "graphics/guest_gpu/command_processor/passCensus.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
+#include "graphics/host_gpu/renderer/perfCounters.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <algorithm>
 #include <array>
@@ -111,6 +113,9 @@ struct ExecState {
 	std::array<uint64_t, Causes>                       other_events {}, other_ns {};
 	std::array<uint64_t, LeadBuckets>                  res_all {};
 	uint64_t                                           ops_seen = 0;
+	// N2.0b: the adoption checks per project pass (3: other): ticks, checks, log entries, bytes.
+	int                                                last_pass = -1;
+	std::array<std::array<uint64_t, 4>, Passes + 1>    adopt {};
 	Clock                                              clock;
 	std::chrono::steady_clock::time_point              window = std::chrono::steady_clock::now();
 	uint32_t                                           window_frame = 0;
@@ -207,6 +212,15 @@ void Report(ExecState& s) {
 	std::fprintf(stderr, "PERF resolved_depth samples=%llu all%%[0|1-15|16-63|64-127|128-255|256-511|512-1023|1024+]=%s\n",
 	             static_cast<unsigned long long>(all), Hist(s.res_all.data(), LeadBuckets, all).c_str());
 	s.res_all = {};
+	for (int i = 0; i <= Passes; i++) {
+		const auto& a = s.adopt[static_cast<size_t>(i)];
+		if (a[1] == 0) continue;
+		std::fprintf(stderr, "PERF adopt_reads pass=\"%s\" checks/frame=%.0f ms/frame=%.3f us/check=%.2f entries/check=%.1f bytes/check=%.0f\n",
+		             i < Passes && i < static_cast<int>(names.size()) ? names[static_cast<size_t>(i)].c_str() : "other", a[1] / f,
+		             static_cast<double>(a[0]) / s.clock.Rate() / 1e6 / f, static_cast<double>(a[0]) / s.clock.Rate() / 1e3 / static_cast<double>(a[1]),
+		             static_cast<double>(a[2]) / static_cast<double>(a[1]), static_cast<double>(a[3]) / static_cast<double>(a[1]));
+	}
+	s.adopt = {};
 	const char* const kinds[3] = {"ctx", "ucfg", "sh"};
 	for (int q = 0; q < 2; q++) {
 		std::string text;
@@ -230,6 +244,8 @@ struct ResolveState {
 		uint64_t draw_ticks = 0, draws = 0, dispatch_ticks = 0, dispatches = 0, resolved = 0;
 		std::array<uint64_t, RpCount> parts {}; // N2.0
 		uint64_t                      buffers = 0;
+		std::array<uint64_t, ShaderRecompiler::IR::MpCount> mat {}; // N2.0b
+		uint64_t                      reads = 0, read_bytes = 0, logged = 0, dedupe = 0;
 	};
 	std::vector<Pass>                     pass;
 	uint64_t                              ops = 0;
@@ -315,7 +331,28 @@ void NoteOperation(int pass, uint64_t sequence, size_t raw, size_t resolved, uin
 		}
 	}
 	s.prev_pass = pass;
+	s.last_pass = pass;
 	Report(s);
+}
+
+void NoteAdopt(uint64_t ticks, size_t entries, size_t bytes) {
+	auto& s = Exec();
+	auto& a = s.adopt[static_cast<size_t>(s.last_pass >= 0 ? s.last_pass : Passes)];
+	a[0] += ticks;
+	a[1]++;
+	a[2] += entries;
+	a[3] += bytes;
+}
+
+void ResolveThreadStart() {
+	ShaderRecompiler::IR::g_mat_trace.store(true, std::memory_order_relaxed);
+	PerfSamplerStartForResolveThread();
+}
+
+void ResolveOperationStart() {
+	using namespace ShaderRecompiler::IR;
+	std::fill(std::begin(t_mat_parts), std::end(t_mat_parts), uint64_t {0});
+	t_mat_reads = t_mat_bytes = t_mat_logged = t_mat_dedupe = 0;
 }
 
 void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
@@ -332,6 +369,14 @@ void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
 	if (resolved) p.resolved++;
 	for (uint32_t i = 0; i < RpCount; i++) p.parts[i] += t_parts[i];
 	p.buffers += t_part_buffers;
+	{
+		using namespace ShaderRecompiler::IR;
+		for (uint32_t i = 0; i < MpCount; i++) p.mat[i] += t_mat_parts[i];
+		p.reads += t_mat_reads;
+		p.read_bytes += t_mat_bytes;
+		p.logged += t_mat_logged;
+		p.dedupe += t_mat_dedupe;
+	}
 	if ((++s.ops & 1023u) != 0) return;
 	const auto now = std::chrono::steady_clock::now();
 	if (now - s.window < std::chrono::seconds(5)) return;
@@ -365,6 +410,17 @@ void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
 		              per_op(q.parts[RpMaterialize]), per_op(q.parts[RpSources]), per_op(q.parts[RpClamp]), per_op(q.parts[RpPermutation]),
 		              ops != 0 ? static_cast<double>(q.buffers) / static_cast<double>(ops) : 0.0);
 		top += buf;
+		if (i < 4) {
+			// N2.0b: the materialization's parts and its ahead reads, per operation.
+			using namespace ShaderRecompiler::IR;
+			const auto pc = [&](uint64_t v) { return ops != 0 ? static_cast<double>(v) / static_cast<double>(ops) : 0.0; };
+			std::fprintf(stderr,
+			             "PERF resolve_mat pass=\"%s\" us/op setup|flat|fill|buffers|images|samplers|ranges|spec=%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f "
+			             "reads/op=%.1f bytes/op=%.0f logged/op=%.1f dedupe/op=%.1f\n",
+			             PassCensus::PassName(order[i].second).c_str(), per_op(q.mat[MpSetup]), per_op(q.mat[MpFlat]), per_op(q.mat[MpFill]),
+			             per_op(q.mat[MpBuffers]), per_op(q.mat[MpImages]), per_op(q.mat[MpSamplers]), per_op(q.mat[MpRanges]),
+			             per_op(q.mat[MpSpec]), pc(q.reads), pc(q.read_bytes), pc(q.logged), pc(q.dedupe));
+		}
 	}
 	const auto ops = total.draws + total.dispatches;
 	std::fprintf(stderr,

@@ -35,6 +35,16 @@ void NoteIdle(uint64_t ns, int cause, bool commands);
 // Resolve thread, every draw or dispatch it resolved: its marker pass, whether a dispatch, the tsc ticks, whether resolved.
 void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved);
 
+// Execution thread (N2.0b): one check of a resolution's reads at its adoption (ResolvedReadsHold), for the operation
+// NoteOperation saw last: its ticks, log entries and bytes.
+void NoteAdopt(uint64_t ticks, size_t entries, size_t bytes);
+
+// Resolve thread start: the N2.0b materialization parts (ResourceMaterialization.h g_mat_trace) and, with
+// KYTY_TRACE_PERF=1 KYTY_TRACE_PERF_SAMPLE=resolve, the sampler of the resolve thread (PERF_SAMPLE_RESOLVE lines).
+void ResolveThreadStart();
+// Resolve thread, before each operation: its materialization counters reset.
+void ResolveOperationStart();
+
 // Command processor thread: a snapshot slot taken / waited for (kind 0 context, 1 user config, 2 shaders).
 void NoteSnapshotTaken(bool compute, int kind);
 void NoteSnapshotWait(bool compute, int kind, uint64_t ns);

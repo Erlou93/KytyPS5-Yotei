@@ -534,6 +534,13 @@ void PerfSamplerStartForCurrentThread() {
 	StartThreadSampler("PERF_SAMPLE");
 }
 
+// KYTY_TRACE_PERF=1 and KYTY_TRACE_PERF_SAMPLE=resolve (project 15 N2.0b): samples the resolve thread instead.
+void PerfSamplerStartForResolveThread() {
+	if (!PerfEnabled()) return;
+	const char* flag = std::getenv("KYTY_TRACE_PERF_SAMPLE");
+	if (flag != nullptr && std::strcmp(flag, "resolve") == 0) StartThreadSampler("PERF_SAMPLE_RESOLVE");
+}
+
 
 
 // KYTY_TRACE_PERF: every report window, on the GPU thread, a fixed dependent integer loop (its time shows a slower core:
@@ -614,6 +621,7 @@ void PerfReportTcLockPcs() {
 #else
 
 void PerfSamplerStartForCurrentThread() {}
+void PerfSamplerStartForResolveThread() {}
 void PerfReportTcLockPcs() {}
 void CpuProbeReport() {}
 void PerfDumpThreadStack(void* /*thread_handle*/, const char* /*label*/) {}

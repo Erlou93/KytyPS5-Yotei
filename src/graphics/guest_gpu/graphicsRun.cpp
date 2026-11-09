@@ -1041,6 +1041,7 @@ static const char* IndirectDrawLayout(const IndirectDrawRegisters& registers, Sh
 void GuestGpu::ResolveThread() {
 	KYTY_PROFILER_THREAD("Thread_GpuResolve");
 	Config::ConfigureGpuStageThread(Config::GpuStageThread::Resolve);
+	if (ChunkLead::On()) ChunkLead::ResolveThreadStart(); // KYTY_TRACE_CHUNK_LEAD (N2.0b)
 	auto& executor = m_renderer.GetRenderExecutor();
 	for (;;) {
 		auto operation = m_operations.TryPop();
@@ -1059,6 +1060,7 @@ void GuestGpu::ResolveThread() {
 		if (lead) {
 			std::fill(std::begin(ChunkLead::t_parts), std::end(ChunkLead::t_parts), uint64_t {0}); // N2.0: this operation's parts
 			ChunkLead::t_part_buffers = 0;
+			ChunkLead::ResolveOperationStart();
 		}
 		const uint64_t lead_t0 = lead ? ChunkLead::Tsc() : 0;
 		switch (operation->kind) {

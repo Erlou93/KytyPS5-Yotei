@@ -71,6 +71,8 @@ inline void PerfRecordRead(uint64_t vaddr, uint64_t size) {
 
 // KYTY_TRACE_PERF_SAMPLE=1: starts a sampling profiler for the calling thread (perfSampler.cpp).
 void PerfSamplerStartForCurrentThread();
+// KYTY_TRACE_PERF_SAMPLE=resolve (project 15 N2.0b): the resolve thread's sampler (PERF_SAMPLE_RESOLVE lines).
+void PerfSamplerStartForResolveThread();
 // Diagnostics (a stuck wait, perfSampler.cpp): STACK_DUMP lines of another thread (a HANDLE) and of the calling thread.
 void PerfDumpThreadStack(void* thread_handle, const char* label);
 void PerfDumpCurrentStack(const char* label);
