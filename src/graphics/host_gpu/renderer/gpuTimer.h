@@ -29,6 +29,8 @@ namespace GpuTimer {
 // Command buffer lifecycle, called by CommandScheduler on the GPU thread.
 void BeginCommandBuffer(CommandScheduler& scheduler, vk::CommandBuffer buffer);
 void EndCommandBuffer(vk::CommandBuffer buffer);
+// KYTY_TRACE_GPU_TIMELINE: the guest queue of the operation the GPU thread executes (0 gfx, else its interrupt/queue id).
+inline thread_local uint32_t t_guest_queue = 0;
 void Submitted(vk::CommandBuffer buffer, uint64_t tick);
 // KYTY_TRACE_GPU_TIMELINE (CPU side): the recording worker hands command buffer `tick` to vkQueueSubmit now.
 void NoteQueueSubmit(uint64_t tick);

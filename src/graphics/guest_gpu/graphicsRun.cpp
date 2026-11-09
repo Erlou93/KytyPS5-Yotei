@@ -1391,6 +1391,7 @@ void CommandProcessor::PublishDirtyRegions() {
 
 void CommandProcessor::Execute(GpuOperation& operation) {
 	EXIT_IF(operation.processor != this);
+	GpuTimer::t_guest_queue = static_cast<uint32_t>(m_interrupt_event_id); // KYTY_TRACE_GPU_TIMELINE
 	if (g_gpu_stage_stats) {
 		g_stage_stats.operations.fetch_add(1, std::memory_order_relaxed);
 		const auto kind = operation.kind;
