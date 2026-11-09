@@ -1958,14 +1958,19 @@ bool LongPrepPartsOn() {
 }
 
 // KYTY_CHECK_CHUNKS=2 (project 15, the oracle v2 of the parallel translation): a chunk member (a draw or a direct dispatch
-// of the project's passes) is prepared twice; the print of the first preparation is compared with the print of the second,
-// which the commit uses. The print: the storage, GDS, LDS, vertex and index buffers binding by binding (the guest range
-// always; when both preparations took a cached or fixed buffer, its Vulkan buffer, offset and range; when both took the
-// stream ring, the bytes there; one of each is counted as mixed: which of them a preparation takes depends on what the
-// preparations before it uploaded), the images and samplers, the SRT (the flat words, the bindless patches, the GPU-read
-// words as the shader reaches them), the shader data, the bindless images. Not the pipeline: it is looked up once, before
-// both preparations. KYTY_CHECK_CHUNKS_FAULT=N (with =2, diagnostic): every N-th member gets one error in the data of its
-// first preparation, the fields in turn; the oracle must report every one (PERF chunk_check fault[...]).
+// of the project's passes) is prepared twice, the first time into bindings of its own (ChunkScratchBindings, as a worker
+// would), the second time into the ones the commit uses; the two prints are compared. The print: the storage, GDS, LDS,
+// vertex and index buffers binding by binding (the guest range always; when both preparations took a cached or fixed
+// buffer, its Vulkan buffer, offset and range; when both took the stream ring, its bytes (a sample: the ring is
+// write-combined memory); one of each is counted as mixed: which of them a preparation takes depends on what the
+// preparations before it uploaded), the images (ids, views) and samplers, the SRT (the flat words, the bindless patches,
+// the GPU-read words as the shader reaches them), the shader data, the bindless images. Not the pipeline (looked up once,
+// before both preparations) and not the images' layouts (the commit sets them). A cached buffer that is no longer the one
+// registered for its guest range when the print is taken is marked stale: a binding the first preparation took before one
+// of its own later acquisitions replaced the buffer (merged it into a bigger one) is a class of its own (merged=), not a
+// difference; a stale binding of the second preparation (stale_commit=) is one the commit would bind.
+// KYTY_CHECK_CHUNKS_FAULT=N (with =2, diagnostic): every N-th member gets one error in its first preparation's data, the
+// fields in turn; the oracle must report every one (PERF chunk_check fault[...]).
 namespace {
 enum ChunkField : uint32_t { CfBuffers, CfImages, CfSrt, CfData, CfBindless, CfVertex, CfCount };
 const char* const ChunkFieldNames[CfCount] = {"buffers", "images", "srt", "data", "bindless", "vertex"};
@@ -1982,15 +1987,21 @@ struct ChunkBufRec {
 	uint32_t kind  = 0;         // 0: a cached or fixed buffer (its Vulkan buffer, offset, range), 1: the stream ring (bytes)
 	uint64_t address = 0, size = 0; // the guest range (0 for GDS and LDS)
 	uint64_t buffer = 0, offset = 0, range = 0, bytes = 0;
-	[[nodiscard]] bool operator==(const ChunkBufRec&) const = default;
+	bool     stale = false; // a cached buffer that is no longer the one registered for its guest range
+	[[nodiscard]] bool Same(const ChunkBufRec& o) const {
+		return field == o.field && kind == o.kind && address == o.address && size == o.size && buffer == o.buffer &&
+		       offset == o.offset && range == o.range && bytes == o.bytes;
+	}
 };
 struct ChunkPrint {
 	std::array<uint64_t, CfCount> f {};
 	std::vector<ChunkBufRec>      bufs;
+	std::vector<uint64_t>         bindless; // the bindless images (generation << 32 | index), stage by stage
 };
 struct ChunkCheckState {
 	ChunkPrint                    first, second;
 	uint64_t                      draws = 0, dispatches = 0, bad = 0, mixed = 0, members = 0;
+	uint64_t                      merged = 0, stale_commit = 0;
 	std::array<uint64_t, CfCount> mismatches {}, injected {}, detected {}, injected_mixed {};
 	uint32_t                      fault_turn  = 0;
 	int                           fault_field = -1;       // the field of this member's injected error (-1: none)
@@ -2013,9 +2024,11 @@ uint64_t ChunkFaultEvery() {
 	return every;
 }
 
-void ChunkPrintOf(StreamBuffer& stream, ChunkPrint& p, std::span<PreparedBindings* const> stages, const DrawPlan* plan) {
+void ChunkPrintOf(BufferCache& cache, ChunkPrint& p, std::span<PreparedBindings* const> stages, const DrawPlan* plan) {
 	p.f = {};
 	p.bufs.clear();
+	p.bindless.clear();
+	auto&      stream        = cache.GetUtilityBuffer(MemoryUsage::Stream);
 	const auto stream_handle = stream.Handle();
 	const auto mapped        = stream.Mapped();
 	const auto add = [&](uint32_t field, uint64_t address, uint64_t size, vk::Buffer buffer, uint64_t offset, uint64_t range) {
@@ -2026,11 +2039,21 @@ void ChunkPrintOf(StreamBuffer& stream, ChunkPrint& p, std::span<PreparedBinding
 		if (buffer && buffer == stream_handle) {
 			r.kind  = 1;
 			r.range = range;
-			r.bytes = range != VK_WHOLE_SIZE && offset + range <= mapped.size() ? FpBytes(mapped.data() + offset, range) : ~offset;
+			if (range != VK_WHOLE_SIZE && offset + range <= mapped.size()) {
+				// The first and the last 64 bytes (reads of write-combined memory are slow).
+				const uint64_t head = std::min<uint64_t>(range, 64u);
+				r.bytes = FpMix(FpBytes(mapped.data() + offset, head), FpBytes(mapped.data() + offset + range - head, head));
+			} else {
+				r.bytes = ~offset;
+			}
 		} else {
 			r.buffer = reinterpret_cast<uint64_t>(static_cast<VkBuffer>(buffer));
 			r.offset = offset;
 			r.range  = range;
+			if (address != 0 && size != 0 && buffer) {
+				const auto id = cache.LookupBuffer(address, size);
+				r.stale       = id && cache.GetBuffer(id).Handle() != buffer;
+			}
 		}
 		p.bufs.push_back(r);
 	};
@@ -2059,7 +2082,10 @@ void ChunkPrintOf(StreamBuffer& stream, ChunkPrint& p, std::span<PreparedBinding
 		f[CfSrt]  = FpMix(f[CfSrt], st.gpu_words_key);
 		f[CfData] = FpMix(f[CfData], FpBytes(reinterpret_cast<const uint8_t*>(st.shader_data.data()), st.shader_data.size() * sizeof(uint32_t)));
 		f[CfBindless] = FpMix(f[CfBindless], st.bindless_images.size());
-		for (const auto id: st.bindless_images) f[CfBindless] = FpMix(f[CfBindless], (uint64_t {id.generation} << 32u) | id.index);
+		for (const auto id: st.bindless_images) {
+			p.bindless.push_back((uint64_t {id.generation} << 32u) | id.index);
+			f[CfBindless] = FpMix(f[CfBindless], p.bindless.back());
+		}
 	}
 	if (plan != nullptr && !plan->mesh_active) {
 		const auto& vin = plan->state->vertex_info[0];
@@ -2075,8 +2101,25 @@ void ChunkPrintOf(StreamBuffer& stream, ChunkPrint& p, std::span<PreparedBinding
 	}
 }
 
-// KYTY_CHECK_CHUNKS_FAULT: one error in the first preparation's data (the second preparation sets every one of these
-// fields again, so the commit does not see it): the next field in turn this member has data for.
+// The images fault: two image views (or two samplers) of the stage swapped; false when the stage has no two distinct ones.
+bool ChunkSwapImages(PreparedBindings& st) {
+	for (size_t j = 1; j < st.images.size(); j++) {
+		if (st.images[j].image_view != st.images[0].image_view) {
+			std::swap(st.images[0].image_view, st.images[j].image_view);
+			return true;
+		}
+	}
+	for (size_t j = 1; j < st.samplers.size(); j++) {
+		if (st.samplers[j] != st.samplers[0]) {
+			std::swap(st.samplers[0], st.samplers[j]);
+			return true;
+		}
+	}
+	return false;
+}
+
+// KYTY_CHECK_CHUNKS_FAULT: one error in the first preparation's data (its own bindings; the commit uses the second's):
+// the next field in turn this member has data for.
 void ChunkInjectFault(ChunkCheckState& s, std::span<PreparedBindings* const> stages, DrawPlan* plan) {
 	size_t stage_records = 0;
 	for (const auto* st: stages) stage_records += st->buffer_sources.size() + 2u;
@@ -2088,9 +2131,7 @@ void ChunkInjectFault(ChunkCheckState& s, std::span<PreparedBindings* const> sta
 			if (field == CfBuffers && !st.buffer_sources.empty() && st.buffers[0].buffer) {
 				st.buffers[0].offset += 256u;
 				s.fault_rec = rec;
-			} else if (field == CfImages && !st.images.empty()) {
-				auto& layout = st.images[0].layout;
-				layout       = layout == vk::ImageLayout::eGeneral ? vk::ImageLayout::eShaderReadOnlyOptimal : vk::ImageLayout::eGeneral;
+			} else if (field == CfImages && ChunkSwapImages(st)) {
 			} else if (field == CfSrt && !st.bindless_patches.empty()) {
 				st.bindless_patches[0].entries += 1u;
 			} else if (field == CfData && !st.shader_data.empty()) {
@@ -2121,20 +2162,37 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 	const auto& a           = s.first.bufs;
 	const auto& b           = s.second.bufs;
 	bool        fault_mixed = false;
+	size_t      commit_rec  = SIZE_MAX; // the first binding the commit takes stale
 	if (a.size() != b.size()) {
 		bad[CfBuffers] = true;
 	} else {
 		for (size_t i = 0; i < a.size(); i++) {
+			if (b[i].stale) {
+				s.stale_commit++;
+				if (commit_rec == SIZE_MAX) commit_rec = i;
+			}
 			const bool same_range = a[i].field == b[i].field && a[i].address == b[i].address && a[i].size == b[i].size;
 			if (same_range && a[i].kind != b[i].kind) {
 				s.mixed++;
 				if (i == s.fault_rec) fault_mixed = true;
 				continue;
 			}
-			if (a[i] == b[i]) continue;
+			if (a[i].Same(b[i])) continue;
+			if (same_range && a[i].stale && !b[i].stale && i != s.fault_rec) {
+				s.merged++; // the first preparation's own later acquisition replaced this binding's buffer
+				continue;
+			}
 			bad[a[i].field] = true;
 			if (bad_rec[a[i].field] == SIZE_MAX && i != s.fault_rec) bad_rec[a[i].field] = i;
 		}
+	}
+	if (commit_rec != SIZE_MAX && s.logged < 40u) {
+		s.logged++;
+		const auto& r = b[commit_rec];
+		std::fprintf(stderr, "CHUNK_CHECK stale_commit op=%s frame=%u rec=%zu/%zu field=%s guest=%llx+%llx buffer=%llx offset=%llx marker=[%s]\n",
+		             dispatch ? "dispatch" : "draw", DebugPresentCount().load(), commit_rec, b.size(), ChunkFieldNames[r.field],
+		             static_cast<unsigned long long>(r.address), static_cast<unsigned long long>(r.size),
+		             static_cast<unsigned long long>(r.buffer), static_cast<unsigned long long>(r.offset), DebugMarkerPath().c_str());
 	}
 	if (s.fault_field >= 0) {
 		const auto f = static_cast<uint32_t>(s.fault_field);
@@ -2169,6 +2227,14 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 			             static_cast<unsigned long long>(a[r].range), static_cast<unsigned long long>(b[r].range));
 		} else if (i == CfBuffers && a.size() != b.size()) {
 			std::fprintf(stderr, " records=%zu/%zu", a.size(), b.size());
+		} else if (i == CfBindless) {
+			const auto& x = s.first.bindless;
+			const auto& y = s.second.bindless;
+			size_t      k = 0;
+			while (k < x.size() && k < y.size() && x[k] == y[k]) k++;
+			std::fprintf(stderr, " images=%zu/%zu first_diff=%zu id=%llx/%llx", x.size(), y.size(), k,
+			             static_cast<unsigned long long>(k < x.size() ? x[k] : ~0ull),
+			             static_cast<unsigned long long>(k < y.size() ? y[k] : ~0ull));
 		}
 		std::fprintf(stderr, "\n");
 	}
@@ -2187,24 +2253,30 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 			        std::to_string(s.detected[i]) + "/" + std::to_string(s.injected_mixed[i]);
 		}
 	}
-	std::fprintf(stderr, "PERF chunk_check draws=%llu dispatches=%llu bad=%llu mixed=%llu mismatches[%s]\n",
+	std::fprintf(stderr, "PERF chunk_check draws=%llu dispatches=%llu bad=%llu mixed=%llu merged=%llu stale_commit=%llu mismatches[%s]\n",
 	             static_cast<unsigned long long>(s.draws), static_cast<unsigned long long>(s.dispatches),
-	             static_cast<unsigned long long>(s.bad), static_cast<unsigned long long>(s.mixed), text.c_str());
+	             static_cast<unsigned long long>(s.bad), static_cast<unsigned long long>(s.mixed),
+	             static_cast<unsigned long long>(s.merged), static_cast<unsigned long long>(s.stale_commit), text.c_str());
 	s.window = now;
 }
 } // namespace
+
+PreparedBindings& RenderExecutor::ChunkScratchBindings(uint32_t index) {
+	static std::array<PreparedBindings, 5> scratch; // execution thread
+	return scratch.at(index);
+}
 
 void RenderExecutor::ChunkCheckFirst(std::span<PreparedBindings* const> stages, DrawPlan* plan) {
 	auto& s       = g_chunk_check;
 	s.fault_field = -1;
 	s.fault_rec   = SIZE_MAX;
 	if (const uint64_t every = ChunkFaultEvery(); every != 0 && ++s.members % every == 0) ChunkInjectFault(s, stages, plan);
-	ChunkPrintOf(m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream), s.first, stages, plan);
+	ChunkPrintOf(m_context.GetBufferCache(), s.first, stages, plan);
 }
 
 void RenderExecutor::ChunkCheckSecond(std::span<PreparedBindings* const> stages, const DrawPlan* plan, bool dispatch) {
 	auto& s = g_chunk_check;
-	ChunkPrintOf(m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream), s.second, stages, plan);
+	ChunkPrintOf(m_context.GetBufferCache(), s.second, stages, plan);
 	ChunkCompare(s, dispatch, stages);
 }
 
@@ -2334,18 +2406,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	plan.indirect_args     = {};
 	plan.indirect_count    = {};
 	if (CleanDraws::On()) C0::Plan(plan, buffer, state, vertex_stages, &pipeline); // KYTY_TRACE_CLEAN_DRAWS
-	// KYTY_CHECK_CHUNKS=2 (project 15, the oracle v2): a chunk-member draw is prepared once more before its preparation
-	// below; the two preparations' prints must be equal (the commit uses the second).
+	// KYTY_CHECK_CHUNKS=2 (project 15, the oracle v2): a chunk-member draw is prepared once more, into bindings of its own,
+	// before its preparation below; the two preparations' prints must be equal (the commit uses the second).
 	const bool chunk_check = ChunkCensus::CheckOn() && ChunkCensus::t_member && !mesh_active;
 	if (chunk_check) {
 		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
-			plan.descriptor_stages[plan.stage_count++] = &bindings.vertex[i];
+			PrepareBindings(state.vertex_info[i].stage, ChunkScratchBindings(i));
+			plan.descriptor_stages[plan.stage_count++] = &ChunkScratchBindings(i);
 		}
 		if (state.ps_active) {
-			if (!bindings.pixel) bindings.pixel.emplace();
-			PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
-			plan.descriptor_stages[plan.stage_count++] = &*bindings.pixel;
+			PrepareBindings(state.ps_input_info.stage, ChunkScratchBindings(3));
+			plan.descriptor_stages[plan.stage_count++] = &ChunkScratchBindings(3);
 		}
 		PrepareGraphicsBindings(std::span {plan.descriptor_stages.data(), plan.stage_count},
 		                        std::span {state.color_info, state.color_count});

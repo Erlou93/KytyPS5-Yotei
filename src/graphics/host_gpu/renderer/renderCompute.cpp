@@ -489,16 +489,19 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// the two preparations' prints must be equal (renderDraw.cpp ChunkCheckFirst; the commit uses the second).
 	const bool chunk_check = ChunkCensus::CheckOn() && ChunkCensus::t_member;
 	for (uint32_t preparation = chunk_check ? 0u : 1u; preparation < 2u; preparation++) {
+		// The first preparation (the oracle's) into bindings of its own.
+		auto&             prepared       = preparation == 0u ? ChunkScratchBindings(4) : bindings;
+		PreparedBindings* prepared_stage = &prepared;
 		sub_timer.emplace(DispatchSub::PrepareBindings);
-		PrepareBindings(input_info.stage, bindings);
+		PrepareBindings(input_info.stage, prepared);
 		sub_timer.reset();
 		if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
 			std::copy(std::begin(input_info.dispatch_threads_num), std::end(input_info.dispatch_threads_num),
-			          bindings.shader_data.begin() + program.bindings.dispatch_thread_dword);
+			          prepared.shader_data.begin() + program.bindings.dispatch_thread_dword);
 		}
 		census_timer.Mark(4);
 		sub_timer.emplace(DispatchSub::FindBuffers);
-		FindBuffers(std::span {&descriptor_stage, 1u});
+		FindBuffers(std::span {&prepared_stage, 1u});
 		sub_timer.emplace(DispatchSub::PrepareBda);
 		if (program.info.uses_dma) {
 			m_context.PrepareBda();
@@ -507,13 +510,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		if (program.info.uses_image_heap) {
 			m_context.GetImageHeap().Rebind(*this);
 		}
-		RebindImages(bindings);
+		RebindImages(prepared);
 		sub_timer.emplace(DispatchSub::SharedMemory);
-		BindSharedMemory(m_context, input_info, bindings);
+		BindSharedMemory(m_context, input_info, prepared);
 		sub_timer.emplace(DispatchSub::RebindBuffers);
-		RebindBuffers(bindings);
+		RebindBuffers(prepared);
 		sub_timer.reset();
-		if (preparation == 0u) ChunkCheckFirst(std::span {&descriptor_stage, 1u}, nullptr);
+		if (preparation == 0u) ChunkCheckFirst(std::span {&prepared_stage, 1u}, nullptr);
 	}
 	if (chunk_check) ChunkCheckSecond(std::span {&descriptor_stage, 1u}, nullptr, true);
 	census_timer.Mark(5);

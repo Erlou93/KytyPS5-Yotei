@@ -436,6 +436,8 @@ private:
 	// compares the second's with it (PERF chunk_check). `plan`: the draw's (vertex and index buffers), null for a dispatch.
 	void ChunkCheckFirst(std::span<PreparedBindings* const> stages, DrawPlan* plan);
 	void ChunkCheckSecond(std::span<PreparedBindings* const> stages, const DrawPlan* plan, bool dispatch);
+	// The first preparation's own bindings: 0..2 the vertex stages, 3 the pixel stage, 4 a dispatch.
+	[[nodiscard]] static PreparedBindings& ChunkScratchBindings(uint32_t index);
 	// The steps the draw entries share. DrawEntryStart: DrawIndex and DrawAuto.
 	// ColorOperationInstead: a metadata, copy or resolve operation took the place of the draw (true: it ends here).
 	void DrawEntryStart(CommandBuffer& buffer);
