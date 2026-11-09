@@ -110,21 +110,6 @@ void ClassifySrtReads(SrtTape& tape) {
 	tape.cpu_needed = ClassifySrtNodes(tape);
 }
 
-// KYTY_PERF_SRT_GPU_WORDS: "all", or a list of 16-digit hashes; unset or "0" off.
-bool SrtGpuWordsRequested(uint64_t hash) {
-	static const std::string list = [] {
-		const char* value = std::getenv("KYTY_PERF_SRT_GPU_WORDS");
-		std::string v     = value != nullptr ? std::string(value) : std::string();
-		if (!v.empty() && v != "0") std::fprintf(stderr, "PERF_SRT_GPU_WORDS %s\n", v.c_str());
-		return v == "0" ? std::string() : v;
-	}();
-	if (list.empty()) return false;
-	if (list == "1" || list == "all") return true;
-	char text[17];
-	std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
-	return list.find(text) != std::string::npos;
-}
-
 bool SrtGpuWordsVerify() {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_PERF_SRT_GPU_WORDS_VERIFY");
@@ -139,9 +124,10 @@ bool SrtGpuWordsVerify() {
 void PlanSrtGpuWords(Program& program) {
 	program.info.srt_gpu_words.clear();
 	program.info.srt_flat_words = 0;
-	// A shader that may write the words it reads (stores through unknown addresses) keeps the snapshot.
-	if (!SrtGpuWordsRequested(program.shader_hash) || !program.srt_plan_complete || program.srt_reads.empty() ||
-	    program.has_address_writes) {
+	// The only path (9.11, project 21 part 1: town walk 16.0 -> 19.6 fps in clean ABBA, VERIFY 7.2e12 checks with 0
+	// differences, cutscene +1.9%; KYTY_PERF_SRT_GPU_WORDS removed): the shader reads its shader-only SRT words from GPU
+	// memory. A shader that may write the words it reads (stores through unknown addresses) keeps the snapshot.
+	if (!program.srt_plan_complete || program.srt_reads.empty() || program.has_address_writes) {
 		return;
 	}
 	const ResourcePlan plan = ExtractResourcePlan(program);
