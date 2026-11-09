@@ -1327,6 +1327,10 @@ void BuildBufferSources(RenderContext& renderer, const ShaderRecompiler::IR::Res
 			ChunkLead::t_part_buffers++;
 			clamped = Libs::LibKernel::Memory::ClampRangeSizeAhead(address, size, &generation);
 		}
+		if (generation == Libs::LibKernel::Memory::ClampBusyGeneration) {
+			b.outcome = BufferOutcome::Busy; // a game thread changes the ranges: the execution thread looks it up itself
+			continue;
+		}
 		if (clamped != size) {
 			b.outcome = BufferOutcome::Clamped;
 			continue;
@@ -1345,7 +1349,12 @@ void BuildBufferSources(RenderContext& renderer, const ShaderRecompiler::IR::Res
 		g.range_size      = range.size;
 		g.written         = range.written;
 		uint64_t generation = 0;
-		if (Libs::LibKernel::Memory::ClampRangeSizeAhead(range.address, range.size, &generation) != range.size) {
+		const auto clamped_range = Libs::LibKernel::Memory::ClampRangeSizeAhead(range.address, range.size, &generation);
+		if (generation == Libs::LibKernel::Memory::ClampBusyGeneration) {
+			g.outcome = BufferOutcome::Busy; // as above
+			continue;
+		}
+		if (clamped_range != range.size) {
 			g.outcome = BufferOutcome::Clamped;
 			continue;
 		}

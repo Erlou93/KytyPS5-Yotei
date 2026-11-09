@@ -537,11 +537,11 @@ private:
 static bool g_test_fail_next_range_replace = false;
 #endif
 
-// KYTY_PERF_CLAMP_SEQLOCK (project 15): VirtualRanges::ClampRangeSizeAt's answers - lock-free (fast), under the lock
+// Project 15 (KYTY_CHECK_CLAMP_SEQLOCK=2: the check): VirtualRanges::ClampRangeSizeAt's answers - lock-free (fast), under the lock
 // (locked; after the map could not tell: unknown, a change in progress: in_change, a change meanwhile: changed) and, with
 // =2, the fast answers checked against the locked one and the different ones. PERF clamp_ahead every 8M calls.
 struct ClampAheadStats {
-	std::atomic<uint64_t> calls {0}, fast {0}, locked {0}, unknown {0}, in_change {0}, changed {0}, checked {0}, different {0};
+	std::atomic<uint64_t> calls {0}, fast {0}, locked {0}, unknown {0}, in_change {0}, changed {0}, checked {0}, different {0}, busy {0};
 	std::atomic<uint32_t> logged {0};
 };
 static ClampAheadStats g_clamp_ahead_stats;
@@ -550,9 +550,9 @@ static void            ClampAheadReport() {
 	auto&             st   = g_clamp_ahead_stats;
 	if (!perf || ((st.calls.fetch_add(1, std::memory_order_relaxed) + 1) & ((1u << 23u) - 1u)) != 0) return;
 	const auto get = [](const std::atomic<uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
-	std::fprintf(stderr, "PERF clamp_ahead calls=%llu fast=%llu locked=%llu unknown=%llu in_change=%llu changed=%llu checked=%llu different=%llu\n",
-	             get(st.calls), get(st.fast), get(st.locked), get(st.unknown), get(st.in_change), get(st.changed), get(st.checked),
-	             get(st.different));
+	std::fprintf(stderr, "PERF clamp_ahead calls=%llu fast=%llu locked=%llu busy=%llu unknown=%llu in_change=%llu changed=%llu checked=%llu different=%llu\n",
+	             get(st.calls), get(st.fast), get(st.locked), get(st.busy), get(st.unknown), get(st.in_change), get(st.changed),
+	             get(st.checked), get(st.different));
 }
 
 class VirtualRanges {
@@ -833,21 +833,22 @@ public:
 	}
 
 	// The resolve thread's lookups (any thread): ClampRangeSize's search, under the lock and without its memo, and the
-	// generation of the ranges it searched (every change bumps it under the lock first). KYTY_PERF_CLAMP_SEQLOCK (project
-	// 15, test switch, live A/B; =2: the check): first the page map's answer without the lock (ClampRangeSize's, which the
-	// execution thread takes today), valid when the generation was even and the same before and after it; =2 computes the
-	// locked answer too and compares when the generation did not change (PERF clamp_ahead).
+	// generation of the ranges it searched (every change bumps it under the lock first). Project 15 (the only path since
+	// 10.11: 612M answers checked, 0 different; live A/B in the noise): first the page map's answer without the lock
+	// (ClampRangeSize's, which the execution thread takes), valid when the generation was even and the same before and
+	// after it; else the search under the lock, but without waiting for it: a lock held by a change answers "busy"
+	// (generation ClampBusyGeneration; the execution thread then looks the buffer up itself). KYTY_CHECK_CLAMP_SEQLOCK=2
+	// (diagnostic): the locked answer too, compared when the generation did not change (PERF clamp_ahead).
 	uint64_t ClampRangeSizeAt(uint64_t virtual_addr, uint64_t size, uint64_t& generation) {
 		if (virtual_addr == 0 || size == 0 || size > UINT64_MAX - virtual_addr) {
 			return 0;
 		}
-		static const uint32_t fixed = [] {
-			const char* env = std::getenv("KYTY_PERF_CLAMP_SEQLOCK");
-			return env != nullptr ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : 0u;
+		static const uint32_t mode = [] {
+			const char* env = std::getenv("KYTY_CHECK_CLAMP_SEQLOCK");
+			return env != nullptr && env[0] == '2' ? 2u : 1u;
 		}();
-		const uint32_t mode = Common::LiveAb::Gate(Common::LiveAb::Switch::ClampSeqlock, fixed);
-		auto&          st   = g_clamp_ahead_stats;
-		if (mode != 0) {
+		auto& st = g_clamp_ahead_stats;
+		{
 			const uint64_t g = m_generation.load(std::memory_order_acquire);
 			if ((g & 1u) == 0) {
 				const auto run = m_committed.CommittedRun(virtual_addr, size);
@@ -881,11 +882,23 @@ public:
 		}
 		st.locked.fetch_add(1, std::memory_order_relaxed);
 		ClampAheadReport();
-		return ClampRangeSizeLockedAt(virtual_addr, size, generation);
+		if (!m_mutex.TryLock()) { // a change holds it (a game thread): do not wait for it
+			st.busy.fetch_add(1, std::memory_order_relaxed);
+			generation = ClampBusyGeneration;
+			return 0;
+		}
+		const auto answer = ClampRangeSizeSearch(virtual_addr, size, generation);
+		m_mutex.Unlock();
+		return answer;
 	}
 
 	uint64_t ClampRangeSizeLockedAt(uint64_t virtual_addr, uint64_t size, uint64_t& generation) {
 		Common::LockGuard lock(m_mutex);
+		return ClampRangeSizeSearch(virtual_addr, size, generation);
+	}
+
+	// m_mutex held.
+	uint64_t ClampRangeSizeSearch(uint64_t virtual_addr, uint64_t size, uint64_t& generation) {
 		generation = m_generation.load(std::memory_order_relaxed);
 		auto vma   = std::upper_bound(m_ranges.begin(), m_ranges.end(), virtual_addr,
 		                              [](uint64_t value, const Range& range) { return value < range.start; });
@@ -1178,7 +1191,7 @@ private:
 	}
 
 	// Caller holds m_mutex and changes m_ranges (and the page map) until the scope ends: cached committed runs no longer
-	// apply. Project 15 (the resolve helper without the lock, KYTY_PERF_CLAMP_SEQLOCK): the generation is odd while a
+	// apply. Project 15 (the resolve helper without the lock): the generation is odd while a
 	// change is in progress and even otherwise, so ClampRangeSizeAt's lock-free path can tell a stable map.
 	class ChangeScope {
 	public:

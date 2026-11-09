@@ -51,9 +51,6 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
-    // Project 15: whether the resolve helper's ClampRangeSizeAhead answers from the page map without the lock (read once per
-    // call; the answer is the locked one's, checked by =2).
-    {Switch::ClampSeqlock, "KYTY_PERF_CLAMP_SEQLOCK", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
