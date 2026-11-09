@@ -4586,14 +4586,46 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	m_gpu_word_patches.clear();
 	if (const auto& words = program.info.srt_gpu_words; !words.empty()) {
 		const auto& flat = snapshot.flattened_srt;
+		auto&       cache = m_context.GetBufferCache();
 		m_gpu_word_addresses.clear();
+		m_gpu_word_values.clear();
 		for (const auto& word: words) {
 			EXIT_IF(word.slot >= flat.size() || word.hi >= flat.size());
 			const uint64_t address = (uint64_t {flat[word.hi]} << 32u) | flat[word.slot];
-			if (address != 0u) m_gpu_word_addresses.emplace_back(address, static_cast<uint32_t>(&word - words.data()));
+			if (address == 0u) continue;
+			const auto index = static_cast<uint32_t>(&word - words.data());
+			if (cache.InDirectRange(address, sizeof(uint32_t))) {
+				// A word in a direct range (host memory; written by the CPU and the command processor, never waited for):
+				// read here as the walker did - GPU writes waited for, pending command-processor writes put over it - and
+				// given to the shader from device-local memory (walk 9.11: read from host memory in every invocation, the
+				// menu's GPU time went 14.6 -> 33.4 ms per frame).
+				uint32_t value = 0;
+				(void)cache.WaitDirectGpuWrites(address, sizeof(uint32_t), true);
+				LibKernel::Memory::ReadGuestPlain(&value, address, sizeof(uint32_t));
+				cache.ApplyDirectCpWrites(address, &value, sizeof(uint32_t));
+				m_gpu_word_values.emplace_back(index, value, address);
+				continue;
+			}
+			m_gpu_word_addresses.emplace_back(address, index);
+		}
+		if (!m_gpu_word_values.empty()) {
+			auto&      stream            = cache.WordStream();
+			const auto bytes             = m_gpu_word_values.size() * sizeof(uint32_t);
+			const auto [mapped, offset] = stream.Map(bytes, 16);
+			EXIT_IF(mapped == nullptr);
+			const vk::DeviceAddress base = stream.BufferDeviceAddress() + offset;
+			for (size_t i = 0; i < m_gpu_word_values.size(); ++i) {
+				const auto [index, value, guest] = m_gpu_word_values[i];
+				std::memcpy(mapped + i * sizeof(uint32_t), &value, sizeof(uint32_t));
+				const auto& word = words[index];
+				const auto  host = base + i * sizeof(uint32_t);
+				if (word.verify != UINT32_MAX) BufferCache::NoteGpuWordBind(host, guest);
+				m_gpu_word_patches.emplace_back(word.slot, static_cast<uint32_t>(host));
+				m_gpu_word_patches.emplace_back(word.hi, static_cast<uint32_t>(host >> 32u));
+			}
+			stream.Commit();
 		}
 		if (!std::ranges::is_sorted(m_gpu_word_addresses)) std::ranges::sort(m_gpu_word_addresses); // usually in order
-		auto& cache = m_context.GetBufferCache();
 		for (size_t first = 0; first < m_gpu_word_addresses.size();) {
 			// One range per run of words no more than 256 bytes apart inside one 64 KiB block.
 			const uint64_t start = m_gpu_word_addresses[first].first;

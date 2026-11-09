@@ -972,6 +972,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       // The ring is only written by the CPU (sequential memcpy), so it lives in host memory like the upload ring. The GDS
       // and bindless buffers keep their placement.
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, RingSize("KYTY_STREAM_BUFFER_MB", 64) * MiB, true),
+      m_word_stream(graphics, scheduler, MemoryUsage::Stream, 8 * MiB, false, vk::BufferUsageFlagBits::eShaderDeviceAddress),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {

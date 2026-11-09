@@ -820,11 +820,19 @@ private:
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;
+	// KYTY_PERF_SRT_GPU_WORDS: device-local ring with a device address for the values of GPU-read SRT words that lie in a
+	// direct range (host memory): shaders read them from here instead of host memory over the bus in every invocation.
+	StreamBuffer                                      m_word_stream;
 	StreamBuffer                                      m_download_buffer;
 	StreamBuffer                                      m_device_buffer;
 	bool                                              m_device_tables_cleared = false; // ClearDeviceTablesOnce
 	[[nodiscard]] StreamBuffer& Staging() noexcept { return m_staging_buffer; }
 	[[nodiscard]] StreamBuffer& Stream() noexcept { return m_stream_buffer; }
+
+public:
+	[[nodiscard]] StreamBuffer& WordStream() noexcept { return m_word_stream; }
+
+private:
 	TextureCache&                                     m_texture_cache;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;

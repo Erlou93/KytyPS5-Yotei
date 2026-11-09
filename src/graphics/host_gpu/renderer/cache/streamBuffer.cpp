@@ -403,8 +403,8 @@ void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
 }
 
 StreamBuffer::StreamBuffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsage usage,
-                           uint64_t size, bool prefer_host)
-    : Buffer(graphics, scheduler, usage, 0, AllFlags, size, prefer_host),
+                           uint64_t size, bool prefer_host, vk::BufferUsageFlags extra_usage)
+    : Buffer(graphics, scheduler, usage, 0, AllFlags | extra_usage, size, prefer_host),
       m_current_watches(WATCHES_INITIAL_RESERVE), m_previous_watches(WATCHES_INITIAL_RESERVE) {}
 
 bool StreamBuffer::NormalizeReservation(bool coherent, uint64_t atom, uint64_t& size,
