@@ -690,13 +690,8 @@ private:
 	void                   ActivateDirect(DirectRange& range);
 	void                   DeactivateDirect(DirectRange& range, bool replace = true);
 	void                   NoteDirectGpuWrite(uint64_t vaddr, uint64_t size, const void* cp_data = nullptr);
-	[[nodiscard]] bool     DropDeadRingBytes(uint64_t vaddr, bool count_fault = true);
-	// KYTY_PERF_RING_RUN: the data-ring pages within max_pages after [vaddr, vaddr + size) whose GPU bytes are all dead,
-	// as runs appended to `runs`, their dead bytes dropped (pages without GPU bytes are passed over); the pages taken.
-	uint32_t ExtendDeadRingRun(uint64_t vaddr, uint64_t size, uint32_t max_pages,
-	                           std::vector<std::pair<uint64_t, uint64_t>>& runs);
+	[[nodiscard]] bool     DropDeadRingBytes(uint64_t vaddr);
 	[[nodiscard]] bool     RingBytesAllDead(uint64_t vaddr); // its verdict without the changes
-	[[nodiscard]] bool     RingBytesAllDeadQuiet(uint64_t vaddr); // the same, uncounted
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);

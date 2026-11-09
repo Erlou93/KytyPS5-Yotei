@@ -1079,17 +1079,6 @@ struct InvalidateProtectMergeStats {
 };
 InvalidateProtectMergeStats g_invalidate_protect_merge;
 
-// KYTY_PERF_RING_RUN (part 2, test switch, live A/B): 0 off (default), 1 on (a 64-page window), N > 1 a window of N pages.
-uint32_t RingRunPages() {
-	static const uint32_t pages = [] {
-		const char* value = std::getenv("KYTY_PERF_RING_RUN");
-		const auto  n     = value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
-		return n == 1u ? 64u : std::min<uint32_t>(n, 1024u);
-	}();
-	const uint32_t on = Common::LiveAb::Gate(Common::LiveAb::Switch::RingRun, pages != 0u ? 1u : 0u);
-	return on != 0u ? (pages != 0u ? pages : 64u) : 0u;
-}
-
 void NoteInvalidateProtectMerge(bool merged) {
 	auto& stats = g_invalidate_protect_merge;
 	stats.pairs.fetch_add(1, std::memory_order_relaxed);
@@ -1110,8 +1099,6 @@ void NoteInvalidateProtectMerge(bool merged) {
 	             take(stats.pairs), take(stats.merged), take(stats.fallback));
 }
 } // namespace
-
-static void NoteRingRunStop(size_t reason); // KYTY_PERF_RING_RUN (after g_ring_dead)
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	KYTY_PROFILER_BLOCK("BufferCache::ReadMemory");
@@ -1341,34 +1328,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			// without GPU bytes needs nothing more. Newer GPU bytes go on to the download below.
 			if (is_write && DropDeadRingBytes(vaddr)) {
 				census.path = RingCensus::Path::DeadRing; // KYTY_TRACE_RING_CENSUS
-				// KYTY_PERF_RING_RUN: the dead pages after it go with it (ExtendDeadRingRun).
-				const uint32_t run_pages = RingRunPages();
-				static thread_local std::vector<std::pair<uint64_t, uint64_t>> runs;
-				runs.clear();
-				if (run_pages != 0u) {
-					if (census.active) {
-						NoteRingRunStop(0);
-					} else {
-						(void)ExtendDeadRingRun(vaddr, size, run_pages, runs);
-					}
-				}
-				if (runs.empty()) {
-					release_gpu_to_cpu();
-				} else {
-					CpuDirtyDeferScope defer_scope(deferred);
-					const uint64_t own_end = (vaddr + size + TRACKER_PAGE_SIZE - 1u) & ~(TRACKER_PAGE_SIZE - 1u);
-					size_t         next    = 0;
-					if (runs.front().first == own_end) { // the fault's own page and the run after it: one pass
-						NoteInvalidateProtectMerge(m_memory_tracker.ReleaseGpuToCpu(vaddr, runs.front().second - vaddr));
-						next = 1;
-					} else {
-						NoteInvalidateProtectMerge(m_memory_tracker.ReleaseGpuToCpu(vaddr, size));
-					}
-					for (; next < runs.size(); next++) {
-						NoteInvalidateProtectMerge(
-						    m_memory_tracker.ReleaseGpuToCpu(runs[next].first, runs[next].second - runs[next].first));
-					}
-				}
+				release_gpu_to_cpu();
 				return;
 			}
 			auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
@@ -1607,19 +1567,11 @@ void ReportDirectStats(size_t pending) {
 namespace {
 struct RingDeadStats {
 	std::atomic<uint64_t> faults {0}, freed {0}, dropped_bytes {0}, partial {0}, caller_skips {0};
-	std::atomic<uint64_t> run_pages {0}; // KYTY_PERF_RING_RUN: pages released with an earlier fault
-	// KYTY_PERF_RING_RUN, why a scan stopped: 0 census on, 1 an active append pool, 2 pending eager copy, 3 a live or unknown GPU
-	// byte, 4 the window ran out, 5 the ring ended; and the pages without GPU bytes passed over.
-	std::atomic<uint64_t> run_stop[6] {}, run_clean {0};
 };
 RingDeadStats         g_ring_dead;
 std::atomic<uint64_t> g_ring_game_write_frame {0}; // game threads: the frame whose ring half the game writes now
 uint64_t              g_ring_exec_data_frame = 0;  // execution thread: the frame of the work being recorded
 } // namespace
-
-static void NoteRingRunStop(size_t reason) {
-	g_ring_dead.run_stop[reason].fetch_add(1, std::memory_order_relaxed);
-}
 
 void RingGameWriteFrame(uint64_t frame) {
 	g_ring_game_write_frame.store(frame, std::memory_order_release);
@@ -2021,20 +1973,7 @@ bool BufferCache::RingBytesAllDead(uint64_t vaddr) {
 	return true;
 }
 
-// RingBytesAllDead without its counter (KYTY_PERF_RING_RUN).
-bool BufferCache::RingBytesAllDeadQuiet(uint64_t vaddr) {
-	const uint64_t write_frame = g_ring_game_write_frame.load(std::memory_order_acquire);
-	if (vaddr < 0x2002600000ull || vaddr >= 0x2010000000ull || write_frame < 2) return false;
-	bool any = false, live = false;
-	m_gpu_modified_ranges.ForEachInRange(vaddr & ~uint64_t {0xfff}, 4096, [&](uint64_t start, uint64_t end) {
-		any                   = true;
-		const uint64_t frame1 = QueryTicks(m_write_frames, start, end); // frame + 1; 0: part of it unknown
-		if (!(frame1 != 0 && frame1 + 1u <= write_frame)) live = true;
-	});
-	return any && !live;
-}
-
-bool BufferCache::DropDeadRingBytes(uint64_t vaddr, bool count_fault) {
+bool BufferCache::DropDeadRingBytes(uint64_t vaddr) {
 	const uint64_t write_frame = g_ring_game_write_frame.load(std::memory_order_acquire);
 	if (vaddr < 0x2002600000ull || vaddr >= 0x2010000000ull || write_frame < 2) return false;
 	const uint64_t page = vaddr & ~uint64_t {0xfff};
@@ -2057,12 +1996,8 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr, bool count_fault) {
 		m_c0_dead_pages.insert(page);
 		C0Note(page, TRACKER_PAGE_SIZE, C0Event::RingDead);
 	}
-	g_ring_dead.dropped_bytes.fetch_add(bytes, std::memory_order_relaxed);
-	if (!count_fault) {
-		g_ring_dead.run_pages.fetch_add(1, std::memory_order_relaxed); // KYTY_PERF_RING_RUN
-		return !live;
-	}
 	g_ring_dead.faults.fetch_add(1, std::memory_order_relaxed);
+	g_ring_dead.dropped_bytes.fetch_add(bytes, std::memory_order_relaxed);
 	if (!live) g_ring_dead.freed.fetch_add(1, std::memory_order_relaxed);
 	if (live && bytes != 0) g_ring_dead.partial.fetch_add(1, std::memory_order_relaxed);
 	static int64_t window_start = 0;
@@ -2070,74 +2005,14 @@ bool BufferCache::DropDeadRingBytes(uint64_t vaddr, bool count_fault) {
 	if (window_start == 0) window_start = now;
 	if (now - window_start >= 5000 && Common::EnvRead::PerfLines()) {
 		window_start = now;
-		std::fprintf(stderr, "PERF ring_dead faults=%llu freed=%llu partial=%llu dropped_KiB=%llu caller_skips=%llu run_pages=%llu "
-		                     "run_stop=%llu/%llu/%llu/%llu/%llu/%llu run_clean=%llu\n",
+		std::fprintf(stderr, "PERF ring_dead faults=%llu freed=%llu partial=%llu dropped_KiB=%llu caller_skips=%llu\n",
 		             static_cast<unsigned long long>(g_ring_dead.faults.exchange(0)),
 		             static_cast<unsigned long long>(g_ring_dead.freed.exchange(0)),
 		             static_cast<unsigned long long>(g_ring_dead.partial.exchange(0)),
 		             static_cast<unsigned long long>(g_ring_dead.dropped_bytes.exchange(0) / 1024u),
-		             static_cast<unsigned long long>(g_ring_dead.caller_skips.exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_pages.exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_stop[0].exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_stop[1].exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_stop[2].exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_stop[3].exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_stop[4].exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_stop[5].exchange(0)),
-		             static_cast<unsigned long long>(g_ring_dead.run_clean.exchange(0)));
+		             static_cast<unsigned long long>(g_ring_dead.caller_skips.exchange(0)));
 	}
 	return !live;
-}
-
-// KYTY_PERF_RING_RUN (part 2, test switch): the game writes a half of the data ring in address order, so a write fault
-// whose page DropDeadRingBytes freed is followed by faults on the next pages, each a request on the GPU thread (walk 9.11:
-// ~25,000 per 5 s, ~5 us each, the game thread waiting for each). The pages after the fault's own whose GPU bytes are all
-// dead (the same verdict, frame W-2 or older) are released with it, each as its own fault would have released it: its
-// dead bytes dropped, then (the caller) unmarked and opened CPU-dirty in the same ReleaseGpuToCpu. A page stops the run when
-// it is outside the ring, not GPU-modified (a CPU write to it faults on the guest thread as before), under a pending eager
-// copy, or holds a live or unknown GPU byte. Only dead bytes change place: their pages become CPU-dirty earlier, as if the
-// game had written them already, so the next upload takes the guest bytes over GPU bytes no one reads.
-uint32_t BufferCache::ExtendDeadRingRun(uint64_t vaddr, uint64_t size, uint32_t max_pages,
-                                        std::vector<std::pair<uint64_t, uint64_t>>& runs) {
-	uint64_t page  = (vaddr + size + TRACKER_PAGE_SIZE - 1u) & ~(TRACKER_PAGE_SIZE - 1u);
-	uint32_t taken = 0;
-	size_t   stop  = 4;
-	for (uint32_t i = 0; i < max_pages; i++, page += TRACKER_PAGE_SIZE) {
-		if (page + TRACKER_PAGE_SIZE > 0x2010000000ull) {
-			stop = 5;
-			break;
-		}
-		if (!m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE)) {
-			g_ring_dead.run_clean.fetch_add(1, std::memory_order_relaxed); // its write faults on the guest thread
-			continue;
-		}
-		// A page of an active append pool goes AppendRelease's way at its own fault (D4b step 1).
-		if (std::ranges::any_of(m_append_pools, [&](const AppendPool& pool) {
-			    return pool.active && pool.base < page + TRACKER_PAGE_SIZE && page < pool.base + pool.size;
-		    })) {
-			stop = 1;
-			break;
-		}
-		if (std::ranges::any_of(m_eager_readbacks, [&](const EagerReadback& entry) {
-			    return page < entry.end && entry.start < page + TRACKER_PAGE_SIZE;
-		    })) {
-			stop = 2;
-			break;
-		}
-		if (!RingBytesAllDeadQuiet(page)) {
-			stop = 3;
-			break;
-		}
-		(void)DropDeadRingBytes(page, false);
-		if (!runs.empty() && runs.back().second == page) {
-			runs.back().second = page + TRACKER_PAGE_SIZE;
-		} else {
-			runs.emplace_back(page, page + TRACKER_PAGE_SIZE);
-		}
-		taken++;
-	}
-	g_ring_dead.run_stop[stop].fetch_add(1, std::memory_order_relaxed);
-	return taken;
 }
 
 void BufferCache::NoteDirectGpuWrite(uint64_t vaddr, uint64_t size, const void* cp_data) {
