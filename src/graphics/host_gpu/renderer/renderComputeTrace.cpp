@@ -44,6 +44,8 @@ struct Row {
 	uint64_t ns    = 0;
 	uint64_t hash  = 0; // the shader hash of the last dispatch (address rows)
 	std::array<uint64_t, 30> sub_ns {}; // the dispatch parts (DispatchSub up to BindlessHeaps), every dispatch
+	std::array<uint64_t, 8> phase_ns {}; // the phases between the marks (full dispatches), [7] = kind bits + 1
+	uint64_t full = 0;
 };
 const char* const g_sub_names[] = {"prepare_program", "key_find", "adopt", "permutation", "find_buffers",
                                    "prepare_bda", "rebind_images", "shared_memory", "rebind_buffers",
@@ -163,6 +165,18 @@ void DispatchCensusTimer::Finish() {
 	row.count++;
 	row.ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_start).count());
 	if (m_hash != 0) row.hash = m_hash;
+	row.phase_ns[7] = m_kind + 1u;
+	{
+		bool full = true;
+		for (uint32_t i = 1; i < kMarks; i++) full = full && m_marks[i] >= m_marks[i - 1];
+		full = full && m_marks[kMarks - 1] != std::chrono::steady_clock::time_point {};
+		if (full) {
+			row.full++;
+			const auto ns_of = [](auto d) { return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count()); };
+			for (uint32_t i = 0; i + 1 < kMarks; i++) row.phase_ns[i] += ns_of(m_marks[i + 1] - m_marks[i]);
+			row.phase_ns[kMarks - 1] += ns_of(now - m_marks[kMarks - 1]);
+		}
+	}
 	for (size_t i = 0; i < row.sub_ns.size(); i++) row.sub_ns[i] += t_dispatch_sub_ns[i];
 	static auto     window      = now;
 	static uint32_t frame_start = DebugPresentCount().load();
@@ -232,6 +246,11 @@ void DispatchCensusTimer::Finish() {
 		for (size_t j = 0; j < 4; j++) {
 			std::fprintf(stderr, " %s=%.1fus", g_sub_names[order[j]],
 			             static_cast<double>(r.sub_ns[order[j]]) / 1e3 / static_cast<double>(r.count));
+		}
+		std::fprintf(stderr, " kind=%llu full=%llu phases_us:", static_cast<unsigned long long>(r.phase_ns[7] - 1u),
+		             static_cast<unsigned long long>(r.full));
+		for (uint32_t j = 0; j < kMarks; j++) {
+			std::fprintf(stderr, " %.1f", r.full != 0 ? static_cast<double>(r.phase_ns[j]) / 1e3 / static_cast<double>(r.full) : 0.0);
 		}
 		std::fprintf(stderr, "\n");
 	}
