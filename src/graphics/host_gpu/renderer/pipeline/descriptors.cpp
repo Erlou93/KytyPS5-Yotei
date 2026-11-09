@@ -2545,6 +2545,41 @@ void NoteTableFallback(BindlessTable::TableFallback reason, uint64_t shader_hash
 
 } // namespace
 
+// PERF table_why (diagnostic, KYTY_TRACE_PERF): the bindless table translations by first reason (0 new table, 1 covered
+// size changed, 2 fields changed, 3 slots dead, 4 content hash changed) for tables up to / over 1 MiB, with their time and
+// bytes, and the slot refreshes (RefreshTableSlots) per size class; one line every 5 s. GPU thread.
+namespace {
+struct TableWhy {
+	uint64_t                              n[2][5] {}, ns[2][5] {}, bytes[2][5] {};
+	uint64_t                              refresh_n[2] {}, refresh_ns[2] {}, uses[2] {};
+	uint32_t                              calls  = 0;
+	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+TableWhy g_table_why;
+void TableWhyReport() {
+	auto& w = g_table_why;
+	if ((++w.calls & 255u) != 0u) return;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - w.window < std::chrono::seconds(5)) return;
+	w.window = now;
+	for (int large = 0; large < 2; large++) {
+		std::fprintf(stderr, "PERF table_why %s uses=%llu refresh=%llu/%.1fms", large != 0 ? "large" : "small",
+		             static_cast<unsigned long long>(w.uses[large]), static_cast<unsigned long long>(w.refresh_n[large]),
+		             static_cast<double>(w.refresh_ns[large]) / 1e6);
+		static constexpr const char* names[] = {"new", "covered", "fields", "dead", "hash"};
+		for (int r = 0; r < 5; r++) {
+			std::fprintf(stderr, " %s=%llu/%.1fms/%.1fMB", names[r], static_cast<unsigned long long>(w.n[large][r]),
+			             static_cast<double>(w.ns[large][r]) / 1e6, static_cast<double>(w.bytes[large][r]) / 1048576.0);
+		}
+		std::fprintf(stderr, "\n");
+	}
+	const uint32_t calls = w.calls;
+	w                    = {};
+	w.calls              = calls;
+	w.window             = now;
+}
+} // namespace
+
 bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderRecompiler::IR::BindlessHeapUse& use,
                                           const ShaderRecompiler::IR::ImageResource& resource,
                                           PreparedBindings&                          prepared) {
@@ -2713,8 +2748,16 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 				t_long_prep_parts[41] = covered;
 				t_long_prep_parts[42] = table.covered;
 			}
-			const auto large_start = large ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+			const bool   why_on     = PerfEnabled(); // PERF table_why
+			const size_t why_reason = table.region == 0 ? 0u : covered != table.covered ? 1u : fields_changed ? 2u : retranslate ? 3u : 4u;
+			const auto large_start = large || why_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 			if (!TranslateBindlessTable(table, covered, hash, frame, shader_hash)) return fallback(Fallback::ArenaFull);
+			if (why_on) {
+				g_table_why.n[large ? 1 : 0][why_reason]++;
+				g_table_why.ns[large ? 1 : 0][why_reason] += static_cast<uint64_t>(
+				    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - large_start).count());
+				g_table_why.bytes[large ? 1 : 0][why_reason] += covered;
+			}
 			if (large) {
 				stats.large_translate_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 				                                                      std::chrono::steady_clock::now() - large_start)
@@ -2743,11 +2786,18 @@ bool RenderExecutor::PrepareBindlessTable(uint64_t shader_hash, const ShaderReco
 	// more, with the replacement in the cache (once per tick besides the translation above).
 	{
 		const bool parts = LongPrepPartsOn(); // KYTY_TRACE_LONG_PREP
-		const auto start = parts || large ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+		const bool why_on = PerfEnabled(); // PERF table_why
+		const auto start = parts || large || why_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		if (!skip_check) RefreshTableSlots(table, frame);
-		if (parts || large) {
+		if (parts || large || why_on) {
 			const auto ns = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+			if (why_on) {
+				g_table_why.uses[large ? 1 : 0]++;
+				if (!skip_check) g_table_why.refresh_n[large ? 1 : 0]++;
+				g_table_why.refresh_ns[large ? 1 : 0] += ns;
+				TableWhyReport();
+			}
 			if (parts) t_long_prep_parts[32] += ns;
 			if (large) {
 				stats.large_refresh_ns += ns;
