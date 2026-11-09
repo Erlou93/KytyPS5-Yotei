@@ -2121,6 +2121,26 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		if (long_us != 0) marks[4] = std::chrono::steady_clock::now();
 		if (long_us != 0) {
+			// Every draw's parts summed; about every 5 s their mean per draw (us) as one PERF prep_parts line.
+			static std::array<uint64_t, 37> sum {};
+			static uint64_t                 draws = 0;
+			static auto                     window = std::chrono::steady_clock::now();
+			for (size_t i = 0; i < 33; i++) sum[i] += t_long_prep_parts[i];
+			for (size_t i = 0; i < 4; i++)
+				sum[33 + i] += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(marks[i + 1] - marks[i]).count());
+			draws++;
+			if (marks[4] - window >= std::chrono::seconds(5)) {
+				const double n = static_cast<double>(draws) * 1e3;
+				std::fprintf(stderr, "PERF prep_parts draws=%llu vs=%.2f ps=%.2f graphics=%.2f vtx=%.2f |",
+				             static_cast<unsigned long long>(draws), sum[33] / n, sum[34] / n, sum[35] / n, sum[36] / n);
+				for (size_t i = 1; i < 33; i++) {
+					if (i < 26 || i > 29) std::fprintf(stderr, " %zu=%.3f", i, sum[i] / n);
+				}
+				std::fprintf(stderr, "\n");
+				sum = {}; draws = 0; window = marks[4];
+			}
+		}
+		if (long_us != 0) {
 			const auto us   = [&](size_t a, size_t b) {
                 return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(marks[b] - marks[a]).count()) / 1e3;
 			};
