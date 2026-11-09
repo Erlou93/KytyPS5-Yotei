@@ -903,6 +903,10 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		g_dtb.chunk_copies.fetch_add(direct_plan.chunks.size(), std::memory_order_relaxed);
 	}
 	if (label) GpuTimer::LabelEnd(native);
+	if constexpr (!async) {
+		// KYTY_PERF_FLUSH_READ_WRITERS: the GPU-written intervals this synchronous download is about to wait for.
+		for (const auto& copy: copies) NoteReadWriterRange(buffer_address + copy.srcOffset, copy.size);
+	}
 	auto publish = [this, mapped, offset, total_size, buffer_address, ring,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		KYTY_PROFILER_BLOCK("Download::Publish");
@@ -927,7 +931,6 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	} else {
 		const auto              tick       = m_scheduler.CurrentTick();
 		const auto              wait_start = std::chrono::steady_clock::now();
-		NoteReadWriterRange(vaddr, size); // KYTY_PERF_FLUSH_READ_WRITERS
 		SyncTimeline::SiteScope timeline_site(SyncTimeline::Site::Copy); // KYTY_TRACE_SYNC_TIMELINE
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
@@ -3076,7 +3079,11 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 // the GPU starts the writer while the CPU records on. Only submission points move.
 namespace {
 struct ReadWriterRanges {
-	std::array<std::pair<uint64_t, uint64_t>, 64> ranges {};
+	struct Range {
+		uint64_t start = 0, end = 0;
+		uint32_t frame = 0; // the presented frame of its last flush (one per frame)
+	};
+	std::array<Range, 64> ranges {};
 	uint32_t                                      next = 0;
 	uint64_t                                      learned = 0, flushes = 0;
 };
@@ -3093,21 +3100,24 @@ uint32_t ReadWritersFixed() {
 void BufferCache::NoteReadWriterRange(uint64_t vaddr, uint64_t size) {
 	if (!Common::LiveAb::Possible(Common::LiveAb::Switch::FlushReadWriters, ReadWritersFixed()) || size == 0) return;
 	auto& r = g_read_writers;
-	for (const auto& [start, end]: r.ranges) {
-		if (start <= vaddr && vaddr + size <= end) return;
+	for (const auto& range: r.ranges) {
+		if (range.start <= vaddr && vaddr + size <= range.end) return;
 	}
-	r.ranges[r.next] = {vaddr, vaddr + size};
+	r.ranges[r.next] = {vaddr, vaddr + size, 0};
 	r.next           = (r.next + 1u) % static_cast<uint32_t>(r.ranges.size());
 	r.learned++;
 }
 
 void BufferCache::NoteReadWriterWrite(uint64_t vaddr, uint64_t size) {
 	if (Common::LiveAb::Gate(Common::LiveAb::Switch::FlushReadWriters, ReadWritersFixed()) == 0u) return;
-	auto& r = g_read_writers;
-	for (const auto& [start, end]: r.ranges) {
-		if (vaddr < end && start < vaddr + size) {
+	auto&          r     = g_read_writers;
+	const uint32_t frame = DebugPresentCount().load(std::memory_order_relaxed);
+	for (auto& range: r.ranges) {
+		if (vaddr < range.end && range.start < vaddr + size) {
+			if (range.frame == frame) return;
+			range.frame = frame;
 			m_scheduler.RequestFlushAfterCommand();
-			if ((++r.flushes & 0xfffu) == 0u && Common::EnvRead::PerfLines()) {
+			if ((++r.flushes & 0xffu) == 0u && Common::EnvRead::PerfLines()) {
 				std::fprintf(stderr, "PERF flush_read_writers learned=%llu flushes=%llu\n",
 				             static_cast<unsigned long long>(r.learned), static_cast<unsigned long long>(r.flushes));
 			}
