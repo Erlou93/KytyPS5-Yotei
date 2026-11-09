@@ -58,6 +58,9 @@ struct State {
 	std::mutex                                mutex;
 	std::unordered_map<uint64_t, uint32_t>    pages;
 	uint64_t                                  calls[2] {}, ns[2] {};
+	// The cloth-state region (0x50CE000000-0x50D0100000, the hot pages of the walk): calls by thread (GPU, other) and mode
+	// (no access, read, read-write, other).
+	uint64_t                                  cloth[2][4] {};
 	uint32_t                                  frame0 = 0;
 	std::chrono::steady_clock::time_point     window = std::chrono::steady_clock::now();
 };
@@ -65,11 +68,14 @@ State& Get() {
 	static State state;
 	return state;
 }
-void Note(uint64_t vaddr, uint64_t size, bool gpu, uint64_t ns) {
+void Note(uint64_t vaddr, uint64_t size, bool gpu, uint64_t ns, uint32_t mode) {
 	auto&           st = Get();
 	std::scoped_lock lock(st.mutex);
 	st.calls[gpu ? 0 : 1]++;
 	st.ns[gpu ? 0 : 1] += ns;
+	if (vaddr < 0x50D0100000ull && vaddr + size > 0x50CE000000ull) {
+		st.cloth[gpu ? 0 : 1][mode == 0u ? 0 : mode == 1u ? 1 : mode == 3u ? 2 : 3]++;
+	}
 	const uint64_t first = vaddr >> 12u, count = std::min<uint64_t>((size + 4095u) >> 12u, 1024u);
 	for (uint64_t i = 0; i < count; i++) st.pages[first + i]++;
 	const auto now = std::chrono::steady_clock::now();
@@ -96,7 +102,13 @@ void Note(uint64_t vaddr, uint64_t size, bool gpu, uint64_t ns) {
 		std::fprintf(stderr, " [0x%llx0000 x%llu]", static_cast<unsigned long long>(top[i].first),
 		             static_cast<unsigned long long>(top[i].second));
 	}
-	std::fprintf(stderr, "\n");
+	std::fprintf(stderr, " cloth_gpu(none/r/rw/other)=%llu/%llu/%llu/%llu cloth_other=%llu/%llu/%llu/%llu\n",
+	             static_cast<unsigned long long>(st.cloth[0][0]), static_cast<unsigned long long>(st.cloth[0][1]),
+	             static_cast<unsigned long long>(st.cloth[0][2]), static_cast<unsigned long long>(st.cloth[0][3]),
+	             static_cast<unsigned long long>(st.cloth[1][0]), static_cast<unsigned long long>(st.cloth[1][1]),
+	             static_cast<unsigned long long>(st.cloth[1][2]), static_cast<unsigned long long>(st.cloth[1][3]));
+	for (auto& row: st.cloth)
+		for (auto& value: row) value = 0;
 	st.pages.clear();
 	st.calls[0] = st.calls[1] = st.ns[0] = st.ns[1] = 0;
 	st.frame0 = frame;
@@ -377,13 +389,15 @@ struct PageManager::Impl {
 				if (on) start = std::chrono::steady_clock::now();
 			}
 			uint64_t vaddr = 0, size = 0; // KYTY_TRACE_HOT_PAGES
+			uint32_t mode  = 0;
 			~ProtectTimer() {
 				if (!on) return;
 				const auto kind = PerfIsGpuThread() ? 0u : 1u;
 				if (HotPages::On()) {
 					HotPages::Note(vaddr, size, kind == 0u,
 					               static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-					                   std::chrono::steady_clock::now() - start).count()));
+					                   std::chrono::steady_clock::now() - start).count()),
+					               mode);
 				}
 				PerfLocks().protects[kind].fetch_add(1, std::memory_order_relaxed);
 				PerfLocks().protect_nanos[kind].fetch_add(
@@ -394,6 +408,7 @@ struct PageManager::Impl {
 		} protect_timer;
 		protect_timer.vaddr = vaddr;
 		protect_timer.size  = size;
+		protect_timer.mode  = static_cast<uint32_t>(mode);
 		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));
