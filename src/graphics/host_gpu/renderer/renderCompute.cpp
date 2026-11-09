@@ -331,10 +331,16 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// KYTY_DIAG_GPU_BURN_AT=dispatch_async / dispatch_gfx (measurement only): the asynchronous compute queues' dispatches
 	// or the graphics queue's (step 0c).
 	GpuBurnAt(async_compute ? GpuBurnSite::DispatchAsync : GpuBurnSite::DispatchGfx);
-	m_context.GetCommandScheduler().NoteGpuCommand();
+	{
+		const DispatchSubTimer p0_timer(DispatchSub::P0Note); // KYTY_TRACE_DISPATCH_CENSUS
+		m_context.GetCommandScheduler().NoteGpuCommand();
+	}
 	KYTY_PROFILER_BLOCK("Dispatch(direct)");
 	EXIT_IF(buffer.IsInvalid());
-	m_context.GetCommandScheduler().PopPendingOperations();
+	{
+		const DispatchSubTimer p0_timer(DispatchSub::P0Pop); // KYTY_TRACE_DISPATCH_CENSUS
+		m_context.GetCommandScheduler().PopPendingOperations();
+	}
 	auto& ctx    = buffer.GetRegisters();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -356,6 +362,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	std::optional<Common::LockGuard> lock_holder;
 	{
 		KYTY_PROFILER_BLOCK("Dispatch::ContextLock");
+		const DispatchSubTimer p0_timer(DispatchSub::P0Lock); // KYTY_TRACE_DISPATCH_CENSUS
 		lock_holder.emplace(m_context.GetMutex());
 	}
 	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {

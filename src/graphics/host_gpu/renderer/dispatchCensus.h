@@ -14,6 +14,8 @@ enum class DispatchSub : uint32_t {
 	Pipeline, PrepareBindings, CommitBindings, Record, Reset, AdoptReads, BdaRanges, ObtainWritten, ObtainRead,
 	TcInvalidate, SrtUpload, DataUpload, OwBatchCommit, OwUploadWalk, OwDirtyAdd, OwObserver, OwWriteTick,
 	TailPre, TailPost, TailEmitted, BindlessHeaps,
+	// DispatchDirect's start (before the program lookup): NoteGpuCommand, PopPendingOperations, the context lock.
+	P0Note, P0Pop, P0Lock,
 	// KYTY_TRACE_DRAW_CENSUS (draws on the execution thread, renderDraw.cpp).
 	DrawPre, DrawRenderState, DrawPrograms, DrawTargets, DrawPipeline, DrawPlanSetup, DrawWait, DrawPost, DrawCommit,
 	CReplay, CAcquire, CVtx, CBind, CIndex, CDyn,

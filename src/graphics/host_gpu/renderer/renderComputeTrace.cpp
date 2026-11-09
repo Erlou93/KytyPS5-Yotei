@@ -43,7 +43,7 @@ struct Row {
 	uint64_t count = 0;
 	uint64_t ns    = 0;
 	uint64_t hash  = 0; // the shader hash of the last dispatch (address rows)
-	std::array<uint64_t, 30> sub_ns {}; // the dispatch parts (DispatchSub up to BindlessHeaps), every dispatch
+	std::array<uint64_t, 33> sub_ns {}; // the dispatch parts (DispatchSub up to BindlessHeaps), every dispatch
 	std::array<uint64_t, 8> phase_ns {}; // the phases between the marks (full dispatches), [7] = kind bits + 1
 	uint64_t full = 0;
 };
@@ -53,7 +53,7 @@ const char* const g_sub_names[] = {"prepare_program", "key_find", "adopt", "perm
                                    "adopt_reads", "bda_ranges", "obtain_written", "obtain_read", "tc_invalidate",
                                    "srt_upload", "data_upload", "ow_batch_commit", "ow_upload_walk",
                                    "ow_dirty_add", "ow_observer", "ow_write_tick", "tail_pre", "tail_post",
-                                   "tail_emitted", "bindless_heaps"};
+                                   "tail_emitted", "bindless_heaps", "p0_note", "p0_pop", "p0_lock"};
 struct Phases {
 	uint64_t count = 0, full = 0, ns = 0;
 	std::array<uint64_t, DispatchCensusTimer::kMarks> phase_ns {};
@@ -240,7 +240,7 @@ void DispatchCensusTimer::Finish() {
 		             static_cast<unsigned long long>(a), static_cast<unsigned long long>(r.hash),
 		             static_cast<double>(r.count) / frames, static_cast<double>(r.ns) / frames / 1e6,
 		             static_cast<double>(r.ns) / 1e3 / static_cast<double>(r.count));
-		std::array<size_t, 30> order {};
+		std::array<size_t, 33> order {};
 		for (size_t j = 0; j < order.size(); j++) order[j] = j;
 		std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return r.sub_ns[x] > r.sub_ns[y]; });
 		for (size_t j = 0; j < 4; j++) {
