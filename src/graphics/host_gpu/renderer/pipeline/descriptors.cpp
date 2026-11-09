@@ -4802,6 +4802,18 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			census_binding.formatted = buffer.formatted;
 			const RingCensus::BindingScope census_scope(&census_binding);
 			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
+		} else if (LongPrepPartsOn()) { // KYTY_TRACE_LONG_PREP: the binding by ObtainBuffer path (t_long_prep_parts 55-72)
+			t_obtain_path = 7u;
+			const auto start = std::chrono::steady_clock::now();
+			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
+			const auto ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+			const uint32_t path = prepared.buffer_sources[index].address == 0 || prepared.buffer_sources[index].size == 0
+			                          ? 7u : std::min<uint32_t>(t_obtain_path, 7u);
+			t_long_prep_parts[55]++;
+			t_long_prep_parts[56] += buffer.written ? 1u : 0u;
+			t_long_prep_parts[57 + path]++;
+			t_long_prep_parts[65 + path] += ns;
 		} else {
 			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
 		}

@@ -27,6 +27,7 @@
 #include "graphics/host_gpu/renderer/cache/textureCacheShared.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/drawRepeat.h"
+#include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/stageFLookup.h"
@@ -3043,6 +3044,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	if (const BufferId direct = DirectBufferFor(vaddr, size); direct) {
 		auto& buffer = m_slot_buffers[direct];
 		if (is_written) NoteObtainedWrite(vaddr, size);
+		t_obtain_path = 0; // KYTY_TRACE_LONG_PREP
 		return {&buffer, buffer.Offset(vaddr)};
 	}
 	// The write memo: the diagnostic and approximation paths below never use it.
@@ -3064,6 +3066,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			TouchBuffer(buffer);
 			NoteObtainedWriteRepeat(vaddr, size, same_tick);
 			hit->tick = tick; // the write ticks hold this tick now
+			t_obtain_path = 1; // KYTY_TRACE_LONG_PREP
 			return {&buffer, buffer.Offset(vaddr)};
 		}
 		s.misses++;
@@ -3085,6 +3088,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		if (memo_hit != nullptr) {
 			auto& buffer = m_slot_buffers[memo_hit->id];
 			TouchBuffer(buffer);
+			t_obtain_path = 2; // KYTY_TRACE_LONG_PREP
 			return {&buffer, buffer.Offset(vaddr)};
 		}
 	}
@@ -3102,6 +3106,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			if (mapped != nullptr) {
 				LibKernel::Memory::ReadGuestPlain(mapped, vaddr, size);
 				Stream().Commit();
+				t_obtain_path = 3; // KYTY_TRACE_LONG_PREP
 				return {&Stream(), offset};
 			}
 		}
@@ -3158,6 +3163,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			ObtainMemoStatsRef().stores++;
 		}
 	}
+	t_obtain_path = found_clean ? 4u : is_written ? 6u : 5u; // KYTY_TRACE_LONG_PREP
 	return {&buffer, buffer.Offset(vaddr)};
 }
 
