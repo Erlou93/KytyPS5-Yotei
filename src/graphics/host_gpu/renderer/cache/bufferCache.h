@@ -621,6 +621,8 @@ private:
 	ProtectBatchStats m_protect_batch_stats;
 	// The bookkeeping of a range a draw or dispatch is about to write (ObtainBuffer, ObtainBdaRange).
 	void NoteObtainedWrite(uint64_t vaddr, uint64_t size);
+	void NoteReadWriterRange(uint64_t vaddr, uint64_t size); // KYTY_PERF_FLUSH_READ_WRITERS (test)
+	void NoteReadWriterWrite(uint64_t vaddr, uint64_t size);
 	// The write memo: NoteObtainedWrite of a range noted at this tick with nothing undone since (the GPU-dirty set,
 	// the write ticks and the granule ticks already hold it): only its notifications.
 	void NoteObtainedWriteRepeat(uint64_t vaddr, uint64_t size, bool same_tick);
