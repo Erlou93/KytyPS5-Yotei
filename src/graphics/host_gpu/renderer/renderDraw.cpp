@@ -2004,6 +2004,7 @@ struct ChunkPrint {
 };
 struct ChunkCheckState {
 	ChunkPrint                    first, second;
+	std::vector<PreparedBindings*> first_stages; // the first preparation's own bindings, stage by stage
 	uint64_t                      draws = 0, dispatches = 0, bad = 0, mixed = 0, members = 0;
 	uint64_t                      merged = 0, merged_written = 0, stale_commit = 0, bindless_info = 0;
 	std::array<uint64_t, CfCount> mismatches {}, injected {}, detected {}, injected_mixed {};
@@ -2144,6 +2145,8 @@ void ChunkInjectFault(ChunkCheckState& s, std::span<PreparedBindings* const> sta
 				st.buffers[0].offset += 256u;
 				s.fault_rec = rec;
 			} else if (field == CfImages && ChunkSwapImages(st)) {
+			} else if (field == CfSrt && st.gpu_words_key != 0) {
+				st.gpu_words_key ^= 1u; // the GPU-read words as the shader reaches them
 			} else if (field == CfSrt && !st.bindless_patches.empty()) {
 				st.bindless_patches[0].entries += 1u;
 			} else if (field == CfData && !st.shader_data.empty()) {
@@ -2294,12 +2297,22 @@ void RenderExecutor::ChunkCheckFirst(std::span<PreparedBindings* const> stages, 
 	s.fault_rec   = SIZE_MAX;
 	if (const uint64_t every = ChunkFaultEvery(); every != 0 && ++s.members % every == 0) ChunkInjectFault(s, stages, plan);
 	ChunkPrintOf(m_context.GetBufferCache(), s.first, stages, plan);
+	s.first_stages.assign(stages.begin(), stages.end());
 }
 
 void RenderExecutor::ChunkCheckSecond(std::span<PreparedBindings* const> stages, const DrawPlan* plan, bool dispatch) {
 	auto& s = g_chunk_check;
 	ChunkPrintOf(m_context.GetBufferCache(), s.second, stages, plan);
 	ChunkCompare(s, dispatch, stages);
+	// A table lists only the images whose layout changed since it last listed them (ListTableImagesByEvents): the first
+	// preparation took those events, so the committed stage also gets the images the first one listed (the commit's
+	// layout transitions are repeatable; it gets at least what a run without the oracle gets).
+	for (size_t k = 0; k < stages.size() && k < s.first_stages.size(); k++) {
+		auto& committed = stages[k]->bindless_images;
+		for (const auto id: s.first_stages[k]->bindless_images) {
+			if (std::ranges::find(committed, id) == committed.end()) committed.push_back(id);
+		}
+	}
 }
 
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
