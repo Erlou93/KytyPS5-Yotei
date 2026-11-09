@@ -1966,12 +1966,9 @@ bool LongPrepPartsOn() {
 // preparations before it uploaded), the images (ids, views) and samplers, the SRT (the flat words, the bindless patches,
 // the GPU-read words as the shader reaches them), the shader data, the bindless images. Not the pipeline (looked up once,
 // before both preparations) and not the images' layouts (the commit sets them). A cached buffer that is no longer the one
-// registered for its guest range when the print is taken is marked stale: a binding the first preparation took before one
-// of its own later acquisitions replaced the buffer (merged it into a bigger one) is a class of its own (merged=), not a
-// difference (merged_written=: of a binding the shader writes). In a run without the oracle the one preparation is the
-// "first": merged= counts the draws whose commit binds a replaced buffer today (stale_commit=, the second preparation's,
-// is 0 by construction: the first preparation registered every range of the draw). The bindless images are counted
-// apart (bindless_info=): not a worker's result.
+// registered for its guest range when the print is taken (stale: a later acquisition of the same preparation replaced it)
+// is a difference (the buffer registry epoch guard, PrepareDrawBindings, took those away: 2310 per walk before it, 0
+// after). The bindless images are counted apart (bindless_info=): not a worker's result.
 // KYTY_CHECK_CHUNKS_FAULT=N (with =2, diagnostic): every N-th member gets one error in its first preparation's data, the
 // fields in turn; the oracle must report every one (PERF chunk_check fault[...]).
 namespace {
@@ -1991,7 +1988,6 @@ struct ChunkBufRec {
 	uint64_t address = 0, size = 0; // the guest range (0 for GDS and LDS)
 	uint64_t buffer = 0, offset = 0, range = 0, bytes = 0;
 	bool     stale   = false; // a cached buffer that is no longer the one registered for its guest range
-	bool     written = false; // a storage binding the shader writes
 	[[nodiscard]] bool Same(const ChunkBufRec& o) const {
 		return field == o.field && kind == o.kind && address == o.address && size == o.size && buffer == o.buffer &&
 		       offset == o.offset && range == o.range && bytes == o.bytes;
@@ -2006,7 +2002,7 @@ struct ChunkCheckState {
 	ChunkPrint                    first, second;
 	std::vector<PreparedBindings*> first_stages; // the first preparation's own bindings, stage by stage
 	uint64_t                      draws = 0, dispatches = 0, bad = 0, mixed = 0, members = 0;
-	uint64_t                      merged = 0, merged_written = 0, stale_commit = 0, bindless_info = 0;
+	uint64_t                      bindless_info = 0;
 	std::array<uint64_t, CfCount> mismatches {}, injected {}, detected {}, injected_mixed {};
 	uint32_t                      fault_turn  = 0;
 	int                           fault_field = -1;       // the field of this member's injected error (-1: none)
@@ -2069,15 +2065,6 @@ void ChunkPrintOf(BufferCache& cache, ChunkPrint& p, std::span<PreparedBindings*
 		for (size_t i = 0; i < st.buffer_sources.size(); i++) {
 			const auto& b = st.buffers[i];
 			add(CfBuffers, st.buffer_sources[i].address, st.buffer_sources[i].size, b.buffer, b.offset, b.range);
-		}
-		if (st.runtime != nullptr && st.runtime->program != nullptr) {
-			// Which storage bindings the shader writes (merged_written: a write through a replaced buffer would be lost).
-			const size_t first = p.bufs.size() - st.buffer_sources.size();
-			for (const auto& resource: st.runtime->program->info.buffers) {
-				if (resource.written && resource.descriptor_index < st.buffer_sources.size()) {
-					p.bufs[first + resource.descriptor_index].written = true;
-				}
-			}
 		}
 		add(CfBuffers, 0, 0, st.gds.buffer, st.gds.offset, st.gds.range);
 		add(CfBuffers, 0, 0, st.shared_memory.buffer, st.shared_memory.offset, st.shared_memory.range);
@@ -2177,38 +2164,21 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 	const auto& a           = s.first.bufs;
 	const auto& b           = s.second.bufs;
 	bool        fault_mixed = false;
-	size_t      commit_rec  = SIZE_MAX; // the first binding the commit takes stale
 	if (a.size() != b.size()) {
 		bad[CfBuffers] = true;
 	} else {
 		for (size_t i = 0; i < a.size(); i++) {
-			if (b[i].stale) {
-				s.stale_commit++;
-				if (commit_rec == SIZE_MAX) commit_rec = i;
-			}
 			const bool same_range = a[i].field == b[i].field && a[i].address == b[i].address && a[i].size == b[i].size;
 			if (same_range && a[i].kind != b[i].kind) {
 				s.mixed++;
 				if (i == s.fault_rec) fault_mixed = true;
 				continue;
 			}
-			if (a[i].Same(b[i])) continue;
-			if (same_range && a[i].stale && !b[i].stale && i != s.fault_rec) {
-				s.merged++; // the first preparation's own later acquisition replaced this binding's buffer
-				if (a[i].written) s.merged_written++;
-				continue;
-			}
+			// A stale binding (a replaced buffer) is a difference in either preparation (the buffer registry epoch guard).
+			if (a[i].Same(b[i]) && !a[i].stale && !b[i].stale) continue;
 			bad[a[i].field] = true;
 			if (bad_rec[a[i].field] == SIZE_MAX && i != s.fault_rec) bad_rec[a[i].field] = i;
 		}
-	}
-	if (commit_rec != SIZE_MAX && s.logged < 40u) {
-		s.logged++;
-		const auto& r = b[commit_rec];
-		std::fprintf(stderr, "CHUNK_CHECK stale_commit op=%s frame=%u rec=%zu/%zu field=%s guest=%llx+%llx buffer=%llx offset=%llx marker=[%s]\n",
-		             dispatch ? "dispatch" : "draw", DebugPresentCount().load(), commit_rec, b.size(), ChunkFieldNames[r.field],
-		             static_cast<unsigned long long>(r.address), static_cast<unsigned long long>(r.size),
-		             static_cast<unsigned long long>(r.buffer), static_cast<unsigned long long>(r.offset), DebugMarkerPath().c_str());
 	}
 	if (s.fault_field >= 0) {
 		const auto f = static_cast<uint32_t>(s.fault_field);
@@ -2276,12 +2246,10 @@ void ChunkCompare(ChunkCheckState& s, bool dispatch, std::span<PreparedBindings*
 		}
 	}
 	std::fprintf(stderr,
-	             "PERF chunk_check draws=%llu dispatches=%llu bad=%llu mixed=%llu merged=%llu merged_written=%llu stale_commit=%llu "
-	             "bindless_info=%llu mismatches[%s]\n",
+	             "PERF chunk_check draws=%llu dispatches=%llu bad=%llu mixed=%llu bindless_info=%llu mismatches[%s]\n",
 	             static_cast<unsigned long long>(s.draws), static_cast<unsigned long long>(s.dispatches),
 	             static_cast<unsigned long long>(s.bad), static_cast<unsigned long long>(s.mixed),
-	             static_cast<unsigned long long>(s.merged), static_cast<unsigned long long>(s.merged_written),
-	             static_cast<unsigned long long>(s.stale_commit), static_cast<unsigned long long>(s.bindless_info), text.c_str());
+	             static_cast<unsigned long long>(s.bindless_info), text.c_str());
 	s.window = now;
 }
 } // namespace
@@ -2313,7 +2281,7 @@ void RenderExecutor::ChunkCheckSecond(std::span<PreparedBindings* const> stages,
 		const size_t before    = committed.size();
 		for (const auto id: first) {
 			// Without the duplicate check above a few images (the search is linear; a repeated transition is harmless).
-			if (before > 64u || std::ranges::find(committed, id) == committed.end()) committed.push_back(id);
+			if (before > 64u || first.size() > 64u || std::ranges::find(committed, id) == committed.end()) committed.push_back(id);
 		}
 	}
 }
@@ -2362,7 +2330,9 @@ void RenderExecutor::PrepareDrawBindings(DrawPlan& plan, CommandBuffer& buffer, 
 		stats.passes++;
 		if (pass == 3) {
 			// Still changing after four passes: today's bindings of the last pass are kept (counted; expected 0).
-			stats.unstable++;
+			if (stats.unstable++ == 0) {
+				std::fprintf(stderr, "BUFFER_GUARD unstable frame=%u marker=[%s]\n", DebugPresentCount().load(), DebugMarkerPath().c_str());
+			}
 			break;
 		}
 	}
