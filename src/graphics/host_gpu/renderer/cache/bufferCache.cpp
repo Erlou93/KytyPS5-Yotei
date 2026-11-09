@@ -904,8 +904,11 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	}
 	if (label) GpuTimer::LabelEnd(native);
 	if constexpr (!async) {
-		// KYTY_PERF_FLUSH_READ_WRITERS: the GPU-written intervals this synchronous download is about to wait for.
-		for (const auto& copy: copies) NoteReadWriterRange(buffer_address + copy.srcOffset, copy.size);
+		// KYTY_PERF_FLUSH_READ_WRITERS: the GPU-written intervals this synchronous download is about to wait for, when the
+		// mapping read declined because their newest write is in the open command buffer.
+		if (DownloadWaitTrace::g_last_bar_reason == 2) {
+			for (const auto& copy: copies) NoteReadWriterRange(buffer_address + copy.srcOffset, copy.size);
+		}
 	}
 	auto publish = [this, mapped, offset, total_size, buffer_address, ring,
 	                copies = std::move(copies), owner = std::move(temporary)] {
