@@ -2126,12 +2126,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			static uint64_t                 draws = 0;
 			static auto                     window = std::chrono::steady_clock::now();
 			for (size_t i = 0; i < 33; i++) sum[i] += t_long_prep_parts[i];
-			static std::array<uint64_t, 6> gw_sum {}; // 43-48: GPU-read SRT words
-			for (size_t i = 0; i < 6; i++) gw_sum[i] += t_long_prep_parts[43 + i];
-			static std::array<uint64_t, 6> rep_sum {}; // 49-54: the repeat census
-			for (size_t i = 0; i < 6; i++) rep_sum[i] += t_long_prep_parts[49 + i];
-			static std::array<uint64_t, 18> buf_sum {}; // 55-72: the storage-buffer bindings
-			for (size_t i = 0; i < 18; i++) buf_sum[i] += t_long_prep_parts[55 + i];
 			for (size_t i = 0; i < 4; i++)
 				sum[33 + i] += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(marks[i + 1] - marks[i]).count());
 			draws++;
@@ -2142,21 +2136,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 				for (size_t i = 1; i < 33; i++) {
 					if (i < 26 || i > 29) std::fprintf(stderr, " %zu=%.3f", i, sum[i] / n);
 				}
-				std::fprintf(stderr, " | gw gather=%.3f obtain=%.3f upload=%.3f words=%.2f runs=%.2f direct=%.2f\n",
-				             gw_sum[0] / n, gw_sum[1] / n, gw_sum[2] / n, gw_sum[3] * 1e3 / n, gw_sum[4] * 1e3 / n,
-				             gw_sum[5] * 1e3 / n);
-				const double stages = std::max<double>(1.0, static_cast<double>(rep_sum[0]));
-				std::fprintf(stderr, "PERF prep_repeat draws=%llu stages_per_draw=%.2f img=%.3f buf=%.3f srt=%.3f heaps=%.3f ibh=%.3f\n",
-				             static_cast<unsigned long long>(draws), rep_sum[0] * 1e3 / n, rep_sum[1] / stages, rep_sum[2] / stages,
-				             rep_sum[3] / stages, rep_sum[4] / stages, rep_sum[5] / stages);
-				static constexpr const char* paths[] = {"direct", "wmemo", "rmemo", "stream", "clean", "rsync", "wmiss", "null"};
-				std::fprintf(stderr, "PERF prep_buffers draws=%llu bindings=%.2f written=%.2f |",
-				             static_cast<unsigned long long>(draws), buf_sum[0] * 1e3 / n, buf_sum[1] * 1e3 / n);
-				for (size_t i = 0; i < 8; i++) {
-					std::fprintf(stderr, " %s=%.3f/%.3fus", paths[i], buf_sum[2 + i] * 1e3 / n, buf_sum[10 + i] / n);
-				}
 				std::fprintf(stderr, "\n");
-				sum = {}; gw_sum = {}; rep_sum = {}; buf_sum = {}; draws = 0; window = marks[4];
+				sum = {}; draws = 0; window = marks[4];
 			}
 		}
 		if (long_us != 0) {

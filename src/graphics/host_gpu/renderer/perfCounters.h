@@ -24,16 +24,7 @@ namespace Libs::Graphics {
 // 21, 24-25 PrepareBda's (fallback maps, region pass, epoch report),
 // 26-29 counts: tracker regions taken, buffers visited, uploads, bytes uploaded,
 // 30-32 PrepareBindlessTable's (read and hash, translate, refresh), 33-35 counts: tables read, translated, slots refreshed.
-// 43-45 RebindBuffers' GPU-read SRT words (gather and direct-range reads, cached-buffer runs, patched SRT upload),
-// 46-48 counts: words, runs, direct-range words.
-// 49-54 repeat census: stages, and of them equal to the same program's last preparation on this thread in images
-// (with samplers), buffers, flat SRT, bindless heaps, and images + buffers + heaps together.
-// 55-72 the draw's storage-buffer bindings (RebindBuffers): 55 bindings, 56 written, 57-64 per ObtainBuffer path
-// (t_obtain_path) the count, 65-72 its ns.
-inline thread_local std::array<uint64_t, 73> t_long_prep_parts {};
-// KYTY_TRACE_LONG_PREP: the path of the last ObtainBuffer on this thread: 0 direct range, 1 write memo hit, 2 read memo
-// hit, 3 stream copy, 4 clean range, 5 read synchronized, 6 write miss, 7 null binding (set by the caller).
-inline thread_local uint8_t t_obtain_path = 0;
+inline thread_local std::array<uint64_t, 43> t_long_prep_parts {};
 // The calling thread holds the texture cache's lock (TrackingSpinLock of PerfLockSiteTextureCache): a preparation job must
 // not wait for the previous draw's commit then (the commit takes that lock). PREP_WORKER_COMMIT_WAIT_UNDER_TC_LOCK.
 inline thread_local uint32_t t_tc_lock_held = 0;
