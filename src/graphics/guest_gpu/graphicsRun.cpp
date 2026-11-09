@@ -3107,6 +3107,8 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
                                         void* dst_gpu_addr, T value, uint32_t interrupt_selector,
                                         uint32_t interrupt_context_id) {
 	static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t));
+	// KYTY_TRACE_CS_WRITER_ADDR: an end-of-pipe label write (src = the guest queue id, src_sel = the EOP event type).
+	TraceCpWriter("eop", reinterpret_cast<uint64_t>(dst_gpu_addr), sizeof(T), static_cast<uint64_t>(m_interrupt_event_id), eop_event_type);
 
 	if (GraphicsRunDebugDumpEnabled()) {
 		const auto bits      = static_cast<unsigned>(sizeof(T) * 8u);
