@@ -431,6 +431,11 @@ private:
 	// S1: the part of a draw after its "cannot touch guest memory" point,
 	// from what ExecutePreparedDraw prepared (the plan).
 	void CommitPreparedDraw(DrawPlan& plan);
+	// KYTY_CHECK_CHUNKS=2 (project 15 S1.2): a prepared plan's fingerprint by field (pipeline, storage buffers, images and
+	// samplers, SRT, shader data, bindless images, vertex and index buffers, indirect arguments); the stream ring's uploads by
+	// content, not offset.
+	static constexpr uint32_t ChunkFieldCount = 8;
+	[[nodiscard]] std::array<uint64_t, ChunkFieldCount> ChunkFingerprint(const DrawPlan& plan);
 	// The steps the draw entries share. DrawEntryStart: DrawIndex and DrawAuto.
 	// ColorOperationInstead: a metadata, copy or resolve operation took the place of the draw (true: it ends here).
 	void DrawEntryStart(CommandBuffer& buffer);

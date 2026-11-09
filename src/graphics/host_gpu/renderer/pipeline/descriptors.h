@@ -74,6 +74,9 @@ struct PreparedBindings {
 		BufferId id;
 	};
 	std::vector<IndirectRange>            indirect_ranges;
+	// KYTY_CHECK_CHUNKS=2: the GPU-read SRT words as the shader reaches them, without the word stream's offsets (a direct
+	// word: its guest address and value; a cached one: its device address) - the fingerprint's stable form.
+	uint64_t                              gpu_words_key = 0;
 };
 
 [[nodiscard]] vk::DescriptorType

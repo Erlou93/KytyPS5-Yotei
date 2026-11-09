@@ -12,6 +12,7 @@
 #include "common/envRead.h"
 #include "common/file.h"
 #include "common/liveAb.h"
+#include "graphics/guest_gpu/chunkCensus.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
 #include "common/profiler.h"
@@ -1956,6 +1957,109 @@ bool LongPrepPartsOn() {
 	return LongPrepThresholdUs() != 0;
 }
 
+// KYTY_CHECK_CHUNKS=2 (project 15 S1.2, the oracle of the parallel translation): the fingerprint of a prepared draw and the
+// comparison of two preparations of one chunk-member draw. Every field is what the commit records from: Vulkan objects and
+// offsets of cached buffers (stable within a run), the stream ring's uploads by their bytes (their offsets depend on the
+// order of uploads), the SRT words as the shader reaches them (PreparedBindings::gpu_words_key), the draw's data words.
+namespace {
+const char* const ChunkFieldNames[RenderExecutor::ChunkFieldCount] = {"pipeline", "buffers", "images", "srt",
+                                                                    "data",     "bindless", "vertex", "indirect"};
+inline uint64_t FpMix(uint64_t h, uint64_t v) {
+	return (h ^ (v + 0x9E3779B97F4A7C15ull + (h << 6u) + (h >> 2u))) * 0x100000001B3ull;
+}
+uint64_t FpBytes(const uint8_t* data, size_t size) {
+	uint64_t h = 0xCBF29CE484222325ull;
+	for (size_t i = 0; i < size; i++) h = (h ^ data[i]) * 0x100000001B3ull;
+	return h;
+}
+struct ChunkCheckStats {
+	uint64_t                              draws = 0, bad_draws = 0;
+	std::array<uint64_t, RenderExecutor::ChunkFieldCount> mismatches {};
+	uint32_t                              logged = 0;
+	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+ChunkCheckStats g_chunk_check; // execution thread
+} // namespace
+
+std::array<uint64_t, RenderExecutor::ChunkFieldCount> RenderExecutor::ChunkFingerprint(const DrawPlan& plan) {
+	std::array<uint64_t, ChunkFieldCount> f {};
+	auto&       stream        = m_context.GetBufferCache().Stream();
+	const auto  stream_handle = stream.Handle();
+	const auto  mapped        = stream.Mapped();
+	const auto  buffer_info   = [&](uint64_t h, vk::Buffer buffer, uint64_t offset, uint64_t range) {
+		if (buffer == stream_handle && range != VK_WHOLE_SIZE && offset + range <= mapped.size()) {
+			return FpMix(FpMix(h, 0x57u), FpBytes(mapped.data() + offset, range));
+		}
+		return FpMix(FpMix(FpMix(h, reinterpret_cast<uint64_t>(static_cast<VkBuffer>(buffer))), offset), range);
+	};
+	f[0] = FpMix(0, reinterpret_cast<uint64_t>(plan.pipeline));
+	for (uint32_t k = 0; k < plan.stage_count; k++) {
+		const auto& st = *plan.descriptor_stages[k];
+		for (const auto& b: st.buffers) f[1] = buffer_info(f[1], b.buffer, b.offset, b.range);
+		f[1] = buffer_info(f[1], st.gds.buffer, st.gds.offset, st.gds.range);
+		f[1] = buffer_info(f[1], st.shared_memory.buffer, st.shared_memory.offset, st.shared_memory.range);
+		for (const auto& image: st.images) {
+			f[2] = FpMix(f[2], (uint64_t {image.image_id.generation} << 32u) | image.image_id.index);
+			f[2] = FpMix(f[2], reinterpret_cast<uint64_t>(static_cast<VkImageView>(image.image_view)));
+			f[2] = FpMix(f[2], static_cast<uint64_t>(image.layout));
+			for (const auto view: image.mip_views) f[2] = FpMix(f[2], reinterpret_cast<uint64_t>(static_cast<VkImageView>(view)));
+		}
+		for (const auto sampler: st.samplers) f[2] = FpMix(f[2], reinterpret_cast<uint64_t>(static_cast<VkSampler>(sampler)));
+		if (st.runtime != nullptr && *st.runtime) {
+			const auto& flat = st.runtime->resources->flattened_srt;
+			f[3] = FpMix(f[3], FpBytes(reinterpret_cast<const uint8_t*>(flat.data()), flat.size() * sizeof(uint32_t)));
+		}
+		for (const auto& patch: st.bindless_patches) f[3] = FpMix(FpMix(FpMix(f[3], patch.offset), patch.region), patch.entries);
+		f[3] = FpMix(f[3], st.gpu_words_key);
+		f[4] = FpMix(f[4], FpBytes(reinterpret_cast<const uint8_t*>(st.shader_data.data()), st.shader_data.size() * sizeof(uint32_t)));
+		for (const auto id: st.bindless_images) f[5] = FpMix(f[5], (uint64_t {id.generation} << 32u) | id.index);
+	}
+	const auto& vb = plan.vertex_bindings;
+	f[6] = FpMix(f[6], vb.count);
+	for (uint32_t i = 0; i < vb.count; i++) f[6] = buffer_info(f[6], vb.buffers[i], vb.offsets[i], vb.sizes[i]);
+	const auto& ib = plan.index_binding;
+	const uint64_t index_bytes = uint64_t {plan.draw.index_count} * (ib.type == vk::IndexType::eUint32 ? 4u : 2u);
+	f[6] = FpMix(buffer_info(f[6], ib.buffer, ib.offset, ib.buffer ? index_bytes : 0u), static_cast<uint64_t>(ib.type));
+	if (plan.indirect_args.first != nullptr) {
+		f[7] = buffer_info(f[7], plan.indirect_args.first->Handle(), plan.indirect_args.second, 0u);
+	}
+	if (plan.indirect_count.first != nullptr) {
+		f[7] = buffer_info(f[7], plan.indirect_count.first->Handle(), plan.indirect_count.second, 0u);
+	}
+	return f;
+}
+
+static void ChunkCheckCompare(const std::array<uint64_t, RenderExecutor::ChunkFieldCount>& first,
+                              const std::array<uint64_t, RenderExecutor::ChunkFieldCount>& second, const DrawPlan& plan) {
+	auto& s = g_chunk_check;
+	s.draws++;
+	bool bad = false;
+	for (uint32_t i = 0; i < RenderExecutor::ChunkFieldCount; i++) {
+		if (first[i] == second[i]) continue;
+		s.mismatches[i]++;
+		bad = true;
+		if (s.logged < 40u) {
+			s.logged++;
+			const auto& vs = plan.vertex_stages;
+			std::fprintf(stderr, "CHUNK_CHECK mismatch field=%s frame=%u vs=%016llx ps=%016llx marker=[%s]\n", ChunkFieldNames[i],
+			             DebugPresentCount().load(),
+			             static_cast<unsigned long long>(vs.empty() ? 0 : vs[0].stage.program->shader_hash),
+			             static_cast<unsigned long long>(plan.state->ps_active ? plan.state->ps_input_info.stage.program->shader_hash : 0),
+			             DebugMarkerPath().c_str());
+		}
+	}
+	if (bad) s.bad_draws++;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5)) return;
+	std::string fields;
+	for (uint32_t i = 0; i < RenderExecutor::ChunkFieldCount; i++) {
+		fields += std::string(i == 0 ? "" : " ") + ChunkFieldNames[i] + "=" + std::to_string(s.mismatches[i]);
+	}
+	std::fprintf(stderr, "PERF chunk_check draws=%llu bad_draws=%llu mismatches[%s]\n", static_cast<unsigned long long>(s.draws),
+	             static_cast<unsigned long long>(s.bad_draws), fields.c_str());
+	s.window = now;
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -2082,6 +2186,38 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	plan.indirect_args     = {};
 	plan.indirect_count    = {};
 	if (CleanDraws::On()) C0::Plan(plan, buffer, state, vertex_stages, &pipeline); // KYTY_TRACE_CLEAN_DRAWS
+	// KYTY_CHECK_CHUNKS=2 (project 15 S1.2): a chunk-member draw is prepared once before its preparation below, as a
+	// worker would prepare it; the two plans' fingerprints must be equal (the commit uses the second).
+	std::array<uint64_t, ChunkFieldCount> chunk_first {};
+	const bool chunk_check = ChunkCensus::CheckOn() && ChunkCensus::t_member && !mesh_active;
+	if (chunk_check) {
+		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
+			plan.descriptor_stages[plan.stage_count++] = &bindings.vertex[i];
+		}
+		if (state.ps_active) {
+			if (!bindings.pixel) bindings.pixel.emplace();
+			PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
+			plan.descriptor_stages[plan.stage_count++] = &*bindings.pixel;
+		}
+		PrepareGraphicsBindings(std::span {plan.descriptor_stages.data(), plan.stage_count},
+		                        std::span {state.color_info, state.color_count});
+		AcquireVertexBuffers(buffer, state.vertex_info[0], plan.vertex_bindings);
+		plan.index_binding = PrepareIndexBuffer(buffer, index_source);
+		if (indirect != nullptr) {
+			auto& cache        = m_context.GetBufferCache();
+			plan.indirect_args = cache.ObtainBuffer(indirect->args_addr, indirect->args_size, false);
+			if (indirect->count_addr != 0) plan.indirect_count = cache.ObtainBuffer(indirect->count_addr, sizeof(uint32_t), false);
+		}
+		chunk_first            = ChunkFingerprint(plan);
+		plan.descriptor_stages = {};
+		plan.stage_count       = 0;
+		plan.vertex_bindings   = {};
+		plan.index_binding     = {};
+		plan.indirect_args     = {};
+		plan.indirect_count    = {};
+		m_context.GetBindlessTable().BeginPlan();
+	}
 	// The binding preparation.
 	{
 		const uint32_t long_us = LongPrepThresholdUs(); // KYTY_TRACE_LONG_PREP
@@ -2177,6 +2313,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		plan.bindless_heaps_end  = m_context.GetBindlessTable().DrawHeapCount(); // S2 step B.4f
 		plan.bindless_tables_end = m_context.GetBindlessTable().DrawTableCount();
 	}
+	if (chunk_check) ChunkCheckCompare(chunk_first, ChunkFingerprint(plan), plan); // KYTY_CHECK_CHUNKS
 	CommitPreparedDraw(plan);
 }
 

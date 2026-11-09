@@ -122,9 +122,23 @@ struct SubmitState {
 
 } // namespace
 
+bool IsMember(bool gfx_queue, uint16_t pass, int kind) {
+	return gfx_queue && (kind == 1 || kind == 2) && IsTarget(St(), pass);
+}
+
+bool CheckOn() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_CHECK_CHUNKS");
+		const bool  o     = value != nullptr && value[0] == '2';
+		if (o) std::fprintf(stderr, "CHECK_CHUNKS=2: chunk-member draws prepared twice, fingerprints compared\n");
+		return o;
+	}();
+	return on;
+}
+
 bool SubmitBefore(bool gfx_queue, uint16_t pass, int kind) {
 	static SubmitState st;
-	const bool member = gfx_queue && (kind == 1 || kind == 2) && IsTarget(St(), pass);
+	const bool member = IsMember(gfx_queue, pass, kind);
 	if (!member) {
 		const bool close = st.open;
 		st.open           = false;

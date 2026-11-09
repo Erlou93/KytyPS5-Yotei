@@ -916,13 +916,16 @@ void GuestGpu::ExecutionThread() {
 		{
 			// KYTY_CHUNK_SUBMIT (project 15 S1.1, test switch, live A/B): a chunk starts and ends a command buffer.
 			static const uint32_t chunk_fixed = std::getenv("KYTY_CHUNK_SUBMIT") != nullptr && std::getenv("KYTY_CHUNK_SUBMIT")[0] == '1' ? 1u : 0u;
-			if (Common::LiveAb::Gate(Common::LiveAb::Switch::ChunkSubmit, chunk_fixed) != 0u) {
+			const bool submit_on = Common::LiveAb::Gate(Common::LiveAb::Switch::ChunkSubmit, chunk_fixed) != 0u;
+			if (submit_on || ChunkCensus::CheckOn()) {
 				const auto kind = operation->kind;
 				const int  k    = (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto) ? 1
 				                  : kind == GpuOperationKind::DispatchDirect                                 ? 2
-				                  : kind == GpuOperationKind::DrawIndirect                                   ? 3
+				                  : (kind == GpuOperationKind::DrawIndirect || kind == GpuOperationKind::DispatchIndirect) ? 3
 				                                                                                            : 0;
-				if (ChunkCensus::SubmitBefore(operation->processor == m_gfx_cp.get(), operation->pass_id, k)) {
+				const bool gfx = operation->processor == m_gfx_cp.get();
+				ChunkCensus::t_member = ChunkCensus::IsMember(gfx, operation->pass_id, k); // KYTY_CHECK_CHUNKS
+				if (submit_on && ChunkCensus::SubmitBefore(gfx, operation->pass_id, k)) {
 					m_renderer.GetCommandScheduler().Flush();
 				}
 			}

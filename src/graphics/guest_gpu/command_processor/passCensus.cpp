@@ -175,7 +175,7 @@ bool Enabled() {
 
 static bool Active() {
 	// KYTY_CHUNK_SUBMIT (project 15 S1.1) needs the pass ids too.
-	static const bool active = Enabled() || !FreeList().empty() || std::getenv("KYTY_CHUNK_SUBMIT") != nullptr ||
+	static const bool active = Enabled() || !FreeList().empty() || std::getenv("KYTY_CHUNK_SUBMIT") != nullptr || std::getenv("KYTY_CHECK_CHUNKS") != nullptr ||
 	                           std::getenv("KYTY_LIVE_AB") != nullptr;
 	return active;
 }

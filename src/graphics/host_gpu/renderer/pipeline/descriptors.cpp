@@ -1,3 +1,4 @@
+#include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorsTrace.h"
@@ -4584,6 +4585,11 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	// guest memory holds for it when it runs (GPU writes in place, CPU writes uploaded), as the walker did after waiting.
 	// Before the other bindings, like the record-keyed ranges: a buffer this creates cannot replace one they named.
 	m_gpu_word_patches.clear();
+	prepared.gpu_words_key = 0;
+	const bool gw_key = ChunkCensus::CheckOn() && ChunkCensus::t_member; // KYTY_CHECK_CHUNKS
+	const auto gw_mix = [&](uint64_t a, uint64_t b) {
+		prepared.gpu_words_key = (prepared.gpu_words_key ^ (a * 0x9E3779B97F4A7C15ull) ^ (b + 0x632BE59BD9B4E019ull)) * 0x100000001B3ull;
+	};
 	if (const auto& words = program.info.srt_gpu_words; !words.empty()) {
 		const auto& flat = snapshot.flattened_srt;
 		auto&       cache = m_context.GetBufferCache();
@@ -4604,6 +4610,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 				LibKernel::Memory::ReadGuestPlain(&value, address, sizeof(uint32_t));
 				cache.ApplyDirectCpWrites(address, &value, sizeof(uint32_t));
 				m_gpu_word_values.emplace_back(index, value, address);
+				if (gw_key) gw_mix((uint64_t {index} << 32u) | value, address);
 				continue;
 			}
 			m_gpu_word_addresses.emplace_back(address, index);
@@ -4651,6 +4658,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 				}
 				m_gpu_word_patches.emplace_back(word.slot, static_cast<uint32_t>(host));
 				m_gpu_word_patches.emplace_back(word.hi, static_cast<uint32_t>(host >> 32u));
+				if (gw_key) gw_mix(word.slot, host);
 			}
 			first = last + 1u;
 		}

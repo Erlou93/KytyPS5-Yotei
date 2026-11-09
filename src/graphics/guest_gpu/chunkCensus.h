@@ -33,6 +33,15 @@ void Note(const OpInfo& op);
 // command buffer must be submitted first (a chunk opens, closes or reaches 128).
 [[nodiscard]] bool SubmitBefore(bool gfx_queue, uint16_t pass, int kind);
 
+// Whether an operation is a chunk member (the rule of SubmitBefore). Execution thread.
+[[nodiscard]] bool IsMember(bool gfx_queue, uint16_t pass, int kind);
+
+// KYTY_CHECK_CHUNKS=2 (project 15 S1.2, the oracle): every chunk-member draw is prepared twice and the two plans' fingerprints
+// are compared field by field (renderDraw.cpp ChunkCheckDraw); PERF chunk_check lines. Read once.
+[[nodiscard]] bool CheckOn();
+// The operation the execution thread runs now is a chunk member (set before each operation while CheckOn()).
+inline thread_local bool t_member = false;
+
 } // namespace Libs::Graphics::ChunkCensus
 
 #endif // EMULATOR_SRC_GRAPHICS_GUEST_GPU_CHUNKCENSUS_H_
