@@ -2534,21 +2534,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                                      buffer.GetRegisters(), buffer.GetUserConfig(), ps_info, topology,
 		                                                      primitive_restart_enable, state.programs, false);
 		if (!(key_peek == key_today)) st.key_bad++;
-		if (m_resolved_draw != nullptr && m_resolved_draw->ahead.key_valid) {
-			// N4.1: the key and pipeline the opening's peek found, when its programs were predicted right.
-			auto& ah     = m_resolved_draw->ahead;
-			auto& a      = g_ahead;
-			ah.key_valid = false;
-			if (!PipelineCache::AheadProgramsOk(*m_resolved_draw->stages)) {
-				a.k_unchecked++;
-			} else {
-				a.k_compared++;
-				const bool fault = PeekTargets::FaultEvery() != 0 && a.k_compared % PeekTargets::FaultEvery() == 0;
-				if (fault) a.k_injected++;
-				if (!(ah.key == key_today) || fault) (fault ? a.k_detected : a.k_bad)++;
-				if (ah.find != pc.FindGraphicsPipeline(key_today)) a.k_find_diff++;
-			}
-		}
+		CheckAheadKey(key_today);
 		st.find[static_cast<size_t>(peek_find.second)]++;
 		if (peek_find.second == PipelineCache::PipelineFind::Found && !mesh_active) t_op_pipeline = true; // the operation's plan
 		if (t_peek_member == 1) st.member_find[static_cast<size_t>(peek_find.second)]++;
@@ -3742,6 +3728,23 @@ static bool SkipDirectDrawsCeiling() {
 		return set;
 	}();
 	return on;
+}
+
+void RenderExecutor::CheckAheadKey(const PipelineCache::GraphicsPipelineKey& key_today) {
+	if (m_resolved_draw == nullptr || !m_resolved_draw->ahead.key_valid) return;
+	// N4.1: the key and pipeline the opening's peek found, when its programs were predicted right.
+	auto& ah     = m_resolved_draw->ahead;
+	auto& a      = g_ahead;
+	ah.key_valid = false;
+	if (!PipelineCache::AheadProgramsOk(*m_resolved_draw->stages)) {
+		a.k_unchecked++;
+		return;
+	}
+	a.k_compared++;
+	const bool fault = PeekTargets::FaultEvery() != 0 && a.k_compared % PeekTargets::FaultEvery() == 0;
+	if (fault) a.k_injected++;
+	if (!(ah.key == key_today) || fault) (fault ? a.k_detected : a.k_bad)++;
+	if (ah.find != m_context.GetPipelineCache().FindGraphicsPipeline(key_today)) a.k_find_diff++;
 }
 
 bool RenderExecutor::TakeAheadImages(const void* program, PeekStageImagesResult& out, uint32_t& distance) {

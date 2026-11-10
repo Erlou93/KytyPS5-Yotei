@@ -344,6 +344,10 @@ public:
 	// The execution thread, around the operation. Release gives the resolution back.
 	void        UseResolvedDraw(ResolvedDraw* resolved) noexcept;
 	static void ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept;
+	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): the chunk's opening peeks a draw ahead in the queue (programs, targets,
+	// pipeline, stage images) into its slot, without a write; distance from the opening draw.
+	void PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders, bool indexed,
+	               uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset, uint64_t indirect, uint32_t distance);
 	// KYTY_DIAG_GPU_BURN_NS / KYTY_DIAG_GPU_BURN_AT (measurement only): GPU-thread spin at one of these places.
 	// InvalidateCaller: the guest thread whose write fault reads GPU-modified bytes back, not the GPU thread.
 	// Readback and Pm4 (measurement only): a GPU-thread guest read of GPU-written data, a PM4 packet of the GPU thread.
@@ -470,12 +474,10 @@ private:
 	// answered. count: the KYTY_CHECK_PEEK=2 statistics of today's peek (false for the peeks ahead).
 	bool PeekStageImages(const ShaderRecompiler::IR::CompiledShaderInfo& program, const ShaderRecompiler::IR::ResourceSnapshot& snapshot,
 	                     bool soft, PeekStageImagesResult& peek, bool count);
-	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): the chunk's opening peeks a draw ahead in the queue (programs, targets,
-	// pipeline, stage images) into its slot, without a write; distance from the opening draw.
-	// N4.1: the stage images PeekAhead found for `program` in the running draw's slot (taken once).
+	// N4.1: the stage images PeekAhead found for `program` in the running draw's slot (taken once), and the running draw's
+	// ahead key against today's (renderDraw.cpp, after ResolvedDraw).
 	bool TakeAheadImages(const void* program, PeekStageImagesResult& out, uint32_t& distance);
-	void PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders, bool indexed,
-	               uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset, uint64_t indirect, uint32_t distance);
+	void CheckAheadKey(const PipelineCache::GraphicsPipelineKey& key_today);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
 	[[nodiscard]] bool CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                   const DrawEmitInfo& emit, DrawRenderState& state);
