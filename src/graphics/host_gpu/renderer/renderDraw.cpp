@@ -3787,7 +3787,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		a.gated[4]++;
 		return;
 	}
-	if (ctx.GetColorControl().mode != 0 || DepthStencilCopyAsked(ctx)) {
+	if (ctx.GetColorControl().mode > static_cast<uint8_t>(CbColorMode::Normal) || DepthStencilCopyAsked(ctx)) {
 		a.gated[5]++;
 		return;
 	}
