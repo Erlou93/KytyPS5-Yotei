@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
@@ -862,6 +863,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
                                                  uint32_t color_count, RenderDepthInfo& depth,
                                                  vk::ImageAspectFlags& feedback_aspects,
                                                  std::span<PreparedBindings* const> stages) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::Targets); // KYTY_TRACE_SLOW_FRAMES
 	KYTY_PROFILER_BLOCK("Draw::AcquireRenderTargets");
 	EXIT_IF(colors == nullptr || color_count > RENDER_COLOR_ATTACHMENTS_MAX);
 	feedback_aspects = {};
@@ -4430,6 +4432,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 
 bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::DrawOp); // KYTY_TRACE_SLOW_FRAMES
 	if (args.indirect.address != 0) {
 		// Upstream c513a4a13 / 949de19bb: GPU-read indexed indirect records. Not drawn on this path (our
 		// DrawIndirectGpu and the CPU expansion are): the caller expands them on the CPU.
@@ -4699,6 +4702,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 const char* RenderExecutor::DrawIndirectGpu(uint64_t submit_id, CommandBuffer& buffer,
                                             const DrawIndirectGpuArgs& args) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::DrawIndirect); // KYTY_TRACE_SLOW_FRAMES
 	// The checks that need only the registers and the packet (none of the draw's programs): IndirectEarlyChecks (N7.2: the
 	// same function builds a helper's plan).
 	IndirectEarly early;

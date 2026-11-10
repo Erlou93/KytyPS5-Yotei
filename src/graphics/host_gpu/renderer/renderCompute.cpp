@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/cleanDraws.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
@@ -327,6 +328,7 @@ static void FullMemoryBarrier(vk::CommandBuffer vk_buffer) {
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::DispatchOp); // KYTY_TRACE_SLOW_FRAMES
 	CleanDraws::NoteBreak(async_compute ? CleanDraws::BreakAsync : CleanDraws::BreakDispatch); // KYTY_TRACE_CLEAN_DRAWS
 	DispatchCensusTimer         census_timer(buffer.GetShaders().GetCs().cs_regs.data_addr, async_compute); // KYTY_TRACE_DISPATCH_CENSUS
 	ChunkLead::FloorPhase       floor_phase(ChunkLead::FpD1); // KYTY_TRACE_PEEK_CENSUS (way B W0 D1-D7)

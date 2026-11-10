@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "common/profiler.h"
 #include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/indirectLoadFast.h"
@@ -310,6 +311,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void RenderContext::PrepareBda() {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::Bda); // KYTY_TRACE_SLOW_FRAMES
 	const ChunkLead::FloorTimer floor_bda(ChunkLead::FpBda); // KYTY_TRACE_PEEK_CENSUS (project 15 N3.0)
 	// KYTY_TRACE_LONG_PREP: the parts' times and the region pass's counts (t_long_prep_parts 21-29).
 	const bool parts_on  = LongPrepPartsOn();

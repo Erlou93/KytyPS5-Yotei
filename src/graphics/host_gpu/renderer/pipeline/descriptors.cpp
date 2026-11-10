@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
@@ -2422,6 +2423,7 @@ struct BindlessSplit {
 
 void RenderExecutor::PrepareBindlessHeaps(const ShaderStageRuntime& runtime,
                                           PreparedBindings& prepared) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::Bindless); // KYTY_TRACE_SLOW_FRAMES
 	const ChunkLead::FloorTimer floor_bindless(ChunkLead::FpBindless); // KYTY_TRACE_PEEK_CENSUS (N3.0)
 	BindlessSplit      bsplit; // KYTY_TRACE_LONG_PREP
 	prepared.bindless_patches.clear();
@@ -4492,6 +4494,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 
 void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
                                           PreparedBindings& prepared) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::PrepToday); // KYTY_TRACE_SLOW_FRAMES
 	BindSplit bind_split; // KYTY_TRACE_LONG_PREP
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);
@@ -4803,6 +4806,7 @@ static void PlanSourceCheck(const PlanBuffer& entry, const PreparedBindings::Buf
 }
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::FindBuf); // KYTY_TRACE_SLOW_FRAMES
 	const ChunkLead::FloorTimer floor_find(ChunkLead::FpFindBuffers); // KYTY_TRACE_PEEK_CENSUS (W3 P0)
 	KYTY_PROFILER_FUNCTION();
 	auto& cache = m_context.GetBufferCache();
@@ -4979,6 +4983,7 @@ static void PlanBindingCheck(const PlanBuffer& entry, const vk::DescriptorBuffer
 }
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::RebindBuf); // KYTY_TRACE_SLOW_FRAMES
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program   = *prepared.runtime->program;
@@ -5236,6 +5241,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 }
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::RebindImg); // KYTY_TRACE_SLOW_FRAMES
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program  = *prepared.runtime->program;
@@ -5968,6 +5974,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     vk::PipelineBindPoint              pipeline_bind_point,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::Commit); // KYTY_TRACE_SLOW_FRAMES
 	KYTY_PROFILER_FUNCTION();
 	std::optional<DispatchSubTimer> census_part(std::in_place, DispatchSub::BPre); // KYTY_TRACE_DRAW_CENSUS
 	auto   vk_buffer        = buffer.Handle();

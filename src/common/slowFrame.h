@@ -28,10 +28,21 @@ enum Part : uint32_t {
 	Commands,    // the game's commands served between operations (RunCommands)
 	Draws,       // draw operations executed (calls only)
 	Dispatches,  // dispatch operations executed (calls only)
+	DrawOp,      // RenderExecutor::DrawIndex (whole draw)
+	DrawIndirect, // RenderExecutor::DrawIndirectGpu
+	DispatchOp,  // RenderExecutor::DispatchDirect
+	PrepToday,   // PrepareBindingsToday
+	FindBuf,     // FindBuffers
+	RebindBuf,   // RebindBuffers
+	RebindImg,   // RebindImages
+	Commit,      // CommitBindings
+	Bindless,    // PrepareBindlessHeaps
+	Targets,     // AcquireRenderTargets
+	Bda,         // RenderContext::PrepareBda
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {
