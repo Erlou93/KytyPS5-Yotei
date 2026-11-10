@@ -268,7 +268,26 @@ bool ResolvedReadsHold(ResolvedStages& results) {
 		const uint64_t lead_t0 = ChunkLead::On() ? ChunkLead::Tsc() : 0; // KYTY_TRACE_CHUNK_LEAD (N2.0b): the check's cost
 		{
 			const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::ReadsCheck); // KYTY_TRACE_SLOW_FRAMES
-			results.reads = ShaderRecompiler::IR::ReadsUnchangedFast(results.log, runtime) ? Reads::Hold : Reads::Changed;
+			// KYTY_TRACE_SLOW_ADOPT (diagnostic, 11.11): a check of 200 us or more prints its log size and how its entries went.
+			static const bool slow_adopt = std::getenv("KYTY_TRACE_SLOW_ADOPT") != nullptr;
+			ShaderRecompiler::IR::FastAdoptStats stats;
+			const auto t0 = slow_adopt ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+			results.reads = ShaderRecompiler::IR::ReadsUnchangedFast(results.log, runtime, slow_adopt ? &stats : nullptr)
+			                    ? Reads::Hold
+			                    : Reads::Changed;
+			if (slow_adopt) {
+				const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+				static std::atomic_uint printed {0};
+				if (us >= 200 && printed.fetch_add(1, std::memory_order_relaxed) < 400u) {
+					std::fprintf(stderr,
+					             "SLOW_ADOPT hash=%016llx us=%lld entries=%zu bytes=%zu fast=%llu runs=%llu slow=%llu result=%s\n",
+					             static_cast<unsigned long long>(PerfMaterializeHash()), static_cast<long long>(us),
+					             results.log.entries.size(), results.log.bytes.size(),
+					             static_cast<unsigned long long>(stats.entries_fast), static_cast<unsigned long long>(stats.runs),
+					             static_cast<unsigned long long>(stats.entries_slow),
+					             results.reads == Reads::Hold ? "hold" : "changed");
+				}
+			}
 		}
 		if (lead_t0 != 0) ChunkLead::NoteAdopt(ChunkLead::Tsc() - lead_t0, results.log.entries.size(), results.log.bytes.size());
 		if (results.reads == Reads::Changed) g_resolve_stats.stale.fetch_add(1, std::memory_order_relaxed);
