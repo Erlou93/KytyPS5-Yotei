@@ -1644,6 +1644,30 @@ void Report(TargetMemo& m) {
 	             static_cast<unsigned long long>(m.draws), static_cast<unsigned long long>(m.equal),
 	             static_cast<unsigned long long>(m.hits), static_cast<unsigned long long>(m.stored));
 }
+// T1a (KYTY_TRACE_PEEK_CENSUS): per searched draw, whether every search was repeatable, the first reason otherwise.
+struct T1aStats {
+	uint64_t                 searched = 0, repeatable = 0, moved = 0;
+	std::array<uint64_t, 7>  first {};
+	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+inline T1aStats g_t1a;
+void NoteT1a(bool repeatable, int first, bool moved) {
+	auto& s = g_t1a;
+	s.searched++;
+	if (repeatable && !moved) s.repeatable++;
+	if (moved) s.moved++;
+	if (first >= 0 && first < 7) s.first[static_cast<size_t>(first)]++;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5)) return;
+	const auto pc = [&](uint64_t v) { return 100.0 * static_cast<double>(v) / static_cast<double>(s.searched); };
+	std::fprintf(stderr,
+	             "PERF t1a searched=%llu all_repeatable=%.1f%% registry_or_meta_moved=%.1f%% first_reason%%[null|not_target|not_same_backing|"
+	             "alias|freed|inserted|view]=%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f\n",
+	             static_cast<unsigned long long>(s.searched), pc(s.repeatable), pc(s.moved), pc(s.first[0]), pc(s.first[1]),
+	             pc(s.first[2]), pc(s.first[3]), pc(s.first[4]), pc(s.first[5]), pc(s.first[6]));
+	s        = {};
+	s.window = now;
+}
 } // namespace C1
 
 // Project 15 S2c (KYTY_CHECK_PEEK=2, diagnostic): the draw's targets described from the registers, its pipeline key
@@ -1742,6 +1766,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	memo.draws++;
 	memo.equal += target_equal ? 1u : 0u;
 	if (target_equal) {
+		const ChunkLead::FloorTimer floor_hit(ChunkLead::FpTargetHit); // KYTY_TRACE_PEEK_CENSUS (T1a)
 		state.color_count = memo.color_count;
 		for (uint32_t i = 0; i < memo.color_count; i++) state.color_info[i] = memo.colors[i];
 		state.depth_info = memo.depth;
@@ -1751,6 +1776,9 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		if (c0_targets) CleanDraws::t_front_parts.target_hit = true; // KYTY_TRACE_CLEAN_DRAWS
 		C1::Report(memo);
 	} else {
+		const ChunkLead::FloorTimer floor_search(ChunkLead::FpTargetSearch); // KYTY_TRACE_PEEK_CENSUS (T1a)
+		const uint64_t nonrepeat0    = TextureCache::NonRepeatableSearches();
+		const auto     reasons0      = TextureCache::NonRepeatReasons();
 		const uint64_t full_searches = TextureCache::FullSearches();
 		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 			if ((mrt_mask & (1u << slot)) != 0) {
@@ -1769,6 +1797,17 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		memo.valid = TextureCache::FullSearches() == full_searches &&
 		             DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == target_key.registry &&
 		             CleanDraws::g_meta_ops.load(std::memory_order_relaxed) == target_key.meta_ops;
+		if (ChunkLead::PeekCensusOn()) {
+			// T1a: whether every search of this draw was repeatable (the memo could keep the result), else the first reason
+			const auto& reasons1 = TextureCache::NonRepeatReasons();
+			int         first    = -1;
+			for (size_t i = 0; i < reasons1.size() && first < 0; i++) {
+				if (reasons1[i] != reasons0[i]) first = static_cast<int>(i);
+			}
+			C1::NoteT1a(TextureCache::NonRepeatableSearches() == nonrepeat0, first,
+			            DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) != target_key.registry ||
+			                CleanDraws::g_meta_ops.load(std::memory_order_relaxed) != target_key.meta_ops);
+		}
 		if (memo.valid) {
 			memo.key         = target_key;
 			memo.color_count = state.color_count;

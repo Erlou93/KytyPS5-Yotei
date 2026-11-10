@@ -162,6 +162,11 @@ public:
 	[[nodiscard]] static bool TakeLastFindImagePlain();
 	// This thread's FindImage calls that went past the found-only answers (a full search; a draw's target memo).
 	[[nodiscard]] static uint64_t FullSearches();
+	// T1a (way B, KYTY_TRACE_PEEK_CENSUS, measurement): the searches that were not repeatable for a target memo, and the first
+	// reason each (0 null image, 1 not a target type, 2 not by SameBacking, 3 another candidate is a block alias, 4 freed or
+	// exact-format reset, 5 inserted, 6 the view moved to another mip or layer).
+	[[nodiscard]] static uint64_t NonRepeatableSearches();
+	[[nodiscard]] static const std::array<uint64_t, 7>& NonRepeatReasons();
 	[[nodiscard]] uint64_t        GcTick() const noexcept { return m_gc_tick; }
 	[[nodiscard]] ImageId     ReplayImage(ImageId id);
 	// Bindless table refresh events: what ReplayImage does to each registered, non-null image (access tick, LRU touch),

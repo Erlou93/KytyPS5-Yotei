@@ -63,6 +63,9 @@ enum FloorPart : uint32_t {
 	// W3 P0 (10.11): the draw-buffer pool - FindBuffers, the record-keyed V# ranges, the SRT words, the buffer loop of
 	// RebindBuffers, vertex/index/argument acquisitions, the plan-answer branch of ObtainBuffer (time; t_floor_answers count)
 	FpFindBuffers, FpVRanges, FpSrtWords, FpBufLoop, FpVtxIdx, FpPlanAnswer,
+	// T1a (way B, the target memo): the target search branch, the memo-hit branch, FindImage's locked search, the colour-clear
+	// materialization (MaterializeColorClear)
+	FpTargetSearch, FpTargetHit, FpFindLocked, FpMaterialize,
 	FpCount
 };
 inline thread_local uint64_t t_floor[FpCount] {};

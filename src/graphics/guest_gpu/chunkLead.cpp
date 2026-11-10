@@ -581,6 +581,11 @@ void NoteFloor(int pass) {
 			             name(p).c_str(), us(FpFindBuffers), us(FpVRanges), us(FpSrtWords), us(FpBufLoop), us(FpVtxIdx), us(FpPlanAnswer),
 			             static_cast<double>(s.answers[static_cast<size_t>(p)]) / static_cast<double>(n), ms(FpFindBuffers), ms(FpVRanges),
 			             ms(FpSrtWords), ms(FpBufLoop), ms(FpVtxIdx), ms(FpPlanAnswer));
+			std::fprintf(stderr,
+			             "PERF t1a_parts pass=\"%s\" us/op search=%.3f hit=%.3f find_locked=%.3f materialize=%.3f ms/frame search=%.2f "
+			             "hit=%.2f find_locked=%.2f materialize=%.2f\n",
+			             name(p).c_str(), us(FpTargetSearch), us(FpTargetHit), us(FpFindLocked), us(FpMaterialize), ms(FpTargetSearch),
+			             ms(FpTargetHit), ms(FpFindLocked), ms(FpMaterialize));
 		}
 		if (p <= BucketOtherDraws) {
 			const auto& r     = g_cover.reasons[static_cast<size_t>(p)];

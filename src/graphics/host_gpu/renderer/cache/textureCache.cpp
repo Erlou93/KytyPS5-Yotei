@@ -2,6 +2,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/gpuCheckpoints.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
+#include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/cache/textureCacheShared.h"
 #include "graphics/host_gpu/renderer/cache/textureCacheTrace.h"
 
@@ -3013,6 +3014,22 @@ uint64_t TextureCache::FullSearches() {
 	return g_full_searches;
 }
 
+static thread_local uint64_t                g_nonrepeat = 0; // T1a
+static thread_local std::array<uint64_t, 7> g_nonrepeat_reason {};
+
+uint64_t TextureCache::NonRepeatableSearches() {
+	return g_nonrepeat;
+}
+
+const std::array<uint64_t, 7>& TextureCache::NonRepeatReasons() {
+	return g_nonrepeat_reason;
+}
+
+static void NoteNonRepeat(int reason) {
+	g_nonrepeat++;
+	g_nonrepeat_reason[static_cast<size_t>(reason)]++;
+}
+
 bool TextureCache::TakeLastFindImagePlain() {
 	const bool plain  = g_last_find_plain;
 	g_last_find_plain = false;
@@ -3106,7 +3123,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		EXIT("TextureCache: image lookup requires a valid command buffer\n");
 	}
 	ValidateImageDesc(desc);
+	const bool t1a = ChunkLead::PeekCensusOn(); // (T1a: the repeatable-search counters)
 	if (desc.info.data.Empty()) {
+		if (t1a) NoteNonRepeat(0);
 		std::scoped_lock lock {m_lock};
 		const auto       id = GetNullImage(desc);
 		// The null image of a format never changes once made (m_null_images).
@@ -3116,7 +3135,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	const auto metadata_base_layer = desc.view_info.base_layer;
 
 	ImageId result {};
+	bool    alias_any = false, freed = false; // (T1a)
 	{
+		const ChunkLead::FloorTimer floor_locked(ChunkLead::FpFindLocked); // KYTY_TRACE_PEEK_CENSUS (T1a)
 		std::scoped_lock lock {m_lock};
 		KYTY_PROFILER_BLOCK("FindImage::Locked");
 		const auto       candidates = [&] {
@@ -3147,6 +3168,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			} else if (image.SafeToDownload() &&
 			           BcAlias::Matches(desc.info, image.info)) {
 				block_alias = true;
+			} else if (t1a && BcAlias::Matches(desc.info, image.info)) {
+				alias_any = true; // (T1a: an alias whatever its state)
 			}
 		}
 		int32_t view_mip   = -1;
@@ -3178,10 +3201,12 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			auto& resolved = m_slot_images[result];
 			if (exact_format && resolved.info.pixel_format != desc.info.pixel_format) {
 				result = {};
+				freed  = true;
 			} else if (!resolved.info.resources.Contains(desc.info.resources)) {
 				UnregisterReason reason(m_unregister_reason, "mip_growth");
 				FreeImage(result);
 				result = {};
+				freed  = true;
 			}
 		}
 		bool inserted_new = false;
@@ -3213,6 +3238,18 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		}
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);
+		if (t1a) {
+			// T1a: repeatable for a target memo (the same image again from the same registry and the same description)
+			const bool target = desc.type == BindingType::RenderTarget || desc.type == BindingType::DepthTarget;
+			const int  why    = !target                         ? 1
+			                    : !plain_source                 ? 2
+			                    : block_alias || alias_any      ? 3
+			                    : freed                         ? 4
+			                    : inserted_new                  ? 5
+			                    : view_mip >= 0 || view_layer >= 0 ? 6
+			                                                    : -1;
+			if (why >= 0) NoteNonRepeat(why);
+		}
 		g_last_find_plain = plain_source && !inserted_new && view_mip < 0 && view_layer < 0 && !block_alias &&
 		                    (desc.type == BindingType::Texture || desc.type == BindingType::RenderTarget) &&
 		                    desc.info.metadata.kind == ImageMetadataKind::None &&
@@ -3220,6 +3257,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	}
 	{
 		KYTY_PROFILER_BLOCK("FindImage::ColorClear");
+		const ChunkLead::FloorTimer floor_materialize(ChunkLead::FpMaterialize); // KYTY_TRACE_PEEK_CENSUS (T1a)
 		MaterializeColorClear(result, desc, metadata_base_layer);
 	}
 	if (desc.type == BindingType::VideoOut &&
