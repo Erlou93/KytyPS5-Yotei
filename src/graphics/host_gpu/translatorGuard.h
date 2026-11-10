@@ -60,6 +60,20 @@ struct AheadStats {
 };
 inline AheadStats g_ahead;
 inline thread_local AheadStats t_ahead_helper; // N5.3: a resolve helper's plans count here (not into the execution thread's)
+// N7.1: a helper's plan outcomes, published from t_ahead_helper every 256 plans for the report (one row per helper, each
+// written by its own helper only: relaxed stores). 0 planned, 1 made, 2 compile, 3 describe_failed, 4 lookup_busy,
+// 5-11 gated[1..7].
+struct HelperPlanSnap {
+	static constexpr size_t              Count = 12;
+	std::array<std::atomic<uint64_t>, 12> v {};
+	void Publish(const AheadStats& a, uint64_t made) {
+		const uint64_t values[Count] = {a.planned,  made,        a.compile,   a.describe_failed, a.lookup_busy, a.gated[1],
+		                                a.gated[2], a.gated[3], a.gated[4], a.gated[5],        a.gated[6],    a.gated[7]};
+		for (size_t i = 0; i < Count; i++) v[i].store(values[i], std::memory_order_relaxed);
+	}
+};
+inline HelperPlanSnap g_helper_plan_snap[2];
+inline thread_local uint64_t t_helper_plans_made = 0;
 inline uint32_t   AheadBucket(uint32_t distance) {
     return distance == 0u ? 0u : distance < 16u ? 1u : distance < 64u ? 2u : 3u;
 }

@@ -174,9 +174,14 @@ bool Enabled() {
 }
 
 static bool Active() {
-	// Always (project 15 N5, 10.11): the draw plans are built for the draws of the listed passes (ChunkLead::TargetPass), so
-	// every run needs the pass ids - not only the census, the checks and KYTY_LIVE_AB as before.
-	return true;
+	// KYTY_CHECK_CHUNKS, KYTY_TRACE_CHUNK_LEAD and KYTY_TRACE_PEEK_CENSUS (project 15) need the pass ids too. (N7.1, 10.11:
+	// the draw plans no longer do - every direct draw gets one - so a plain run keeps none again.)
+	static const bool active = Enabled() || !FreeList().empty() || std::getenv("KYTY_CHECK_CHUNKS") != nullptr ||
+	                           std::getenv("KYTY_TRACE_CHUNK_LEAD") != nullptr || std::getenv("KYTY_TRACE_PEEK_CENSUS") != nullptr ||
+	                           std::getenv("KYTY_CHECK_PEEK") != nullptr || std::getenv("KYTY_TRACE_CHUNK_PLAN") != nullptr ||
+	                           std::getenv("KYTY_CHECK_PLAN_BUFFERS") != nullptr || std::getenv("KYTY_TRACE_HELPER_WAITS") != nullptr ||
+	                           std::getenv("KYTY_LIVE_AB") != nullptr;
+	return active;
 }
 
 void NoteShader(uint64_t hash) {

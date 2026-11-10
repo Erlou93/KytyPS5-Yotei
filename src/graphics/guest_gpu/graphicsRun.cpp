@@ -1310,8 +1310,9 @@ void GuestGpu::ResolveThread() {
 			task.dispatch      = dispatch;
 			task.pass_id       = operation->pass_id;
 			if (draw && (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto)) {
-				// N5.1: a chunk-member draw's arguments (its plan is built on the helper, N5.3)
-				task.member = operation->processor == m_gfx_cp.get() && ChunkLead::TargetPass(operation->pass_id) >= 0;
+				// N5.1/N7.1: a direct draw of the graphics queue gets a plan (built on the helper, N5.3) - every one, not only
+				// the three passes' (10.11: no pass ids needed, so no dependence on the game's marker strings).
+				task.member = operation->processor == m_gfx_cp.get();
 				if (kind == GpuOperationKind::DrawIndex) {
 					const auto& args   = operation->draw_index;
 					task.indexed       = true;
@@ -1408,6 +1409,15 @@ void GuestGpu::ResolveThread() {
 					             u(a.p_compared), u(a.p_bad), u(a.p_share_diff), u(a.p_lost), u(a.p_injected), u(a.p_detected),
 					             u(a.k_compared), u(a.k_bad), u(a.k_unchecked), u(a.k_find_diff), u(a.k_injected), u(a.k_detected),
 					             u(a.used_draws), u(a.used_pipeline), u(a.buffers_answered), u(a.buffers_today), u(writes));
+					// N7.1: the helpers' plan outcomes (why a draw got none), as each helper last published them
+					uint64_t o[HelperPlanSnap::Count] {};
+					for (const auto& h: g_helper_plan_snap) {
+						for (size_t i = 0; i < HelperPlanSnap::Count; i++) o[i] += h.v[i].load(std::memory_order_relaxed);
+					}
+					std::fprintf(stderr,
+					             "PERF helper_plan_outcome planned=%llu made=%llu compile=%llu describe_failed=%llu lookup_busy=%llu "
+					             "gated[slot|shaders|adopt|counts|colorop|topology|mesh]=%llu|%llu|%llu|%llu|%llu|%llu|%llu\n",
+					             u(o[0]), u(o[1]), u(o[2]), u(o[3]), u(o[4]), u(o[5]), u(o[6]), u(o[7]), u(o[8]), u(o[9]), u(o[10]), u(o[11]));
 				}
 				std::string hist;
 				for (size_t i = 0; i < hs.hist_n.size(); i++) {

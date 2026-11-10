@@ -3630,6 +3630,10 @@ bool RenderExecutor::ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task
 		// N5.3: the helper builds the draw's plan while the slot is still its own (before it is marked ready).
 		PeekAhead(&slot, *task.context, *task.user_config, *task.shaders, task.indexed, task.draw_count, 1u, task.index_type,
 		          task.slice_offset, task.draw_indirect, std::min(task.lead, 127u), task.index_address);
+		// N7.1: the outcome counters for the report (the helper's scratch slot 3 + index names its row)
+		if (slot.ahead.planned) t_helper_plans_made++;
+		const uint32_t row = ShaderRecompiler::IR::t_ahead_scratch_slot - 3u;
+		if ((t_ahead_helper.planned & 255u) == 0 && row < 2u) g_helper_plan_snap[row].Publish(t_ahead_helper, t_helper_plans_made);
 	}
 	slot.phase.store(PhaseReady, std::memory_order_release);
 	return ok;
