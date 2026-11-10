@@ -116,6 +116,20 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device, const VkMemo
 	c.alloc_bytes.fetch_add(info->allocationSize, std::memory_order_relaxed);
 	c.alloc_ns.fetch_add(ns, std::memory_order_relaxed);
 	if (info->allocationSize >= BigBytes) c.big_allocs.fetch_add(1, std::memory_order_relaxed);
+	if (Common::SlowFrame::Threshold() != 0u && ns >= 5'000'000u) {
+		// KYTY_TRACE_SLOW_FRAMES: which allocations stall (size, type, dedicated or a VMA block, which thread)
+		const auto* dedicated = static_cast<const VkMemoryDedicatedAllocateInfo*>(nullptr);
+		for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
+			if (next->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO) {
+				dedicated = reinterpret_cast<const VkMemoryDedicatedAllocateInfo*>(next);
+			}
+		}
+		std::fprintf(stderr, "SLOW_ALLOC MiB=%.1f ms=%.1f type=%u dedicated=%s exec=%d\n",
+		             static_cast<double>(info->allocationSize) / 1048576.0, static_cast<double>(ns) / 1e6,
+		             info->memoryTypeIndex,
+		             dedicated == nullptr ? "no" : dedicated->buffer != VK_NULL_HANDLE ? "buffer" : "image",
+		             Common::SlowFrame::t_exec ? 1 : 0);
+	}
 	uint64_t max = c.alloc_max_ns.load(std::memory_order_relaxed);
 	while (ns > max && !c.alloc_max_ns.compare_exchange_weak(max, ns, std::memory_order_relaxed)) {
 	}
