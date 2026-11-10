@@ -3042,8 +3042,8 @@ void BufferCache::PrefetchObtainMemo(uint64_t vaddr, uint64_t size, bool is_writ
 // ---- Project 15 S2a: the read-only peek (n3-projekt.md section 4.1) ----------------------------------------------------
 namespace {
 struct PeekStats {
-	std::array<uint64_t, BufferCache::BufferPeek::Count> classes {};
-	uint64_t compared = 0, bad = 0, race = 0, lag_compared = 0, lag_bad = 0, lag_race = 0, injected = 0, detected = 0;
+	std::array<uint64_t, BufferCache::BufferPeek::Count> classes {}, member {}, bda {};
+	uint64_t bda_compared = 0, compared = 0, bad = 0, race = 0, lag_compared = 0, lag_bad = 0, lag_race = 0, injected = 0, detected = 0;
 	std::array<uint64_t, 4> lag_age {};  // calls since the kept peek: <16, <128, <1024, >=1024
 	std::array<uint64_t, 5> lag_fail {}; // PeekProofFail of a kept entry that no longer holds
 	uint32_t logged = 0;
@@ -3051,7 +3051,7 @@ struct PeekStats {
 PeekStats g_peek_stats; // GPU thread
 struct PeekLagEntry {
 	uint64_t                vaddr = 0, size = 0, call = 0;
-	bool                    written = false;
+	bool                    written = false, bda = false;
 	BufferCache::BufferPeek peek;
 };
 // The lag check keeps the oldest live peek of a range: replaced only when empty, another range, or its proof failed.
@@ -3078,8 +3078,12 @@ void PeekReport() {
 	if ((g_peek_calls & ((1u << 20u) - 1u)) != 0) return;
 	const char* const names[BufferCache::BufferPeek::Count] = {"ready",  "direct", "null",     "stream", "upload",
 	                                                           "create", "image",  "no_proof", "written"};
-	std::string       text;
-	for (uint32_t i = 0; i < BufferCache::BufferPeek::Count; i++) text += std::string(i == 0 ? "" : " ") + names[i] + "=" + std::to_string(st.classes[i]);
+	const auto classes = [&](const auto& a) {
+		std::string out;
+		for (uint32_t i = 0; i < BufferCache::BufferPeek::Count; i++) out += std::string(i == 0 ? "" : " ") + names[i] + "=" + std::to_string(a[i]);
+		return out;
+	};
+	const std::string text = classes(st.classes);
 	const auto join = [](const auto& a, size_t n) {
 		std::string out;
 		for (size_t i = 0; i < n; i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);
@@ -3094,6 +3098,9 @@ void PeekReport() {
 	             static_cast<unsigned long long>(st.lag_bad), static_cast<unsigned long long>(st.lag_race), join(st.lag_age, 4).c_str(),
 	             join(&st.lag_fail[1], 4).c_str(), static_cast<unsigned long long>(st.injected), static_cast<unsigned long long>(st.detected),
 	             join(t_translator_writes, 6).c_str());
+	std::fprintf(stderr, "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu\n",
+	             classes(st.member).c_str(), join(t_peek_marker_hist, 4).c_str(), classes(st.bda).c_str(),
+	             static_cast<unsigned long long>(st.bda_compared));
 }
 } // namespace
 
@@ -3108,7 +3115,8 @@ uint32_t BufferCache::PeekProofFail(const BufferPeek& peek, uint64_t vaddr, uint
 	return DrawRepeat::ImagePageEpochSum(vaddr, size) == peek.image_sum ? 0 : 3;
 }
 
-BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint) {
+BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint,
+                                                bool bda) {
 	++t_translator;
 	BufferPeek p;
 	[&] {
@@ -3119,8 +3127,8 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 		// Every proof field is read before the check it covers (n3-s2a-przeglad.md 1.1): the registry epoch before the
 		// lookup, the region epochs before the dirty bits, the image page sum before the image-start count.
 		p.buffer_epoch = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
-		const uint32_t direct_mode = DirectMode();
-		if (direct_mode != m_direct_mode_seen) {
+		const uint32_t direct_mode = bda ? 0u : DirectMode();
+		if (!bda && direct_mode != m_direct_mode_seen) {
 			p.klass = BufferPeek::Upload; // today's path ends or starts the direct ranges: in order
 			return;
 		}
@@ -3146,7 +3154,7 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 		const bool proof = ObtainMemoRegions(vaddr, size, p.region, p.regions, p.epochs);
 		p.image_sum      = DrawRepeat::ImagePageEpochSum(vaddr, size);
 		const bool clean = m_memory_tracker.PeekCpuClean(vaddr, size);
-		if (size <= CACHING_PAGESIZE && !clean && !m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+		if (!bda && size <= CACHING_PAGESIZE && !clean && !m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
 			p.klass = BufferPeek::Stream;
 			return;
 		}
@@ -3160,7 +3168,7 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 			p.klass = BufferPeek::Upload;
 			return;
 		}
-		if (TextureCache::ImageMayStartAt(vaddr)) {
+		if (!bda && TextureCache::ImageMayStartAt(vaddr)) {
 			p.klass = BufferPeek::Image; // today's path may copy from an image starting at the address
 			return;
 		}
@@ -3185,20 +3193,33 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	if (PeekCheckMode() == 0 || image_source || !GuestGpu::IsGpuThread()) {
 		return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source);
 	}
-	auto&      st    = g_peek_stats;
-	const auto peek  = PeekBuffer(vaddr, size, is_written, is_texel_buffer, id);
-	st.classes[peek.klass]++;
+	const auto peek = PeekBuffer(vaddr, size, is_written, is_texel_buffer, id);
+	return PeekChecked(peek, vaddr, size, is_written, false,
+	                   [&] { return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source); });
+}
+
+template <typename Path>
+std::pair<Buffer*, uint64_t> BufferCache::PeekChecked(const BufferPeek& peek, uint64_t vaddr, uint64_t size, bool is_written, bool bda,
+                                                      Path&& path) {
+	auto& st = g_peek_stats;
+	(bda ? st.bda : st.classes)[peek.klass]++;
+	const bool answered = peek.klass == BufferPeek::Ready || peek.klass == BufferPeek::Direct || peek.klass == BufferPeek::Null;
+	if (t_peek_member == 1) {
+		st.member[peek.klass]++;
+		if (!answered) t_peek_markers++;
+	}
 	g_peek_calls++;
 	if (g_peek_lag.empty()) g_peek_lag.resize(65536);
-	auto& lag = g_peek_lag[((vaddr ^ (size << 7u)) * 0x9E3779B97F4A7C15ull ^ (is_written ? 1u : 0u)) >> 48u & (g_peek_lag.size() - 1u)];
-	const bool lag_hit = lag.vaddr == vaddr && lag.size == size && lag.written == is_written &&
+	auto& lag = g_peek_lag[((vaddr ^ (size << 7u)) * 0x9E3779B97F4A7C15ull ^ (is_written ? 1u : 0u) ^ (bda ? 2u : 0u)) >> 48u &
+	                       (g_peek_lag.size() - 1u)];
+	const bool lag_hit = lag.vaddr == vaddr && lag.size == size && lag.written == is_written && lag.bda == bda &&
 	                     (lag.peek.klass == BufferPeek::Ready || lag.peek.klass == BufferPeek::Direct);
 	const uint32_t lag_fail = lag_hit ? PeekProofFail(lag.peek, vaddr, size) : 4u;
 	const bool     lag_live = lag_hit && lag_fail == 0;
 	if (lag_hit && !lag_live) st.lag_fail[lag_fail]++;
 	const uint64_t epoch0 = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
 	const uint64_t work0  = t_obtain_work;
-	const auto     result = ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source);
+	const auto     result = path();
 	const bool     quiet  = t_obtain_work == work0 && DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire) == epoch0 &&
 	                   result.first != &Stream();
 	const auto     same   = [&](const BufferPeek& p, uint64_t offset) {
@@ -3206,6 +3227,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	};
 	if (peek.klass == BufferPeek::Ready || peek.klass == BufferPeek::Direct) {
 		st.compared++;
+		if (bda) st.bda_compared++;
 		uint64_t   offset = peek.offset;
 		const bool fault  = PeekFaultEvery() != 0 && st.compared % PeekFaultEvery() == 0;
 		if (fault) {
@@ -3220,9 +3242,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			} else {
 				st.bad++;
 				if (st.logged++ < 20u) {
-					std::fprintf(stderr, "CHECK_PEEK bad class=%u addr=%llx size=%llx written=%d quiet=%d stream=%d\n", peek.klass,
+					std::fprintf(stderr, "CHECK_PEEK bad class=%u addr=%llx size=%llx written=%d bda=%d quiet=%d stream=%d\n", peek.klass,
 					             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size), is_written ? 1 : 0,
-					             quiet ? 1 : 0, result.first == &Stream() ? 1 : 0);
+					             bda ? 1 : 0, quiet ? 1 : 0, result.first == &Stream() ? 1 : 0);
 				}
 			}
 		}
@@ -3237,7 +3259,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		}
 	}
 	if ((peek.klass == BufferPeek::Ready || peek.klass == BufferPeek::Direct) && !lag_live) {
-		lag = {vaddr, size, g_peek_calls, is_written, peek}; // the oldest live entry stays
+		lag = {vaddr, size, g_peek_calls, is_written, bda, peek}; // the oldest live entry stays
 	}
 	PeekReport();
 	return result;
@@ -3424,6 +3446,14 @@ void BufferCache::NoteObtainedWriteRepeat(uint64_t vaddr, uint64_t size, bool sa
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRange(uint64_t vaddr, uint64_t size, bool is_written,
                                                          BufferId id) {
+	if (PeekCheckMode() == 0 || !GuestGpu::IsGpuThread() || !GuestRange {vaddr, size}.Valid()) {
+		return ObtainBdaRangePath(vaddr, size, is_written, id);
+	}
+	const auto peek = PeekBuffer(vaddr, size, is_written, false, id, true);
+	return PeekChecked(peek, vaddr, size, is_written, true, [&] { return ObtainBdaRangePath(vaddr, size, is_written, id); });
+}
+
+std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRangePath(uint64_t vaddr, uint64_t size, bool is_written, BufferId id) {
 	if (m_scheduler.Current().IsInvalid() || !GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: BDA range request requires a recording command buffer\n");
 	}

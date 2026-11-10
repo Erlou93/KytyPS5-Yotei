@@ -28,6 +28,7 @@
 
 #include <chrono>
 #include "graphics/host_gpu/regionManager.h"
+#include "graphics/host_gpu/translatorGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -984,6 +985,14 @@ void GuestGpu::ExecutionThread() {
 			    },
 			    &scopes);
 		}
+		// KYTY_CHECK_PEEK (project 15 N3 S2a): the peek's split by chunk-member draw.
+		static const bool peek_split = std::getenv("KYTY_CHECK_PEEK") != nullptr;
+		if (peek_split) {
+			const auto kind = operation->kind;
+			PeekOperationBegin(operation->processor == m_gfx_cp.get() &&
+			                   (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto) &&
+			                   ChunkLead::TargetPass(operation->pass_id) >= 0);
+		}
 		// KYTY_TRACE_PEEK_CENSUS (project 15 N3.0): the commit floor of the chunk-member draws.
 		int                                 floor_pass = -1;
 		std::optional<ChunkLead::FloorTimer> floor_total;
@@ -1034,6 +1043,7 @@ void GuestGpu::ExecutionThread() {
 			ChunkLead::NoteFloor(floor_pass);
 			ChunkLead::t_floor_on = false;
 		}
+		if (peek_split) PeekOperationEnd();
 		{
 			// KYTY_TEST_PAD_RECORD / KYTY_TEST_PAD_REPLAY: the gameplay-start anchor (debugSample.h GameplayStartNs).
 			static uint32_t last_present = 0, draws_in_frame = 0, frames_in_row = 0;

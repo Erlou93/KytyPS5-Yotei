@@ -128,7 +128,12 @@ public:
 		uint32_t epochs[2] {};
 		uint32_t regions = 0;
 	};
-	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint);
+	// bda: ObtainBdaRange's peek (no direct ranges, no stream copy, no image copy).
+	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint,
+	                                    bool bda = false);
+	// KYTY_CHECK_PEEK=2: today's path after the peek, compared (bufferCache.cpp).
+	template <typename Path>
+	std::pair<Buffer*, uint64_t> PeekChecked(const BufferPeek& peek, uint64_t vaddr, uint64_t size, bool is_written, bool bda, Path&& path);
 	// Whether a Ready or Direct peek's proof still holds (the obtain memo's check); PeekProofFail names the failed part
 	// (0 holds, 1 buffer registry, 2 CPU-dirty region epochs, 3 image pages, 4 not a proved class).
 	[[nodiscard]] static uint32_t PeekProofFail(const BufferPeek& peek, uint64_t vaddr, uint64_t size);
@@ -159,6 +164,7 @@ public:
 	// page table does not map), its CPU-modified bytes uploaded, and when written GPU-modified from now on, like a
 	// written storage buffer.
 	std::pair<Buffer*, uint64_t> ObtainBdaRange(uint64_t vaddr, uint64_t size, bool is_written, BufferId id = {});
+	std::pair<Buffer*, uint64_t> ObtainBdaRangePath(uint64_t vaddr, uint64_t size, bool is_written, BufferId id);
 	[[nodiscard]] StreamBuffer&                GetUtilityBuffer(MemoryUsage usage) noexcept {
 		switch (usage) {
 			case MemoryUsage::Upload: return Staging();
