@@ -68,7 +68,11 @@ private:
 	FloorPart m_part;
 	uint64_t  m_t0;
 };
-// After a member draw (pass 0..2): its parts summed per pass; PERF commit_floor every ~5 s.
+// After an operation (bucket 0..2 the three passes' draws, then the buckets below): its parts summed per bucket;
+// PERF commit_floor every ~5 s, and PERF commit_floor_frame (ms per frame of every bucket and part).
+// t_floor_wait: the card waits (ns, masterSemaphore) inside the operation, set before NoteFloor.
+constexpr int BucketOtherDraws = 3, BucketDispatches = 4, BucketOther = 5, Buckets = 6;
+inline thread_local uint64_t t_floor_wait = 0;
 void NoteFloor(int pass);
 
 // Command processor thread: a snapshot slot taken / waited for (kind 0 context, 1 user config, 2 shaders).

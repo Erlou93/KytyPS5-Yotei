@@ -449,35 +449,56 @@ bool PeekCensusOn() {
 
 void NoteFloor(int pass) {
 	struct FloorState {
-		std::array<std::array<uint64_t, FpCount>, Passes> ticks {};
-		std::array<uint64_t, Passes>                      draws {};
-		Clock                                             clock;
-		std::chrono::steady_clock::time_point             window       = std::chrono::steady_clock::now();
-		uint32_t                                          window_frame = 0;
+		std::array<std::array<uint64_t, FpCount>, Buckets> ticks {};
+		std::array<uint64_t, Buckets>                      draws {}, wait_ns {};
+		Clock                                              clock;
+		std::chrono::steady_clock::time_point              window       = std::chrono::steady_clock::now();
+		uint32_t                                           window_frame = 0;
+		uint32_t                                           calls        = 0;
 	};
 	static FloorState s; // execution thread
-	if (pass >= 0 && pass < Passes) {
+	if (pass >= 0 && pass < Buckets) {
 		for (uint32_t i = 0; i < FpCount; i++) s.ticks[static_cast<size_t>(pass)][i] += t_floor[i];
 		s.draws[static_cast<size_t>(pass)]++;
+		s.wait_ns[static_cast<size_t>(pass)] += t_floor_wait;
 	}
+	t_floor_wait = 0;
 	std::fill(std::begin(t_floor), std::end(t_floor), uint64_t {0});
+	if ((++s.calls & 255u) != 0) return;
 	const auto now = std::chrono::steady_clock::now();
 	if (now - s.window < std::chrono::seconds(5)) return;
 	s.clock.Refresh(Tsc(), now);
-	const double   rate   = s.clock.Rate();
-	const uint32_t frame  = DebugPresentCount().load(std::memory_order_relaxed);
-	const uint32_t frames = frame > s.window_frame ? frame - s.window_frame : 1u;
-	const auto&    names  = TargetList();
-	for (int p = 0; p < Passes && p < static_cast<int>(names.size()); p++) {
-		const auto& t = s.ticks[static_cast<size_t>(p)];
-		const auto  n = s.draws[static_cast<size_t>(p)];
+	const double   rate    = s.clock.Rate();
+	const uint32_t frame   = DebugPresentCount().load(std::memory_order_relaxed);
+	const uint32_t frames  = frame > s.window_frame ? frame - s.window_frame : 1u;
+	const double   seconds = std::chrono::duration<double>(now - s.window).count();
+	const auto&    names   = TargetList();
+	const auto     name    = [&](int p) -> std::string {
+        if (p < Passes) return p < static_cast<int>(names.size()) ? names[static_cast<size_t>(p)] : std::string("?");
+        return p == BucketOtherDraws ? "other draws" : p == BucketDispatches ? "dispatches" : "other operations";
+	};
+	std::array<double, FpCount> all_ms {};
+	double                      all_ops = 0, all_wait = 0;
+	for (int p = 0; p < Buckets; p++) {
+		const auto& t  = s.ticks[static_cast<size_t>(p)];
+		const auto  n  = s.draws[static_cast<size_t>(p)];
 		const auto  us = [&](uint32_t i) { return n != 0 ? static_cast<double>(t[i]) / rate / 1e3 / static_cast<double>(n) : 0.0; };
+		const auto  ms = [&](uint32_t i) { return static_cast<double>(t[i]) / rate / 1e6 / frames; };
+		for (uint32_t i = 0; i < FpCount; i++) all_ms[i] += ms(i);
+		all_ops += static_cast<double>(n) / frames;
+		const double wait_ms = static_cast<double>(s.wait_ns[static_cast<size_t>(p)]) / 1e6 / frames;
+		all_wait += wait_ms;
 		std::fprintf(stderr,
 		             "PERF commit_floor pass=\"%s\" draws/frame=%.0f us/draw total=%.2f execute=%.2f commit=%.2f targets=%.2f adopt=%.2f "
-		             "bindless=%.2f bda=%.2f pipeline=%.2f build=%.2f\n",
-		             names[static_cast<size_t>(p)].c_str(), static_cast<double>(n) / frames, us(FpTotal), us(FpExecute), us(FpCommit),
-		             us(FpTargets), us(FpAdopt), us(FpBindless), us(FpBda), us(FpPipeline), us(FpBuild));
+		             "bindless=%.2f bda=%.2f pipeline=%.2f build=%.2f ms/frame total=%.2f execute=%.2f commit=%.2f card_wait=%.2f\n",
+		             name(p).c_str(), static_cast<double>(n) / frames, us(FpTotal), us(FpExecute), us(FpCommit), us(FpTargets),
+		             us(FpAdopt), us(FpBindless), us(FpBda), us(FpPipeline), us(FpBuild), ms(FpTotal), ms(FpExecute), ms(FpCommit), wait_ms);
 	}
+	std::fprintf(stderr,
+	             "PERF commit_floor_frame frames=%u frame_ms=%.2f ops/frame=%.0f ms/frame total=%.2f execute=%.2f commit=%.2f targets=%.2f "
+	             "adopt=%.2f bindless=%.2f bda=%.2f pipeline=%.2f card_wait=%.2f\n",
+	             frames, seconds * 1e3 / frames, all_ops, all_ms[FpTotal], all_ms[FpExecute], all_ms[FpCommit], all_ms[FpTargets],
+	             all_ms[FpAdopt], all_ms[FpBindless], all_ms[FpBda], all_ms[FpPipeline], all_wait);
 	s.ticks        = {};
 	s.draws        = {};
 	s.window       = now;

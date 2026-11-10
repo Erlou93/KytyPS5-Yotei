@@ -1150,16 +1150,24 @@ void GuestGpu::ExecutionThread() {
 			                   (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto) &&
 			                   ChunkLead::TargetPass(operation->pass_id) >= 0);
 		}
-		// KYTY_TRACE_PEEK_CENSUS (project 15 N3.0): the commit floor of the chunk-member draws.
+		// KYTY_TRACE_PEEK_CENSUS (project 15 N3.0; 10.11 way B: every operation): the execution thread's time by part, per
+		// bucket - the three passes' draws, the other graphics draws and GPU indirect packets, dispatches, other operations.
 		int                                 floor_pass = -1;
 		std::optional<ChunkLead::FloorTimer> floor_total;
 		if (ChunkLead::PeekCensusOn()) {
 			const auto kind = operation->kind;
-			if (operation->processor == m_gfx_cp.get() && (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto)) {
-				floor_pass = ChunkLead::TargetPass(operation->pass_id);
+			if (operation->processor == m_gfx_cp.get() && (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto ||
+			                                               kind == GpuOperationKind::DrawIndirect)) {
+				const int pass = kind == GpuOperationKind::DrawIndirect ? -1 : ChunkLead::TargetPass(operation->pass_id);
+				floor_pass     = pass >= 0 ? pass : ChunkLead::BucketOtherDraws;
+			} else if (kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect) {
+				floor_pass = ChunkLead::BucketDispatches;
+			} else {
+				floor_pass = ChunkLead::BucketOther;
 			}
-			ChunkLead::t_floor_on = floor_pass >= 0;
-			if (ChunkLead::t_floor_on) floor_total.emplace(ChunkLead::FpTotal);
+			ChunkLead::t_floor_on   = true;
+			ChunkLead::t_floor_wait = PassCensus::t_wait_ns;
+			floor_total.emplace(ChunkLead::FpTotal);
 		}
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
@@ -1197,6 +1205,7 @@ void GuestGpu::ExecutionThread() {
 		}
 		if (floor_total) {
 			floor_total.reset();
+			ChunkLead::t_floor_wait = PassCensus::t_wait_ns - ChunkLead::t_floor_wait; // the card waits inside the operation
 			ChunkLead::NoteFloor(floor_pass);
 			ChunkLead::t_floor_on = false;
 		}
