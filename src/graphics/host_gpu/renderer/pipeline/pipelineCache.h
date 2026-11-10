@@ -10,6 +10,7 @@
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
 
+#include <shared_mutex>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -357,6 +358,9 @@ private:
 	std::shared_ptr<PrecompileWarmList> m_warm;
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;
+	// N5.1: every change of m_graphics_pipelines and m_table_pending (the execution thread) holds it exclusively; a resolve
+	// helper's FindGraphicsPipeline holds it shared. The execution thread's own reads need no lock (it is the only writer).
+	mutable std::shared_mutex m_pipelines_mutex;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
 	// KYTY_PERF_TABLE_ASYNC: the workers (started at the first queued creation) and the creations queued, running,
 	// finished but not taken yet, or refused (kept: their draws stay on today's path).

@@ -3976,13 +3976,17 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		}
 		// N4.2b: the merged vertex ranges (clamped as AcquireVertexBuffers clamps them) and the 16/32-bit index buffer.
 		auto& cache = m_context.GetBufferCache();
+		// N5.1: off the execution thread under the lookup lock, tried (busy: no entries).
+		const bool helper      = !GuestGpu::IsGpuThread();
+		const bool lookup_held = !helper || cache.TryLockLookup();
+		if (!lookup_held) a.lookup_busy++;
 		std::array<uint64_t, ShaderVertexInputInfo::RES_MAX>          sizes;
 		std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX> merged;
 		const auto& vs_input = state.vertex_info[0];
 		const uint32_t merged_count =
 		    vs_input.buffers_num >= 0 && vs_input.buffers_num <= ShaderVertexInputInfo::RES_MAX ? MergedVertexRanges(vs_input, sizes, merged, false)
 		                                                                                         : UINT32_MAX;
-		for (uint32_t m = 0; merged_count != UINT32_MAX && m < merged_count; m++) {
+		for (uint32_t m = 0; lookup_held && merged_count != UINT32_MAX && m < merged_count; m++) {
 			uint64_t       generation = 0;
 			const uint64_t size = Libs::LibKernel::Memory::ClampRangeSizeAhead(merged[m].base_address, merged[m].RequestedSize(), &generation);
 			if (size == 0) continue;
@@ -3993,7 +3997,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 			entry.distance = distance;
 			entry.peek     = cache.PeekBuffer(entry.vaddr, size, false, false, {});
 		}
-		if (indexed && (element == 2u || element == 4u) && index_address != 0) {
+		if (lookup_held && indexed && (element == 2u || element == 4u) && index_address != 0) {
 			auto& entry    = slot->ahead.buffers.emplace_back();
 			entry.vaddr    = index_address;
 			entry.size     = static_cast<uint64_t>(count) * element;
@@ -4001,9 +4005,17 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 			entry.distance = distance;
 			entry.peek     = cache.PeekBuffer(entry.vaddr, entry.size, false, false, {});
 		}
+		if (helper && lookup_held) cache.UnlockLookup();
 	}
 	PipelineCache::RestoreAhead(*slot->stages, saved);
 	--t_translator;
+	if (!GuestGpu::IsGpuThread()) {
+		// N5.1: the writes a helper's peeks noted (expected 0), into the shared counters.
+		for (size_t i = 0; i < t_translator_writes.size(); i++) {
+			if (t_translator_writes[i] != 0) g_helper_translator_writes[i].fetch_add(t_translator_writes[i], std::memory_order_relaxed);
+			t_translator_writes[i] = 0;
+		}
+	}
 	slot->ahead.front = front;
 	if (front) a.front[bucket]++;
 }

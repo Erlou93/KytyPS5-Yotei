@@ -1304,6 +1304,24 @@ void GuestGpu::ResolveThread() {
 			task.indirect_draw = indirect_draw;
 			task.dispatch      = dispatch;
 			task.pass_id       = operation->pass_id;
+			if (draw && (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto)) {
+				// N5.1: a chunk-member draw's arguments (its plan is built on the helper, N5.3)
+				task.member = operation->processor == m_gfx_cp.get() && ChunkLead::TargetPass(operation->pass_id) >= 0;
+				if (kind == GpuOperationKind::DrawIndex) {
+					const auto& args   = operation->draw_index;
+					task.indexed       = true;
+					task.draw_count    = args.index_count;
+					task.index_type    = args.index_type_and_size;
+					task.slice_offset  = args.render_target_slice_offset;
+					task.draw_indirect = args.indirect.address;
+					task.index_address = reinterpret_cast<uint64_t>(args.index_addr);
+				} else {
+					const auto& args   = operation->draw_auto;
+					task.draw_count    = args.vertex_count;
+					task.slice_offset  = args.render_target_slice_offset;
+					task.draw_indirect = args.indirect.address;
+				}
+			}
 			if (dispatch) {
 				const auto& d      = operation->dispatch;
 				task.groups_x      = d.thread_group_x;

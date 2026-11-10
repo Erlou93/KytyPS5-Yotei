@@ -4210,6 +4210,18 @@ void RenderExecutor::PeekStageBuffers(const ShaderRecompiler::IR::CompiledShader
                                       const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const StageF::ResolveRecord* record,
                                       uint32_t distance, std::vector<PlanBuffer>& out) {
 	auto& cache = m_context.GetBufferCache();
+	// N5.1: off the execution thread the registry is read under the lookup lock, tried (busy: no entries).
+	const bool helper = !GuestGpu::IsGpuThread();
+	if (helper && !cache.TryLockLookup()) {
+		g_ahead.lookup_busy++;
+		return;
+	}
+	struct Unlock {
+		BufferCache* cache;
+		~Unlock() {
+			if (cache != nullptr) cache->UnlockLookup();
+		}
+	} const unlock {helper ? &cache : nullptr};
 	for (uint32_t index = 0; !t_peek_slim && index < snapshot.indirect_ranges.size(); index++) {
 		const auto& range = snapshot.indirect_ranges[index];
 		if (range.written) continue;

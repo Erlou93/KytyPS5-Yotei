@@ -2,6 +2,7 @@
 #define GRAPHICS_HOST_GPU_TRANSLATOR_GUARD_H_
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 namespace Libs::Graphics {
@@ -11,6 +12,8 @@ namespace Libs::Graphics {
 // copy, 4 write note, 5 texture-cache write section.
 inline thread_local int                     t_translator = 0;
 inline thread_local std::array<uint64_t, 8> t_translator_writes {};
+// N5.1: the writes resolve helpers' peeks noted (their own thread-local counts gathered after each plan; expected 0).
+inline std::array<std::atomic<uint64_t>, 8> g_helper_translator_writes {};
 
 inline void TranslatorNoteSite(int site) {
 	t_translator_writes[static_cast<size_t>(site) & 7u]++;
@@ -53,6 +56,7 @@ struct AheadStats {
 	// answered (touch only) and the ones that went today's way (no entry, another class, the proof failed)
 	uint64_t used_draws = 0, used_pipeline = 0, buffers_answered = 0, buffers_today = 0;
 	uint64_t describe_failed = 0; // N5.1: the soft description or key failed (no plan)
+	uint64_t lookup_busy     = 0; // N5.1: a helper's buffer peeks found the lookup lock busy (no entries)
 };
 inline AheadStats g_ahead;
 inline uint32_t   AheadBucket(uint32_t distance) {

@@ -316,6 +316,10 @@ public:
 		bool                   dispatch = false, indirect = false, async_compute = false;
 		uint16_t               pass_id = 0;
 		uint32_t               fault   = 0;
+		// N5.1: a chunk-member draw's arguments for its plan (PeekAhead on the helper, N5.3)
+		bool                   member = false, indexed = false;
+		uint32_t               draw_count = 0, index_type = 0, slice_offset = 0;
+		uint64_t               draw_indirect = 0, index_address = 0;
 	};
 	// The helper (or, with KYTY_CHECK_RESOLVE=2, the resolve thread for the reference): resolves the task into `slot`
 	// (the draw's pre-check included) and marks it ready (empty when there was nothing to resolve).

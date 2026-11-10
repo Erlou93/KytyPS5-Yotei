@@ -1584,6 +1584,7 @@ PipelineCache::~PipelineCache() {
 	// KYTY_PERF_TABLE_ASYNC: its workers first (they use the precompiler, the driver cache and the programs' modules);
 	// the pipelines they made that no draw took yet are destroyed with the others.
 	m_table_workers.reset();
+	const std::unique_lock pipelines_lock(m_pipelines_mutex);
 	for (auto& [key, job]: m_table_pending) {
 		if (job->done.load(std::memory_order_acquire) && !job->failed && job->pipeline != nullptr) {
 			m_graphics_pipelines.emplace(key, std::move(job->pipeline));
@@ -2438,6 +2439,7 @@ PipelineCache::Pipeline* PipelineCache::TakePlannedPipeline(Pipeline* planned) {
 
 std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> PipelineCache::FindGraphicsPipeline(
     const GraphicsPipelineKey& key) const {
+	const std::shared_lock pipelines_lock(m_pipelines_mutex); // N5.1: a resolve helper may ask
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
 		auto* found = iter->second.get();
 		return {found, found->pipeline != nullptr ? PipelineFind::Found : PipelineFind::Evicted};
@@ -2726,7 +2728,9 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	}
 
 	cached->last_used     = static_cast<uint32_t>(DebugPresentCount().load());
+	std::unique_lock pipelines_lock(m_pipelines_mutex);
 	auto [iter, inserted] = m_graphics_pipelines.emplace(std::move(key), std::move(cached));
+	pipelines_lock.unlock();
 	EXIT_IF(!inserted);
 	// (Upstream 959bee479 checkpoints the driver cache here; ours saves it with SaveIfDue, m_pipelines_since_save.)
 
@@ -2817,8 +2821,10 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineAsync(
 		stats.worker_ms += job.ms;
 		auto finished       = std::move(job.pipeline);
 		finished->last_used = static_cast<uint32_t>(DebugPresentCount().load());
+		std::unique_lock pipelines_lock(m_pipelines_mutex);
 		m_table_pending.erase(pending);
 		auto [iter, inserted] = m_graphics_pipelines.emplace(std::move(key), std::move(finished));
+		pipelines_lock.unlock();
 		EXIT_IF(!inserted);
 		stats.draws++;
 		return iter->second.get();
@@ -2857,7 +2863,10 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineAsync(
 		job->precompile.static_params = key.static_params;
 		job->precompile.revision      = ShaderPrecompiler::Revision();
 	}
-	m_table_pending.emplace(std::move(key), job);
+	{
+		const std::unique_lock pipelines_lock(m_pipelines_mutex);
+		m_table_pending.emplace(std::move(key), job);
+	}
 	stats.queued++;
 	m_table_workers->Push([this, job] {
 		if (job->precompile_record) (void)m_precompiler->BeforeCompile(job->precompile.Key());
