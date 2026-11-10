@@ -73,6 +73,13 @@ private:
 // t_floor_wait: the card waits (ns, masterSemaphore) inside the operation, set before NoteFloor.
 constexpr int BucketOtherDraws = 3, BucketDispatches = 4, BucketOther = 5, Buckets = 6;
 inline thread_local uint64_t t_floor_wait = 0;
+// The execution thread between operations (same switch, way B measurement 10.11): idle with nothing resolved (cause 0:
+// operations queued - the resolve dispatcher behind; 1: none - the command processor has produced nothing), the commands
+// it serves while idle (inside the idle time), the claim of a slot from a helper, and the card waits by marker pass.
+void NoteExecIdle(int cause, uint64_t ticks);
+inline thread_local uint64_t t_idle_commands = 0; // tsc ticks, added by WaitForOperations around RunCommands
+void NoteExecClaim(uint64_t ticks);
+void NoteCardWait(uint16_t pass_id, uint64_t ns);
 void NoteFloor(int pass);
 
 // Command processor thread: a snapshot slot taken / waited for (kind 0 context, 1 user config, 2 shaders).

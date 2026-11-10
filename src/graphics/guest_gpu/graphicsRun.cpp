@@ -875,7 +875,13 @@ bool GuestGpu::WaitForOperations() {
 			return true;
 		}
 		if (m_pending_commands.load(std::memory_order_acquire) != 0) {
-			RunCommands();
+			if (ChunkLead::PeekCensusOn()) { // (way B measurement: the commands served while idle)
+				const uint64_t t0 = ChunkLead::Tsc();
+				RunCommands();
+				ChunkLead::t_idle_commands += ChunkLead::Tsc() - t0;
+			} else {
+				RunCommands();
+			}
 			continue;
 		}
 		if (m_execution_stop.load(std::memory_order_acquire)) {
@@ -930,9 +936,14 @@ void GuestGpu::ExecutionThread() {
 				                                                                                                          : 2;
 				commands0     = g_stage_stats.commands.load(std::memory_order_relaxed);
 			}
+			// KYTY_TRACE_PEEK_CENSUS (way B measurement): the idle time by cause
+			const bool     census    = ChunkLead::PeekCensusOn();
+			const int      census_cause = census && m_operations.SizeApprox() == 0 ? 1 : 0;
+			const uint64_t census_t0 = census ? ChunkLead::Tsc() : 0;
 			if (!WaitForOperations()) {
 				break;
 			}
+			if (census) ChunkLead::NoteExecIdle(census_cause, ChunkLead::Tsc() - census_t0);
 			if (g_gpu_stage_stats) {
 				const auto idle_ns = StageNowNs() - idle_start;
 				g_stage_stats.execution_idle.fetch_add(1, std::memory_order_relaxed);
@@ -972,6 +983,7 @@ void GuestGpu::ExecutionThread() {
 				std::optional<PerfScope>*                perf;
 				std::optional<Common::LiveAb::BusyScope>* live;
 			} scopes {&perf_process, &live_busy};
+			const uint64_t claim_t0 = ChunkLead::PeekCensusOn() ? ChunkLead::Tsc() : 0; // (way B measurement)
 			ClaimResolved(
 			    *operation,
 			    [](void* context, bool waiting) {
@@ -985,6 +997,7 @@ void GuestGpu::ExecutionThread() {
 				    }
 			    },
 			    &scopes);
+			if (claim_t0 != 0) ChunkLead::NoteExecClaim(ChunkLead::Tsc() - claim_t0);
 		}
 		// KYTY_TRACE_CHUNK_PLAN (project 15 N4.0, diagnostic): how many chunk-member draws with a ready slot follow in the
 		// queue when the execution thread opens a chunk, and what ends it. Nothing changes.
@@ -1206,6 +1219,7 @@ void GuestGpu::ExecutionThread() {
 		if (floor_total) {
 			floor_total.reset();
 			ChunkLead::t_floor_wait = PassCensus::t_wait_ns - ChunkLead::t_floor_wait; // the card waits inside the operation
+			if (ChunkLead::t_floor_wait != 0) ChunkLead::NoteCardWait(operation->pass_id, ChunkLead::t_floor_wait);
 			ChunkLead::NoteFloor(floor_pass);
 			ChunkLead::t_floor_on = false;
 		}

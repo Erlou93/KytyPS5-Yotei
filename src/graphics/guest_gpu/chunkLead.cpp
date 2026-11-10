@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -447,6 +448,27 @@ bool PeekCensusOn() {
 	return on;
 }
 
+namespace {
+struct ExecWaits {
+	std::array<uint64_t, 2>              idle {};
+	uint64_t                             claim = 0;
+	std::unordered_map<uint16_t, uint64_t> card; // ns by pass
+};
+ExecWaits g_exec_waits; // execution thread
+} // namespace
+
+void NoteExecIdle(int cause, uint64_t ticks) {
+	g_exec_waits.idle[cause != 0 ? 1u : 0u] += ticks;
+}
+
+void NoteExecClaim(uint64_t ticks) {
+	g_exec_waits.claim += ticks;
+}
+
+void NoteCardWait(uint16_t pass_id, uint64_t ns) {
+	g_exec_waits.card[pass_id] += ns;
+}
+
 void NoteFloor(int pass) {
 	struct FloorState {
 		std::array<std::array<uint64_t, FpCount>, Buckets> ticks {};
@@ -499,6 +521,24 @@ void NoteFloor(int pass) {
 	             "adopt=%.2f bindless=%.2f bda=%.2f pipeline=%.2f card_wait=%.2f\n",
 	             frames, seconds * 1e3 / frames, all_ops, all_ms[FpTotal], all_ms[FpExecute], all_ms[FpCommit], all_ms[FpTargets],
 	             all_ms[FpAdopt], all_ms[FpBindless], all_ms[FpBda], all_ms[FpPipeline], all_wait);
+	{
+		auto&      w   = g_exec_waits;
+		const auto tms = [&](uint64_t ticks) { return static_cast<double>(ticks) / rate / 1e6 / frames; };
+		std::vector<std::pair<uint16_t, uint64_t>> card(w.card.begin(), w.card.end());
+		std::sort(card.begin(), card.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+		std::string top;
+		for (size_t i = 0; i < card.size() && i < 8u; i++) {
+			char buf[160];
+			std::snprintf(buf, sizeof(buf), " \"%s\"=%.2f", PassCensus::PassName(card[i].first).c_str(),
+			              static_cast<double>(card[i].second) / 1e6 / frames);
+			top += buf;
+		}
+		std::fprintf(stderr,
+		             "PERF exec_waits ms/frame idle[resolve_behind|cp_empty]=%.2f|%.2f idle_commands=%.2f claim=%.2f card_wait_by_pass:%s\n",
+		             tms(w.idle[0]), tms(w.idle[1]), tms(t_idle_commands), tms(w.claim), top.c_str());
+		w             = {};
+		t_idle_commands = 0;
+	}
 	s.ticks        = {};
 	s.draws        = {};
 	s.window       = now;
