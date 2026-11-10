@@ -3123,7 +3123,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		EXIT("TextureCache: image lookup requires a valid command buffer\n");
 	}
 	ValidateImageDesc(desc);
-	const bool t1a = ChunkLead::PeekCensusOn(); // (T1a: the repeatable-search counters)
+	constexpr bool t1a = true; // (T1a/T1b: the repeatable-search counters, the target memo's validity)
 	if (desc.info.data.Empty()) {
 		if (t1a) NoteNonRepeat(0);
 		std::scoped_lock lock {m_lock};

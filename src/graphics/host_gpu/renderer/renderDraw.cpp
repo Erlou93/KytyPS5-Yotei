@@ -1629,6 +1629,7 @@ struct TargetMemo {
 	uint32_t                                                color_count = 0;
 	std::array<RenderColorInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};
 	RenderDepthInfo                                         depth {};
+	bool                                                    by_t1b = false; // kept under T1b's rule
 	uint64_t draws = 0, equal = 0, hits = 0, stored = 0;
 };
 TargetMemo g_targets;
@@ -1644,6 +1645,77 @@ void Report(TargetMemo& m) {
 	             static_cast<unsigned long long>(m.draws), static_cast<unsigned long long>(m.equal),
 	             static_cast<unsigned long long>(m.hits), static_cast<unsigned long long>(m.stored));
 }
+// T1b: the mode (KYTY_PERF_TARGET_MEMO live A/B test switch; KYTY_CHECK_TARGET_MEMO=2 the check), its counters.
+uint32_t TargetMemoMode() {
+	static const uint32_t fixed = [] {
+		const char* check = std::getenv("KYTY_CHECK_TARGET_MEMO");
+		if (check != nullptr && check[0] == '2') {
+			std::fprintf(stderr, "CHECK_TARGET_MEMO=2: every target memo hit is checked against the full search\n");
+			return 2u;
+		}
+		const char* env = std::getenv("KYTY_PERF_TARGET_MEMO");
+		return env != nullptr && env[0] == '1' ? 1u : 0u;
+	}();
+	if (fixed == 2u) return 2u;
+	return Common::LiveAb::Gate(Common::LiveAb::Switch::TargetMemo, fixed) != 0u ? 1u : 0u;
+}
+struct T1bStats {
+	uint64_t abandoned = 0, compared = 0, bad = 0, injected = 0, detected = 0, not_repeatable = 0, moved = 0;
+	uint32_t logged    = 0;
+	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+inline T1bStats g_t1b;
+bool SameColorTarget(const RenderColorInfo& a, const RenderColorInfo& b) {
+	return a.image_id == b.image_id && a.target_slot == b.target_slot && a.guest_mip_level == b.guest_mip_level &&
+	       a.guest_array_layer == b.guest_array_layer && a.desc.info.data == b.desc.info.data &&
+	       a.desc.info.pixel_format == b.desc.info.pixel_format && a.desc.info.extent == b.desc.info.extent &&
+	       a.desc.info.metadata.kind == b.desc.info.metadata.kind && a.desc.view_info.base_level == b.desc.view_info.base_level &&
+	       a.desc.view_info.base_layer == b.desc.view_info.base_layer && a.desc.view_info.layer_count == b.desc.view_info.layer_count &&
+	       a.desc.type == b.desc.type && std::memcmp(&a.export_mapping, &b.export_mapping, sizeof(a.export_mapping)) == 0;
+}
+bool SameDepthTarget(const RenderDepthInfo& a, const RenderDepthInfo& b) {
+	return a.image_id == b.image_id && a.desc.info.data == b.desc.info.data && a.desc.info.pixel_format == b.desc.info.pixel_format &&
+	       a.desc.info.extent == b.desc.info.extent && a.depth_clear_enable == b.depth_clear_enable &&
+	       a.load_clear_aspects == b.load_clear_aspects && a.depth_clear_value == b.depth_clear_value &&
+	       a.depth_test_enable == b.depth_test_enable && a.depth_write_enable == b.depth_write_enable &&
+	       a.depth_compare_op == b.depth_compare_op && a.depth_bounds_test_enable == b.depth_bounds_test_enable &&
+	       a.stencil_clear_enable == b.stencil_clear_enable && a.stencil_clear_value == b.stencil_clear_value &&
+	       a.stencil_test_enable == b.stencil_test_enable && a.stencil_front == b.stencil_front && a.stencil_back == b.stencil_back;
+}
+void T1bCheck(const DrawRenderState& state, const std::array<RenderColorInfo, RENDER_COLOR_ATTACHMENTS_MAX>& colors, uint32_t count,
+              const RenderDepthInfo& depth, bool repeatable, bool registry_same) {
+	auto& s = g_t1b;
+	s.compared++;
+	const bool fault = s.compared % 997u == 0u;
+	if (fault) s.injected++;
+	bool same = count == state.color_count && SameDepthTarget(depth, state.depth_info);
+	for (uint32_t i = 0; same && i < count; i++) same = SameColorTarget(colors[i], state.color_info[i]);
+	if (fault && same && count != 0) same = false; // (the injected error: a wrong image)
+	if (!same) {
+		if (fault) {
+			s.detected++;
+		} else {
+			s.bad++;
+			if (s.logged++ < 16u) {
+				std::fprintf(stderr, "CHECK_TARGET_MEMO bad colors=%u/%u depth_id=%u/%u\n", count, state.color_count,
+				             static_cast<uint32_t>(depth.image_id.index), static_cast<uint32_t>(state.depth_info.image_id.index));
+			}
+		}
+	}
+	if (!repeatable) s.not_repeatable++;
+	if (!registry_same) s.moved++;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5)) return;
+	std::fprintf(stderr,
+	             "PERF check_target_memo compared=%llu bad=%llu not_repeatable=%llu registry_moved=%llu abandoned=%llu "
+	             "fault[injected|detected]=%llu|%llu\n",
+	             static_cast<unsigned long long>(s.compared), static_cast<unsigned long long>(s.bad),
+	             static_cast<unsigned long long>(s.not_repeatable), static_cast<unsigned long long>(s.moved),
+	             static_cast<unsigned long long>(s.abandoned), static_cast<unsigned long long>(s.injected),
+	             static_cast<unsigned long long>(s.detected));
+	s.window = now;
+}
+
 // T1a (KYTY_TRACE_PEEK_CENSUS): per searched draw, whether every search was repeatable, the first reason otherwise.
 struct T1aStats {
 	uint64_t                 searched = 0, repeatable = 0, moved = 0;
@@ -1762,20 +1834,67 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	auto&         memo = C1::g_targets;
 	C1::FillKey(target_key, buffer.GetRegisters(), mrt_mask, render_target_slice_offset,
 	            m_context.GetTextureCache().GcTick(), m_context.GetCommandScheduler().CurrentTick());
-	const bool target_equal = memo.valid && C1::SameBytes(target_key, memo.key);
+	const uint32_t t1b          = C1::TargetMemoMode(); // T1b: 0 today's rule, 1 found-only searches kept, 2 also checked
+	// (a memo kept by T1b's rule is not today's: with T1b off - the live A/B's off phase - it is not used)
+	const bool     target_equal = memo.valid && (t1b != 0 || !memo.by_t1b) && C1::SameBytes(target_key, memo.key);
 	memo.draws++;
 	memo.equal += target_equal ? 1u : 0u;
+	bool           hit = false;
 	if (target_equal) {
 		const ChunkLead::FloorTimer floor_hit(ChunkLead::FpTargetHit); // KYTY_TRACE_PEEK_CENSUS (T1a)
 		state.color_count = memo.color_count;
 		for (uint32_t i = 0; i < memo.color_count; i++) state.color_info[i] = memo.colors[i];
 		state.depth_info = memo.depth;
-		for (uint32_t i = 0; i < memo.color_count; i++) BindRenderTarget(state.color_info[i].image_id);
-		if (state.depth_info.image_id) BindRenderTarget(state.depth_info.image_id);
-		memo.hits++;
-		if (c0_targets) CleanDraws::t_front_parts.target_hit = true; // KYTY_TRACE_CLEAN_DRAWS
-		C1::Report(memo);
-	} else {
+		hit              = true;
+		if (t1b != 0) {
+			// T1b: the colour clears materialized as the search would (the same call), then the key rechecked: a
+			// materialization that cleared, submitted or registered ends the hit and the draw searches.
+			auto& cache = m_context.GetTextureCache();
+			for (uint32_t i = 0; i < state.color_count; i++) {
+				const auto kind = state.color_info[i].desc.info.metadata.kind;
+				if (kind == ImageMetadataKind::Dcc || kind == ImageMetadataKind::Cmask) {
+					cache.MaterializeTargetClear(state.color_info[i].image_id, state.color_info[i].desc);
+				}
+			}
+			hit = cache.GcTick() == target_key.gc_tick && m_context.GetCommandScheduler().CurrentTick() == target_key.tick &&
+			      DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == target_key.registry &&
+			      CleanDraws::g_meta_ops.load(std::memory_order_relaxed) == target_key.meta_ops;
+			if (!hit) {
+				memo.valid = false;
+				C1::g_t1b.abandoned++;
+				state.color_count = 0;
+				state.depth_info  = {};
+				for (auto& info: state.color_info) info = {};
+			}
+		}
+		if (hit) {
+			for (uint32_t i = 0; i < memo.color_count; i++) BindRenderTarget(state.color_info[i].image_id);
+			if (state.depth_info.image_id) BindRenderTarget(state.depth_info.image_id);
+			memo.hits++;
+			if (c0_targets) CleanDraws::t_front_parts.target_hit = true; // KYTY_TRACE_CLEAN_DRAWS
+			C1::Report(memo);
+			if (t1b == 2) {
+				// KYTY_CHECK_TARGET_MEMO=2 (T1b check): the full search too, binding nothing, must find the same targets with
+				// repeatable searches only and the image registry unchanged. Every N-th compared hit gets a wrong image.
+				std::array<RenderColorInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};
+				RenderDepthInfo                                         depth {};
+				uint32_t                                                count = 0;
+				const uint64_t nonrepeat0 = TextureCache::NonRepeatableSearches();
+				const uint64_t registry0  = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
+				m_bind_suppressed         = true;
+				for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+					if ((mrt_mask & (1u << slot)) == 0) continue;
+					ResolveRenderColorTarget(buffer, colors[count], render_target_slice_offset, slot);
+					if (colors[count].image_id) count++;
+				}
+				ResolveRenderDepthTarget(buffer, depth);
+				m_bind_suppressed = false;
+				C1::T1bCheck(state, colors, count, depth, TextureCache::NonRepeatableSearches() == nonrepeat0,
+				             DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == registry0);
+			}
+		}
+	}
+	if (!hit) {
 		const ChunkLead::FloorTimer floor_search(ChunkLead::FpTargetSearch); // KYTY_TRACE_PEEK_CENSUS (T1a)
 		const uint64_t nonrepeat0    = TextureCache::NonRepeatableSearches();
 		const auto     reasons0      = TextureCache::NonRepeatReasons();
@@ -1793,8 +1912,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 			LogDrawPhase(draw.Name(), "ResolveRenderDepthTarget");
 		}
 		ResolveRenderDepthTarget(buffer, state.depth_info);
-		// Kept when every search was found-only and nothing was registered meanwhile (the key's epoch still holds).
-		memo.valid = TextureCache::FullSearches() == full_searches &&
+		// Kept when every search was found-only and nothing was registered meanwhile (the key's epoch still holds); with T1b,
+		// when every search was repeatable (TextureCache::NonRepeatableSearches).
+		const bool searches_kept = t1b != 0 ? TextureCache::NonRepeatableSearches() == nonrepeat0 : TextureCache::FullSearches() == full_searches;
+		memo.valid = searches_kept &&
 		             DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == target_key.registry &&
 		             CleanDraws::g_meta_ops.load(std::memory_order_relaxed) == target_key.meta_ops;
 		if (ChunkLead::PeekCensusOn()) {
@@ -1810,6 +1931,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		}
 		if (memo.valid) {
 			memo.key         = target_key;
+			memo.by_t1b      = t1b != 0;
 			memo.color_count = state.color_count;
 			for (uint32_t i = 0; i < state.color_count; i++) memo.colors[i] = state.color_info[i];
 			memo.depth = state.depth_info;

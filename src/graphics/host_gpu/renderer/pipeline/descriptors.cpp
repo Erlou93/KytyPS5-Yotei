@@ -1843,6 +1843,7 @@ void RenderExecutor::BindImage(ImageId id, bool storage) {
 }
 
 void RenderExecutor::BindRenderTarget(ImageId id) {
+	if (m_bind_suppressed) return; // (T1b check: the comparison search)
 	auto&          image = m_context.GetTextureCache().GetImage(id);
 	const uint64_t mix   = (static_cast<uint64_t>(id.index) << 2u) | 2u;
 	if (auto* prep = PrepFlags(); prep != nullptr) { // the plan flags

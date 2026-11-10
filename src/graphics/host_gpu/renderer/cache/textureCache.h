@@ -166,6 +166,9 @@ public:
 	// reason each (0 null image, 1 not a target type, 2 not by SameBacking, 3 another candidate is a block alias, 4 freed or
 	// exact-format reset, 5 inserted, 6 the view moved to another mip or layer).
 	[[nodiscard]] static uint64_t NonRepeatableSearches();
+	// T1b: a target memo hit's colour-clear materialization, as FindImage does it after the search (the description's view
+	// as the search left it: a repeatable search moves no view).
+	void MaterializeTargetClear(ImageId id, const ImageDesc& desc) { MaterializeColorClear(id, desc, desc.view_info.base_layer); }
 	[[nodiscard]] static const std::array<uint64_t, 7>& NonRepeatReasons();
 	[[nodiscard]] uint64_t        GcTick() const noexcept { return m_gc_tick; }
 	[[nodiscard]] ImageId     ReplayImage(ImageId id);

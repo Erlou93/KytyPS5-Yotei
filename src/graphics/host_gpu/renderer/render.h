@@ -541,6 +541,7 @@ private:
 	uint64_t      m_plan_set_version = 0;      // N4.2a: the table set a plan names for the stage being prepared
 	bool          m_slot_taken       = false;  // N4.2: TakeResolvedState took the running draw's slot (UseResolvedDraw clears it)
 	bool          m_state_resolved = false;   // the draw being prepared adopted its state
+	bool          m_bind_suppressed = false;  // T1b check (KYTY_CHECK_TARGET_MEMO=2): the second search binds nothing
 	std::unique_ptr<ResolvedDrawRing, void (*)(ResolvedDrawRing*)> m_resolved_ring {nullptr, nullptr};
 	DrawSlot* m_draw_slot    = nullptr; // allocated on first use
 	DrawSlot* m_current_slot = nullptr;
