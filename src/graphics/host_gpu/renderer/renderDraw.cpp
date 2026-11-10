@@ -1733,6 +1733,60 @@ void T1bCheck(const DrawRenderState& state, const std::array<RenderColorInfo, RE
 	s.window = now;
 }
 
+// T1b diagnostic (KYTY_TRACE_PEEK_CENSUS): per draw bucket (0 Deferred, 1 shadows, 2 PS Lights, 3 other draws), why the
+// memo did not hit: 0 hit, 1 memo invalid, 2 kept by the old rule, then the first key group differing from the memo's key
+// (3 colors, 4 depth, 5 control, 6 stencil, 7 clears, 8 masks, 9 registry, 10 gc tick, 11 command tick, 12 meta).
+struct MissStats {
+	std::array<std::array<uint64_t, 13>, 4> why {};
+	std::chrono::steady_clock::time_point  window = std::chrono::steady_clock::now();
+};
+inline MissStats g_miss;
+template <typename A>
+bool Differs(const A& a, const A& b) {
+	return std::memcmp(static_cast<const void*>(&a), static_cast<const void*>(&b), sizeof(A)) != 0;
+}
+void NoteMiss(int bucket, bool hit, const TargetMemo& memo, const TargetKey& k) {
+	auto& s = g_miss;
+	if (bucket < 0 || bucket > 3) return;
+	int why = 0;
+	if (!hit) {
+		const auto& m = memo.key;
+		why = !memo.valid                                                              ? 1
+		      : Differs(k.rt, m.rt)                                                    ? 3
+		      : Differs(k.depth, m.depth)                                              ? 4
+		      : Differs(k.rc, m.rc) || Differs(k.dc, m.dc)                             ? 5
+		      : Differs(k.sc, m.sc) || Differs(k.sm, m.sm)                             ? 6
+		      : k.depth_clear != m.depth_clear || k.stencil_clear != m.stencil_clear   ? 7
+		      : k.rt_mask != m.rt_mask || k.mrt_mask != m.mrt_mask || k.slice_offset != m.slice_offset ? 8
+		      : k.registry != m.registry                                               ? 9
+		      : k.gc_tick != m.gc_tick                                                 ? 10
+		      : k.tick != m.tick                                                       ? 11
+		      : k.meta_ops != m.meta_ops                                               ? 12
+		                                                                               : 2;
+	}
+	s.why[static_cast<size_t>(bucket)][static_cast<size_t>(why)]++;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5)) return;
+	static const char* const names[4] = {"Deferred", "shadows", "PS Lights", "other draws"};
+	for (size_t b = 0; b < 4; b++) {
+		uint64_t n = 0;
+		for (const auto v: s.why[b]) n += v;
+		if (n == 0) continue;
+		std::string text;
+		for (size_t i = 0; i < 13; i++) {
+			char buf[32];
+			std::snprintf(buf, sizeof(buf), "%s%.1f", i == 0 ? "" : "|", 100.0 * static_cast<double>(s.why[b][i]) / static_cast<double>(n));
+			text += buf;
+		}
+		std::fprintf(stderr,
+		             "PERF t1b_miss group=%s draws=%llu %%[hit|invalid|old_rule|colors|depth|control|stencil|clears|masks|registry|gc_tick|"
+		             "tick|meta]=%s\n",
+		             names[b], static_cast<unsigned long long>(n), text.c_str());
+	}
+	s        = {};
+	s.window = now;
+}
+
 // T1a (KYTY_TRACE_PEEK_CENSUS): per searched draw, whether every search was repeatable, the first reason otherwise.
 struct T1aStats {
 	uint64_t                 searched = 0, repeatable = 0, moved = 0;
@@ -1856,6 +1910,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	const bool     target_equal = memo.valid && (t1b != 0 || !memo.by_t1b) && C1::SameBytes(target_key, memo.key);
 	memo.draws++;
 	memo.equal += target_equal ? 1u : 0u;
+	if (ChunkLead::PeekCensusOn() && t1b != 0) C1::NoteMiss(ChunkLead::t_floor_bucket, target_equal, memo, target_key); // (T1b diag)
 	bool           hit = false;
 	if (target_equal) {
 		const ChunkLead::FloorTimer floor_hit(ChunkLead::FpTargetHit); // KYTY_TRACE_PEEK_CENSUS (T1a)
