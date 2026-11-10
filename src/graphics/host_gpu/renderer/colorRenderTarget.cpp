@@ -26,6 +26,16 @@
 
 namespace Libs::Graphics {
 
+// N5.1 (translatorGuard.h): soft fails of the target description for the plan's builder.
+#define DESCRIBE_EXIT(...)                                                                                              \
+	do {                                                                                                                \
+		if (t_describe_soft) {                                                                                          \
+			t_describe_failed = true;                                                                                   \
+			return false;                                                                                               \
+		}                                                                                                               \
+		EXIT(__VA_ARGS__);                                                                                              \
+	} while (false)
+
 static bool DccAlphaOnMsb(const HW::ColorInfo& info) {
 	switch (info.format) {
 		case Prospero::ChannelLayout::k10_10_10_2:
@@ -93,34 +103,34 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	// Upstream 5f29374d5 approximates 4-coverage/2-fragment EQAA (PPSA24156) with 2x MSAA; not taken (an approximation,
 	// SESJA-SYNC1): Yotei renders no EQAA target.
 	if (samples == 0 || rt.attrib.num_samples != rt.attrib.num_fragments) {
-		EXIT("unsupported render-target sample configuration: samples=%u fragments=%u\n",
+		DESCRIBE_EXIT("unsupported render-target sample configuration: samples=%u fragments=%u\n",
 		     rt.attrib.num_samples, rt.attrib.num_fragments);
 	}
 	const uint32_t levels = rt.attrib2.num_mip_levels + 1u;
 	if (levels == 0 || levels > 16 || rt.view.current_mip_level >= levels) {
-		EXIT("unsupported render-target mip range: current=%u levels=%u\n",
+		DESCRIBE_EXIT("unsupported render-target mip range: current=%u levels=%u\n",
 		     rt.view.current_mip_level, levels);
 	}
 	static constexpr std::array image_types {Prospero::ImageType::kColor1D,
 	                                         Prospero::ImageType::kColor2D,
 	                                         Prospero::ImageType::kColor3D};
 	if (rt.attrib3.dimension >= image_types.size()) {
-		EXIT("unsupported render-target dimension: %u\n", rt.attrib3.dimension);
+		DESCRIBE_EXIT("unsupported render-target dimension: %u\n", rt.attrib3.dimension);
 	}
 	const auto image_type = image_types[rt.attrib3.dimension];
 	const bool is_1d      = image_type == Prospero::ImageType::kColor1D;
 	const bool volume     = image_type == Prospero::ImageType::kColor3D;
 	if (is_1d && rt.attrib2.height != 0) {
-		EXIT("1D render target has nonzero height: %u\n", rt.attrib2.height);
+		DESCRIBE_EXIT("1D render target has nonzero height: %u\n", rt.attrib2.height);
 	}
 	if (!volume && rt.attrib3.depth != 0) {
-		EXIT("non-3D render target has nonzero depth: %u\n", rt.attrib3.depth);
+		DESCRIBE_EXIT("non-3D render target has nonzero depth: %u\n", rt.attrib3.depth);
 	}
 	if (is_1d && samples != 1) {
-		EXIT("multisampled 1D render targets are unsupported\n");
+		DESCRIBE_EXIT("multisampled 1D render targets are unsupported\n");
 	}
 	if (volume && samples != 1) {
-		EXIT("multisampled 3D render targets are unsupported\n");
+		DESCRIBE_EXIT("multisampled 3D render targets are unsupported\n");
 	}
 	const uint32_t depth = volume ? rt.attrib3.depth + 1u : 1u;
 	// For volumes, CB_COLOR_VIEW bounds exported slices; ATTRIB3 defines storage depth.
@@ -135,7 +145,7 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 		case TargetViewType::Image2D:
 		case TargetViewType::Image2DArray: break;
 		case TargetViewType::Unsupported:
-			EXIT("invalid render-target view: base=%u last=%u draw_offset=%u\n",
+			DESCRIBE_EXIT("invalid render-target view: base=%u last=%u draw_offset=%u\n",
 			     rt.view.base_array_slice_index, rt.view.last_array_slice_index,
 			     render_target_slice_offset);
 	}
@@ -174,16 +184,16 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 		case Prospero::TileMode::kRenderTarget:
 			tile = !RenderIsColorTileModeLinear(rt.attrib3.tile_mode);
 			break;
-		default: EXIT("unknown tile mode: %u\n", static_cast<uint32_t>(rt.attrib3.tile_mode));
+		default: DESCRIBE_EXIT("unknown tile mode: %u\n", static_cast<uint32_t>(rt.attrib3.tile_mode));
 	}
 	if (samples > 1 && (!tile || levels != 1)) {
-		EXIT("multisampled render targets require a single-mip tiled surface\n");
+		DESCRIBE_EXIT("multisampled render targets require a single-mip tiled surface\n");
 	}
 	if (texture_tile && samples != 1) {
-		EXIT("texture-tiled color render targets do not support multisampling\n");
+		DESCRIBE_EXIT("texture-tiled color render targets do not support multisampling\n");
 	}
 	if (volume && !tile) {
-		EXIT("linear 3D render targets are unsupported\n");
+		DESCRIBE_EXIT("linear 3D render targets are unsupported\n");
 	}
 
 	width  = rt.attrib2.width + 1;
@@ -200,7 +210,7 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	}
 	const auto bytes_per_element = target_format.bytes_per_element;
 	if (bytes_per_element == 0) {
-		EXIT("render-target format has no valid element size\n");
+		DESCRIBE_EXIT("render-target format has no valid element size\n");
 	}
 	const auto transfer_format = ImageOps::RenderTargetTransferFormat(bytes_per_element);
 	TileTextureBlockLayout texture_tile_layout {};
@@ -212,7 +222,7 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	     rt.info.fmask_one_frag_mode || rt.info.cmask_fast_clear_enable ||
 	     rt.info.dcc_compression_enable || rt.cmask.addr != 0 || rt.fmask.addr != 0 ||
 	     rt.dcc_addr.addr != 0 || rt.dcc.data_write_on_dcc_clear_to_reg)) {
-		EXIT("unsupported texture-tiled render target: addr=0x%016" PRIx64 " tile=%u"
+		DESCRIBE_EXIT("unsupported texture-tiled render target: addr=0x%016" PRIx64 " tile=%u"
 		     " dimension=%u depth=%u levels=%u layer=%u/%u samples=%u fragments=%u bpe=%u"
 		     " cmask=0x%016" PRIx64 " fmask=0x%016" PRIx64 " dcc=0x%016" PRIx64 "\n",
 		     rt.base.addr, static_cast<uint32_t>(rt.attrib3.tile_mode), rt.attrib3.dimension,
@@ -223,7 +233,7 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	if ((standard64 || depth_tile) &&
 	    (rt.attrib3.dimension != 1 || rt.attrib3.depth != 0 ||
 	     (depth_tile && (view.base_layer != 0 || view.image_layers != 1)))) {
-		EXIT("unsupported 64KB texture-tiled render-target view: dimension=%u depth=%u"
+		DESCRIBE_EXIT("unsupported 64KB texture-tiled render-target view: dimension=%u depth=%u"
 		     " layer=%u/%u\n",
 		     rt.attrib3.dimension, rt.attrib3.depth, view.base_layer, view.image_layers);
 	}
@@ -240,11 +250,11 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	desc.info.tile_mode       = rt.attrib3.tile_mode;
 	if (!volume && rt.attrib3.tile_mode == Prospero::TileMode::kRenderTarget &&
 	    levels > std::bit_width(std::max(width, height))) {
-		EXIT("unsupported render-target mip count\n");
+		DESCRIBE_EXIT("unsupported render-target mip count\n");
 	}
 	desc.info.UpdateSize();
 	if (!desc.info.data.Valid()) {
-		EXIT("render-target backing range is invalid\n");
+		DESCRIBE_EXIT("render-target backing range is invalid\n");
 	}
 	const bool has_dcc        = rt.info.dcc_compression_enable && rt.dcc_addr.addr != 0;
 	const bool has_cmask      = !rt.info.dcc_compression_enable && rt.info.cmask_fast_clear_enable &&
@@ -284,7 +294,7 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	r.guest_mip_level          = rt.view.current_mip_level;
 	r.guest_array_layer        = view.base_layer;
 	r.export_mapping           = target_format.export_mapping;
-	return true;
+	return !t_describe_failed;
 }
 
 void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,

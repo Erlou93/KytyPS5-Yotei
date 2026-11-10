@@ -52,11 +52,15 @@ struct AheadStats {
 	// N4.3 (KYTY_PERF_DRAW_PLANS=1): draws committed from a plan; the pipeline taken from it; buffer acquisitions it
 	// answered (touch only) and the ones that went today's way (no entry, another class, the proof failed)
 	uint64_t used_draws = 0, used_pipeline = 0, buffers_answered = 0, buffers_today = 0;
+	uint64_t describe_failed = 0; // N5.1: the soft description or key failed (no plan)
 };
 inline AheadStats g_ahead;
 inline uint32_t   AheadBucket(uint32_t distance) {
     return distance == 0u ? 0u : distance < 16u ? 1u : distance < 64u ? 2u : 3u;
 }
+// N5.1: the plan's builder describes targets and builds the pipeline key softly: where today's path would stop the emulator
+// (EXIT), the description fails instead (no plan; today's path meets the same registers when the draw runs).
+inline thread_local bool t_describe_soft = false, t_describe_failed = false;
 // N5.0: the plan's builder without the data only the checks use (no slot-by-slot image peek, no record-keyed ranges).
 inline thread_local bool t_peek_slim = false;
 // The operations the execution thread began (S2a's lag check measures its age in them).

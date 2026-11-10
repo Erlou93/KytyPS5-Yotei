@@ -3938,6 +3938,8 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		mrt_mask = (mrt_mask & color_output_mask) | objprim_mask;
 		std::array<RenderColorInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};
 		uint32_t                                                  color_count = 0;
+		t_describe_soft   = true; // N5.1: a fail here means no plan, never a stop
+		t_describe_failed = false;
 		for (uint32_t target = 0; target < RENDER_COLOR_ATTACHMENTS_MAX; target++) {
 			if ((mrt_mask & (1u << target)) == 0) continue;
 			if (DescribeRenderColorTarget(ctx, colors[color_count], slice_offset, target, false)) color_count++;
@@ -3950,6 +3952,14 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		slot->ahead.key = pc.MakeGraphicsPipelineKeyFrom(std::span {colors.data(), color_count}, depth, vertex_stages, ctx, ucfg,
 		                                                 state.ps_active ? &state.ps_input_info : nullptr, topology, restart,
 		                                                 state.programs, true);
+		t_describe_soft = false;
+		if (t_describe_failed) {
+			a.describe_failed++;
+			PipelineCache::RestoreAhead(*slot->stages, saved);
+			slot->ahead.planned = false;
+			--t_translator;
+			return;
+		}
 		slot->ahead.key_valid = true;
 		slot->ahead.find      = pc.FindGraphicsPipeline(slot->ahead.key);
 		front                 = slot->ahead.find.second == PipelineCache::PipelineFind::Found;

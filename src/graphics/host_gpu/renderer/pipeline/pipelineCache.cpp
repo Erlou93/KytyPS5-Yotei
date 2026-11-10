@@ -2449,6 +2449,24 @@ std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> PipelineCache::
 	return {nullptr, PipelineFind::Missing};
 }
 
+// N5.1 (translatorGuard.h): soft fails of the key for the plan's builder.
+#define KEY_EXIT_IF(x)                                                                                                  \
+	do {                                                                                                                \
+		if (t_describe_soft && (x)) {                                                                                   \
+			t_describe_failed = true;                                                                                   \
+			return GraphicsPipelineKey {};                                                                              \
+		}                                                                                                               \
+		EXIT_IF(x);                                                                                                     \
+	} while (false)
+#define KEY_EXIT(...)                                                                                                   \
+	do {                                                                                                                \
+		if (t_describe_soft) {                                                                                          \
+			t_describe_failed = true;                                                                                   \
+			return GraphicsPipelineKey {};                                                                              \
+		}                                                                                                               \
+		EXIT(__VA_ARGS__);                                                                                              \
+	} while (false)
+
 PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
     std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
     std::span<const ShaderVertexInputInfo> vertex_info, const HW::Context& ctx, const HW::UserConfig& user_config,
@@ -2458,10 +2476,10 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
 
-	EXIT_IF(colors.size() > RENDER_COLOR_ATTACHMENTS_MAX);
-	EXIT_IF(!vertex_program);
+	KEY_EXIT_IF(colors.size() > RENDER_COLOR_ATTACHMENTS_MAX);
+	KEY_EXIT_IF(!vertex_program);
 	const bool ps_active = ps_input_info != nullptr;
-	EXIT_IF(ps_active && !pixel_program);
+	KEY_EXIT_IF(ps_active && !pixel_program);
 	const auto color_count = static_cast<uint32_t>(colors.size());
 
 
@@ -2480,9 +2498,9 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
 	uint32_t attachment_samples = 0;
 	for (uint32_t i = 0; i < color_count; i++) {
 		const auto slot = colors[i].target_slot;
-		EXIT_IF(slot >= RENDER_COLOR_ATTACHMENTS_MAX);
+		KEY_EXIT_IF(slot >= RENDER_COLOR_ATTACHMENTS_MAX);
 		rendering.color_count = std::max(rendering.color_count, slot + 1);
-		EXIT_IF((!described && !colors[i].image_id) || colors[i].desc.view_info.format == vk::Format::eUndefined);
+		KEY_EXIT_IF((!described && !colors[i].image_id) || colors[i].desc.view_info.format == vk::Format::eUndefined);
 		static_params.color_mask[slot] = colors[i].export_mapping.ApplyMask(
 		    render_target_mask_slot(ctx.GetRenderTargetMask(), colors[i].target_slot));
 		// Upstream b4406b046: a packed 11-11-10 UNorm export writes one 32-bit channel (not with
@@ -2495,7 +2513,7 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
 		if (attachment_samples == 0) {
 			attachment_samples = colors[i].desc.info.samples;
 		} else if (attachment_samples != colors[i].desc.info.samples) {
-			EXIT("mixed color attachment sample counts are unsupported: %u and %u\n",
+			KEY_EXIT("mixed color attachment sample counts are unsupported: %u and %u\n",
 			     attachment_samples, colors[i].desc.info.samples);
 		}
 		const auto& rt                        = ctx.GetRenderTarget(colors[i].target_slot);
@@ -2559,17 +2577,17 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
 		if (attachment_samples == 0) {
 			attachment_samples = depth.desc.info.samples;
 		} else if (attachment_samples != depth.desc.info.samples) {
-			EXIT("mixed color/depth sample counts are unsupported: %u and %u\n", attachment_samples,
+			KEY_EXIT("mixed color/depth sample counts are unsupported: %u and %u\n", attachment_samples,
 			     depth.desc.info.samples);
 		}
 	}
 	if (color_count == 0 && !with_depth) {
 		attachment_samples = render_sample_count(ctx.GetAaConfig().msaa_num_samples);
-		EXIT_IF(!static_cast<bool>(
+		KEY_EXIT_IF(!static_cast<bool>(
 		    m_graphics.GetPhysicalDeviceProperties().limits.framebufferNoAttachmentsSampleCounts &
 		    vulkan_sample_count(attachment_samples)));
 	}
-	EXIT_IF(attachment_samples == 0 ||
+	KEY_EXIT_IF(attachment_samples == 0 ||
 	        vulkan_sample_count(attachment_samples) == vk::SampleCountFlagBits {});
 
 	if (ps_active && depth.depth_test_enable && ps_input_info->ps_execute_on_noop) {
@@ -2588,7 +2606,7 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
 	static_params.sample_shading_enable =
 	    ps_active && attachment_samples > 1 && ps_input_info->ps_sample_shading;
 	if (static_params.sample_shading_enable && !m_graphics.sample_rate_shading_enabled) {
-		EXIT("Pipeline: sample-rate shading is required but unsupported by the host\n");
+		KEY_EXIT("Pipeline: sample-rate shading is required but unsupported by the host\n");
 	}
 	static_params.alpha_to_coverage_enable = ps_active && ctx.GetShaderRegisters().AlphaToMask();
 	const bool rect_list = Prospero::IsRectList(user_config.GetPrimType());
@@ -2600,7 +2618,7 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
 	    ResolvePolygonMode(mc, static_params.cull_front, static_params.cull_back);
 
 	if (vs_input_info.stage.program->stage != ShaderType::Mesh) {
-		EXIT_IF(vs_input_info.buffers_num < 0 ||
+		KEY_EXIT_IF(vs_input_info.buffers_num < 0 ||
 		        vs_input_info.buffers_num > ShaderVertexInputInfo::RES_MAX ||
 		        vs_input_info.resources_num < 0 ||
 		        vs_input_info.resources_num > ShaderVertexInputInfo::RES_MAX);
@@ -2613,7 +2631,7 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
 		}
 		for (int attribute = 0; attribute < vs_input_info.resources_num; attribute++) {
 			const auto binding = vs_input_info.resources_dst[attribute].buffer_index;
-			EXIT_IF(binding < 0 || binding >= vs_input_info.buffers_num);
+			KEY_EXIT_IF(binding < 0 || binding >= vs_input_info.buffers_num);
 			key.vertex_input.attributes[attribute] = {
 			    .offset = static_cast<uint32_t>(vs_input_info.resources[attribute].Base48() -
 			                                    vs_input_info.buffers[binding].addr),

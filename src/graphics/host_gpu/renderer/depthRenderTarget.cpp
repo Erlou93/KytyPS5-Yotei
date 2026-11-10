@@ -31,6 +31,16 @@
 
 namespace Libs::Graphics {
 
+// N5.1 (translatorGuard.h): soft fails of the depth description for the plan's builder (`ret`: the function's result).
+#define DEPTH_FAIL(ret, ...)                                                                                            \
+	do {                                                                                                                \
+		if (t_describe_soft) {                                                                                          \
+			t_describe_failed = true;                                                                                   \
+			return ret;                                                                                                 \
+		}                                                                                                               \
+		DepthFatal(__VA_ARGS__);                                                                                        \
+	} while (false)
+
 [[noreturn]] static void DepthFatal(const char* format, ...) {
 	std::fputs("Depth target fatal: ", stderr);
 	va_list args;
@@ -65,12 +75,12 @@ static vk::StencilOp ConvertStencilOp(uint8_t value, uint8_t write_mask, uint8_t
 				return vk::StencilOp::eKeep;
 			}
 			if ((write_mask & ~op_value) != 0) {
-				DepthFatal("unsupported stencil XOR operands: write mask=0x%02" PRIx8
+				DEPTH_FAIL(vk::StencilOp::eKeep, "unsupported stencil XOR operands: write mask=0x%02" PRIx8
 				           ", operation value=0x%02" PRIx8,
 				           write_mask, op_value);
 			}
 			return vk::StencilOp::eInvert;
-		default: DepthFatal("unsupported stencil operation: 0x%02" PRIx8, value);
+		default: DEPTH_FAIL(vk::StencilOp::eKeep, "unsupported stencil operation: 0x%02" PRIx8, value);
 	}
 }
 
@@ -95,7 +105,7 @@ static vk::StencilOpState ConvertStencilState(
 			replacement = op_value;
 		}
 		if (((reference ^ replacement) & required_bits & state.writeMask) != 0) {
-			DepthFatal("unsupported stencil replacement: compare=%u, compare mask=0x%02" PRIx32
+			DEPTH_FAIL(vk::StencilOpState {}, "unsupported stencil replacement: compare=%u, compare mask=0x%02" PRIx32
 			           ", write mask=0x%02" PRIx32 ", operation value=0x%02" PRIx8
 			           ", test value=0x%02" PRIx32,
 			           compare, state.compareMask, state.writeMask, op_value, test_value);
@@ -164,39 +174,39 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(GraphicContext&             g
 	    write_buffer ? z.stencil_write_base_addr : z.stencil_read_base_addr;
 	if (!z.z_info.HasValidTextureCompatibility() ||
 	    !z.stencil_info.HasValidTextureCompatibility()) {
-		DepthFatal("invalid PS5 depth texture-compatibility encoding");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "invalid PS5 depth texture-compatibility encoding");
 	}
 	const bool has_htile = z.z_info.htile_acceleration;
 	const bool unsupported_shading_rate_encoding =
 	    z.shading_rate_encoding > 1 || (z.shading_rate_encoding != 0 && !has_htile);
 	const auto samples   = render_sample_count(z.z_info.num_samples);
 	if (samples == 0) {
-		DepthFatal("unsupported depth fragment count: %u", z.z_info.num_samples);
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "unsupported depth fragment count: %u", z.z_info.num_samples);
 	}
 	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
 	switch (view.type) {
 		case TargetViewType::Image2D:
 		case TargetViewType::Image2DArray: break;
 		case TargetViewType::Unsupported:
-			DepthFatal("invalid depth view: base=%u last=%u", z.depth_view.slice_start,
+			DEPTH_FAIL(TextureCache::ImageDesc {}, "invalid depth view: base=%u last=%u", z.depth_view.slice_start,
 			           z.depth_view.slice_max);
 	}
 	// EXPCLEAR permits an HTile acceleration state; the host attachment is already expanded.
 	if (z.z_info.max_mip_level != 0 || unsupported_shading_rate_encoding || depth_address == 0 ||
 	    (depth_address & 0xffffu) != 0) {
-		DepthFatal("unsupported depth register state");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "unsupported depth register state");
 	}
 	if (has_stencil) {
 		if (z.stencil_info.format != Prospero::StencilFormat::k8UInt || stencil_address == 0 ||
 		    (stencil_address & 0xffffu) != 0) {
-			DepthFatal("unsupported stencil attachment state");
+			DEPTH_FAIL(TextureCache::ImageDesc {}, "unsupported stencil attachment state");
 		}
 	} else if (z.stencil_read_base_addr != 0 || z.stencil_write_base_addr != 0) {
-		DepthFatal("stencil state without an active stencil attachment");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "stencil state without an active stencil attachment");
 	}
 	if (has_htile) {
 		if (z.htile_data_base_addr == 0 || (z.htile_data_base_addr & 0x7fffu) != 0) {
-			DepthFatal("invalid HTile metadata address");
+			DEPTH_FAIL(TextureCache::ImageDesc {}, "invalid HTile metadata address");
 		}
 		// Clear tracking covers slices 0..63; higher slices read as not fast-cleared (KYTY_FIX_HTILE_SLICE_CLEAR: all).
 		if (z.depth_view.slice_max >= 64 && TextureCache::HtileSliceClearMode() == 0u) {
@@ -208,23 +218,23 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(GraphicContext&             g
 		}
 	}
 	if (!z.size.valid) {
-		DepthFatal("missing depth extent");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "missing depth extent");
 	}
 	// With a single level, the selected mip is a surface of that mip's extent at the base address.
 	const auto     mip    = z.depth_view.current_mip_level;
 	const uint32_t width  = std::max((static_cast<uint32_t>(z.size.x_max) + 1u) >> mip, 1u);
 	const uint32_t height = std::max((static_cast<uint32_t>(z.size.y_max) + 1u) >> mip, 1u);
 	if (width > 16384 || height > 16384) {
-		DepthFatal("invalid depth extent");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "invalid depth extent");
 	}
 	const auto* policy = FindDepthFormatPolicy(z.z_info.format);
 	if (policy == nullptr) {
-		DepthFatal("unsupported depth/stencil format pair");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "unsupported depth/stencil format pair");
 	}
 	const auto ideal_format = DepthAttachmentFormat(*policy, has_stencil);
 	const auto format = ResolveHostDepthAttachmentFormat(graphics, *policy, has_stencil, samples);
 	if (format == vk::Format::eUndefined) {
-		DepthFatal("no host depth/stencil format supports required usage for %s",
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "no host depth/stencil format supports required usage for %s",
 		           vk::to_string(ideal_format).c_str());
 	}
 	const auto     guest_format = policy->guest_format;
@@ -238,12 +248,12 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(GraphicContext&             g
 	    depth_size.align != 65536 || depth_size.size == 0 ||
 	    (has_stencil != (stencil_size.align == 65536 && stencil_size.size != 0)) ||
 	    (has_htile != (htile_size.align == 32768 && htile_size.size != 0))) {
-		DepthFatal("unsupported depth/stencil/HTile footprint");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "unsupported depth/stencil/HTile footprint");
 	}
 	if (depth_size.size > UINT64_MAX / view.image_layers ||
 	    stencil_size.size > UINT64_MAX / view.image_layers ||
 	    htile_size.size > UINT64_MAX / view.image_layers) {
-		DepthFatal("layered depth footprint overflow");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "layered depth footprint overflow");
 	}
 	const auto depth_backing_size   = depth_size.size * view.image_layers;
 	const auto stencil_backing_size = stencil_size.size * view.image_layers;
@@ -251,7 +261,7 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(GraphicContext&             g
 	if (!GuestRange {depth_address, depth_backing_size}.Valid() ||
 	    (has_stencil && !GuestRange {stencil_address, stencil_backing_size}.Valid()) ||
 	    (has_htile && !GuestRange {z.htile_data_base_addr, htile_backing_size}.Valid())) {
-		DepthFatal("layered depth backing range is invalid");
+		DEPTH_FAIL(TextureCache::ImageDesc {}, "layered depth backing range is invalid");
 	}
 	TextureCache::ImageDesc desc {};
 	desc.type                 = TextureCache::BindingType::DepthTarget;
@@ -332,14 +342,14 @@ bool RenderExecutor::DescribeRenderDepthTarget(GraphicContext& graphics, const H
 	    (!z.depth_view.depth_write_disable && z.z_write_base_addr != z.z_read_base_addr) ||
 	    (has_stencil && !z.depth_view.stencil_write_disable &&
 	     z.stencil_write_base_addr != z.stencil_read_base_addr)) {
-		DepthFatal("unsupported depth register state");
+		DEPTH_FAIL(false, "unsupported depth register state");
 	}
 	if (rc.copy_depth_to_color &&
 	    (z.z_info.num_samples != 0 || rc.copy_sample != 0 ||
 	     z.z_info.format != Prospero::DepthFormat::kZ32F ||
 	     dc.z_enable || dc.z_write_enable || dc.depth_bounds_enable || dc.stencil_enable ||
 	     rc.depth_clear_enable || rc.stencil_clear_enable)) {
-		DepthFatal("unsupported depth-to-color copy state");
+		DEPTH_FAIL(false, "unsupported depth-to-color copy state");
 	}
 	r.desc = MakeDepthTargetDesc(graphics, z);
 	r.depth_clear_enable      = rc.depth_clear_enable;
@@ -384,7 +394,7 @@ bool RenderExecutor::DescribeRenderDepthTarget(GraphicContext& graphics, const H
 		if (dc.stencilfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
 		    (dc.backface_enable &&
 		     dc.stencilfunc_bf > static_cast<uint8_t>(vk::CompareOp::eAlways))) {
-			DepthFatal("unsupported stencil compare state");
+			DEPTH_FAIL(false, "unsupported stencil compare state");
 		}
 		r.stencil_front = ConvertStencilState(
 		    dc.stencilfunc, {sc.stencil_fail, sc.stencil_zpass, sc.stencil_zfail},
@@ -399,7 +409,7 @@ bool RenderExecutor::DescribeRenderDepthTarget(GraphicContext& graphics, const H
 			r.stencil_back = r.stencil_front;
 		}
 	}
-	return true;
+	return !t_describe_failed; // N5.1
 }
 
 void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
