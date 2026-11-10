@@ -343,6 +343,20 @@ void DrawCensusScope::Finish() {
 		             us(DispatchSub::GMr), us(DispatchSub::GPerm),
 		             static_cast<double>(s.sub[static_cast<size_t>(DispatchSub::GPathResolved)]) / n,
 		             static_cast<double>(s.sub[static_cast<size_t>(DispatchSub::GPathMr)]) / n);
+		// Project 15 way B W0: the shared parts (the dispatch census' names; the preparation's buffers, images, tables).
+		static const char* const shared[] = {"prepare_program", "key_find", "adopt", "permutation", "find_buffers",
+		                                     "prepare_bda", "rebind_images", "shared_memory", "rebind_buffers", "pipeline",
+		                                     "prepare_bindings", "commit_bindings", "record", "reset", "adopt_reads",
+		                                     "bda_ranges", "obtain_written", "obtain_read", "tc_invalidate", "srt_upload",
+		                                     "data_upload", "ow_batch_commit", "ow_upload_walk", "ow_dirty_add", "ow_observer",
+		                                     "ow_write_tick", "tail_pre", "tail_post", "tail_emitted", "bindless_heaps"};
+		std::string parts;
+		for (size_t i = 0; i < std::size(shared); i++) {
+			char buf[64];
+			std::snprintf(buf, sizeof(buf), " %s=%.3f", shared[i], static_cast<double>(s.sub[i]) / 1e3 / n);
+			parts += buf;
+		}
+		std::fprintf(stderr, "PERF draw_parts us:%s\n", parts.c_str());
 	}
 	const auto window = now;
 	s                 = {};
