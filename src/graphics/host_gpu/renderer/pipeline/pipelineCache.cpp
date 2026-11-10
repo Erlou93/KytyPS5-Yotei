@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/guest_gpu/chunkLead.h"
@@ -265,7 +266,10 @@ bool ResolvedReadsHold(ResolvedStages& results) {
 		const ShaderRecompiler::IR::SrtRuntime runtime {.read_specialization_memory = ReadShaderGuestMemory};
 		const ChunkLead::FloorTimer floor_adopt(ChunkLead::FpAdopt);   // KYTY_TRACE_PEEK_CENSUS (N3.0)
 		const uint64_t lead_t0 = ChunkLead::On() ? ChunkLead::Tsc() : 0; // KYTY_TRACE_CHUNK_LEAD (N2.0b): the check's cost
-		results.reads = ShaderRecompiler::IR::ReadsUnchangedFast(results.log, runtime) ? Reads::Hold : Reads::Changed;
+		{
+			const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::ReadsCheck); // KYTY_TRACE_SLOW_FRAMES
+			results.reads = ShaderRecompiler::IR::ReadsUnchangedFast(results.log, runtime) ? Reads::Hold : Reads::Changed;
+		}
 		if (lead_t0 != 0) ChunkLead::NoteAdopt(ChunkLead::Tsc() - lead_t0, results.log.entries.size(), results.log.bytes.size());
 		if (results.reads == Reads::Changed) g_resolve_stats.stale.fetch_add(1, std::memory_order_relaxed);
 	}
@@ -981,6 +985,7 @@ struct PipelineCache::ProgramCache {
 			}
 		}
 		const double materialize_ms = MillisecondsSince(materialize_begin);
+		const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::Variant); // KYTY_TRACE_SLOW_FRAMES (wait, translation, compile, append)
 		if (std::FILE* f = Common::EnvRead::ShaderStagesFile()) { std::fprintf(f, "STAGE compile 0x%016llx\n", static_cast<unsigned long long>(options.shader_hash)); std::fclose(f); }
 		PipelineTrace::TracePermutation(options.shader_hash, LastSpecialization(entry->second.permutations),
 		                                entry->second.permutations.size(), entry->second.specialization);

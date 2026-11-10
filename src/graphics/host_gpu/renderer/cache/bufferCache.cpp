@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/dispatchCensus.h"
 #include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
@@ -788,6 +789,7 @@ void BarReadsProbe(uint64_t bytes, uint64_t ns) {
 
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::Download); // KYTY_TRACE_SLOW_FRAMES
 	ChunkCensus::t_downloads++; // KYTY_TRACE_CHUNK_CENSUS (hole)
 	KYTY_PROFILER_BLOCK("BufferCache::DownloadBufferMemory");
 	if constexpr (!async) {
@@ -2291,6 +2293,7 @@ void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumul
 }
 
 BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::NewBuffer); // KYTY_TRACE_SLOW_FRAMES
 	// The upload batch: claimed uploads hold buffer pointers (the slot storage may move) and a joined buffer copies
 	// its overlaps' contents, which must include them.
 	CommitUploadBatch(BatchCommit::CreateBuffer);
@@ -2443,6 +2446,7 @@ uint64_t BufferCache::RecentlyRetiredBytes() {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,
                                     bool is_texel_buffer, uint64_t* uploaded_bytes, UploadCaller caller) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::SyncBuffer); // KYTY_TRACE_SLOW_FRAMES
 	if (buffer.IsDirect()) return false; // KYTY_PERF_DIRECT_RANGES: its memory is guest memory
 	if (Batch().active) {
 		// The upload batch: a plain read-only synchronization only claims its pages. A written one (its GPU marks

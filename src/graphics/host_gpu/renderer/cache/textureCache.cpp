@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/gpuCheckpoints.h"
@@ -295,6 +296,7 @@ static bool EvictReuseTrace() {
 }
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::NewImage); // KYTY_TRACE_SLOW_FRAMES
 	Common::StartupTrace::Scope startup_scope(Common::StartupTrace::Counter::ImageCreate); // KYTY_TRACE_STARTUP
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
 	m_slot_images[id].self_id = id; // bindless table refresh events (the bindless layout log)
@@ -3592,6 +3594,7 @@ vk::ImageView TextureCache::FindTextureReplay(ImageId id, const ImageDesc& desc)
 }
 
 vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::DepthTarget); // KYTY_TRACE_SLOW_FRAMES
 	if (desc.type != BindingType::DepthTarget) {
 		EXIT("TextureCache: invalid depth-target binding\n");
 	}

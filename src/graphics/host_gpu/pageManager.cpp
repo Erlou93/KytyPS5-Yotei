@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/pageManager.h"
 
 #include "common/alignment.h"
@@ -301,6 +302,7 @@ struct PageManager::Impl {
 	}
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
+		const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::Protect); // KYTY_TRACE_SLOW_FRAMES
 		ProtectSites::Note(size); // KYTY_TRACE_PROTECT_SITES
 		// KYTY_TRACE_PERF: tracker protections by thread kind (PERF locks).
 		struct ProtectTimer {

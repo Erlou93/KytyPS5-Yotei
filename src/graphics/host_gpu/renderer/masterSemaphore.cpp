@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/passCensus.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
@@ -87,6 +88,7 @@ void MasterSemaphore::RefreshNow() {
 }
 
 void MasterSemaphore::Wait(uint64_t tick) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::FenceWait); // KYTY_TRACE_SLOW_FRAMES
 	KYTY_PROFILER_BLOCK("MasterSemaphore::Wait");
 	if (IsFree(tick)) {
 		return;

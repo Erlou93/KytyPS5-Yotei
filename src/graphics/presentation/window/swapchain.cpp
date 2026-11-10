@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
@@ -1191,6 +1192,7 @@ static void TraceFrameTime(uint32_t frame) {
 	const auto  ms   = std::chrono::duration<double, std::milli>(now - last).count();
 	last             = now;
 	std::fprintf(stderr, "FRAMETIME frame=%u ms=%.1f\n", frame, ms);
+	Common::SlowFrame::Report(frame, ms); // KYTY_TRACE_SLOW_FRAMES
 }
 
 Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, bool opaque,

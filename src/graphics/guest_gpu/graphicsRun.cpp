@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/stallWatch.h"
 #include "graphics/guest_gpu/chunkCensus.h"
@@ -845,6 +846,7 @@ void GuestGpu::BecomeRendererOwner() {
 	g_gpu_thread      = true;
 	g_gpu_state       = this;
 	PerfIsGpuThread() = true;
+	Common::SlowFrame::t_exec = true; // KYTY_TRACE_SLOW_FRAMES
 	PerfSamplerStartForCurrentThread();
 	Common::StartupTrace::NoteGpuThread(); // KYTY_TRACE_STARTUP: its CPU time per second
 }

@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -104,6 +105,7 @@ uint64_t NanosSince(std::chrono::steady_clock::time_point start) {
 
 VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info,
                                                    const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::MemAlloc); // KYTY_TRACE_SLOW_FRAMES
 	const auto     start  = std::chrono::steady_clock::now();
 	const VkResult result = g_real_allocate(device, info, callbacks, memory);
 	const uint64_t ns     = NanosSince(start);
@@ -124,6 +126,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device, const VkMemo
 }
 
 VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* callbacks) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::MemFree); // KYTY_TRACE_SLOW_FRAMES
 	const auto start = std::chrono::steady_clock::now();
 	g_real_free(device, memory, callbacks);
 	auto& c = g_memory_calls;
