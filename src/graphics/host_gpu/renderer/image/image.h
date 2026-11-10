@@ -76,6 +76,9 @@ public:
 	KYTY_CLASS_NO_COPY(Image);
 
 	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info);
+	// Project 15 S2b: the cached view FindView would return, or null when it would create one (no write).
+	[[nodiscard]] vk::ImageView FindViewExisting(const ImageViewInfo& view_info) const;
+	[[nodiscard]] ImageViewInfo NormalizeView(const ImageViewInfo& view_info) const;
 	// GetBarriers' result: the usual one barrier for the whole image (or two) without a heap allocation (7.11:
 	// Transit runs for most draws and dispatches); more spill into the vector.
 	class Barriers {

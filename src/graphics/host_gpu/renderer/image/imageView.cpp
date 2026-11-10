@@ -311,7 +311,7 @@ bool FormatsCompatible(vk::Format base, vk::Format view) noexcept {
 
 } // namespace ImageViewOps
 
-vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
+ImageViewInfo Image::NormalizeView(const ImageViewInfo& view_info) const {
 	const auto& image      = backing;
 	auto        normalized = view_info;
 	const bool  is_storage = static_cast<bool>(normalized.usage & vk::ImageUsageFlagBits::eStorage);
@@ -337,6 +337,20 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		normalized.level_count = std::min(normalized.level_count, image.mip_levels - normalized.base_level);
 		normalized.min_lod     = std::min(normalized.min_lod, (normalized.level_count - 1u) * 256u);
 	}
+	return normalized;
+}
+
+vk::ImageView Image::FindViewExisting(const ImageViewInfo& view_info) const {
+	const auto normalized = NormalizeView(view_info);
+	for (const auto& cached: views) {
+		if (cached.info == normalized) return cached.view;
+	}
+	return nullptr;
+}
+
+vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
+	const auto& image      = backing;
+	const auto  normalized = NormalizeView(view_info);
 	for (const auto& cached: views) {
 		if (cached.info == normalized) {
 			return cached.view;

@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorsTrace.h"
+#include "graphics/host_gpu/translatorGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include "common/alignment.h"
@@ -3792,6 +3793,11 @@ struct ImageReplaySlot {
 	ImageId                 id;
 	TextureCache::ImageDesc desc;
 };
+// The image replay slots of this thread (ResolveTextureReplay; project 15 S2b peeks them without inserting).
+std::unordered_map<uint64_t, ImageReplaySlot>& ImageReplaySlots() {
+	static thread_local std::unordered_map<uint64_t, ImageReplaySlot> slots;
+	return slots;
+}
 } // namespace
 
 // The table sets: whether the last image binding of this thread is one a stage set may stand for (an image
@@ -3802,8 +3808,7 @@ template <typename Resolve>
 static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const ShaderRecompiler::IR::CompiledShaderInfo& program,
                                            uint32_t slot, const ShaderRecompiler::IR::DescriptorValue& value,
                                            uint32_t compare_funcs, Resolve&& resolve) {
-	static thread_local std::unordered_map<uint64_t, ImageReplaySlot> slots;
-	auto&      memo = slots[reinterpret_cast<uint64_t>(&program) * 64u + slot];
+	auto&      memo = ImageReplaySlots()[reinterpret_cast<uint64_t>(&program) * 64u + slot];
 	const bool same = memo.valid && memo.shader_hash == program.shader_hash && memo.dword_count == value.dword_count &&
 	                  memo.words == value.dwords && memo.compare_funcs == compare_funcs && memo.soft == soft &&
 	                  memo.page_sum == DrawRepeat::ImagePageEpochSum(memo.desc.info.data.address, memo.desc.info.data.size);
@@ -4115,6 +4120,66 @@ void Report() {
 }
 } // namespace BindReplay
 
+// Project 15 S2b (KYTY_CHECK_PEEK=2, diagnostic): a stage's image bindings and samplers answered without a write before
+// PrepareBindings, compared with what RebindImages leaves (execution thread).
+namespace PeekImages {
+enum Slot : uint8_t { SetSlot, Replay, NotTexture, ReplayMiss, ViewMissing, NullImage, Count };
+struct Stage {
+	bool                                    pending = false, samplers_answered = false;
+	uint64_t                                epoch   = 0;
+	std::vector<uint8_t>                    klass;
+	std::vector<ImageId>                    ids;
+	std::vector<vk::ImageView>              views;
+	std::vector<std::vector<vk::ImageView>> mips;
+	std::vector<vk::Sampler>                samplers;
+};
+struct Stats {
+	std::array<uint64_t, Count> slots {};
+	uint64_t stages = 0, all_slots = 0, samplers = 0, answered = 0, member_stages = 0, member_answered = 0;
+	uint64_t compared = 0, bad = 0, race = 0, sampler_bad = 0, unchecked = 0, injected = 0, detected = 0;
+	uint32_t logged = 0;
+};
+Stats g_stats;
+std::unordered_map<const void*, Stage>& Pending() {
+	static std::unordered_map<const void*, Stage> pending; // execution thread
+	return pending;
+}
+bool Check() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK");
+		return env != nullptr && env[0] == '2';
+	}();
+	return on;
+}
+uint64_t FaultEvery() {
+	static const uint64_t every = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK_FAULT");
+		return env != nullptr ? std::strtoull(env, nullptr, 10) : 0u;
+	}();
+	return every;
+}
+void Report() {
+	auto& st = g_stats;
+	if ((st.stages & ((1u << 18u) - 1u)) != 0) return;
+	std::string slots;
+	for (size_t i = 0; i < st.slots.size(); i++) slots += std::string(i == 0 ? "" : "|") + std::to_string(st.slots[i]);
+	std::fprintf(stderr,
+	             "PERF peek_images stages=%llu all_slots=%llu samplers=%llu answered=%llu member[stages|answered]=%llu|%llu "
+	             "slots[set|replay|not_texture|replay_miss|view_missing|null]=%s compared=%llu bad=%llu race=%llu sampler_bad=%llu "
+	             "unchecked=%llu fault[injected|detected]=%llu|%llu\n",
+	             static_cast<unsigned long long>(st.stages), static_cast<unsigned long long>(st.all_slots),
+	             static_cast<unsigned long long>(st.samplers), static_cast<unsigned long long>(st.answered),
+	             static_cast<unsigned long long>(st.member_stages), static_cast<unsigned long long>(st.member_answered), slots.c_str(),
+	             static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.bad),
+	             static_cast<unsigned long long>(st.race), static_cast<unsigned long long>(st.sampler_bad),
+	             static_cast<unsigned long long>(st.unchecked), static_cast<unsigned long long>(st.injected),
+	             static_cast<unsigned long long>(st.detected));
+}
+vk::ImageView Shifted(vk::ImageView view) {
+	return vk::ImageView(reinterpret_cast<VkImageView>(reinterpret_cast<uintptr_t>(static_cast<VkImageView>(view)) + 1u));
+}
+} // namespace PeekImages
+
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
 	if (!BindReplay::On() || !GuestGpu::IsGpuThread() || !runtime.resources->indirect_ranges.empty()) {
@@ -4249,6 +4314,109 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 		binding.mip_views.clear();
 		prepared.images[i] = std::move(binding);
 	};
+	if (PeekImages::Check() && GuestGpu::IsGpuThread()) {
+		// KYTY_CHECK_PEEK=2 (S2b): the stage's images and samplers without a write (no set moved, no replay slot inserted,
+		// no view created, no touch), inside the translator section.
+		++t_translator;
+		auto&       cache = m_context.GetTextureCache();
+		auto&       peek  = PeekImages::Pending()[&prepared];
+		auto&       st    = PeekImages::g_stats;
+		const auto  count = program.info.images.size();
+		peek          = {};
+		peek.pending  = true;
+		peek.epoch    = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
+		peek.klass.assign(count, PeekImages::ReplayMiss);
+		peek.ids.assign(count, ImageId {});
+		peek.views.assign(count, nullptr);
+		peek.mips.assign(count, {});
+		const TableSet* set = nullptr;
+		if ((!program.info.images.empty() || !program.info.samplers.empty()) && TableSetsUsable()) {
+			const auto& sets = TableSets();
+			if (const auto it = sets.find(&program); it != sets.end()) {
+				const auto& list  = it->second;
+				const size_t found = TableSetFindHashed(program, snapshot, m_soft_texture_resolve, list);
+				const TableSet* candidate = found < list.size() ? list[found].get() : nullptr;
+				if (candidate != nullptr && candidate->views_ready) {
+					bool   pages  = true;
+					size_t member = 0;
+					for (size_t i = 0; i < candidate->images.size() && pages; i++) {
+						if (candidate->memo[i] == 0u) continue;
+						const auto& data = candidate->images[i].desc.info.data;
+						pages = DrawRepeat::ImagePageEpochSum(data.address, data.size) == candidate->page_sums[member++];
+					}
+					if (pages && cache.TableReplayStageChecks(candidate->member_ids) &&
+					    cache.TableTexturesReadyChecks(candidate->member_ids)) {
+						set = candidate;
+					}
+				}
+			}
+		}
+		bool all = true;
+		for (uint32_t i = 0; i < count; i++) {
+			auto& klass = peek.klass[i];
+			if (set != nullptr && set->memo[i] != 0u) {
+				klass         = PeekImages::SetSlot;
+				peek.ids[i]   = set->images[i].image_id;
+				peek.views[i] = set->images[i].image_view;
+				peek.mips[i]  = set->images[i].mip_views;
+				st.slots[klass]++;
+				continue;
+			}
+			const uint32_t compare_funcs = ImageCompareFuncs(program, snapshot, i);
+			const auto&    slots         = ImageReplaySlots();
+			const auto     it            = slots.find(reinterpret_cast<uint64_t>(&program) * 64u + i);
+			const auto&    value         = snapshot.images[i];
+			const bool     same = it != slots.end() && it->second.valid && it->second.shader_hash == program.shader_hash &&
+			                  it->second.dword_count == value.dword_count && it->second.words == value.dwords &&
+			                  it->second.compare_funcs == compare_funcs && it->second.soft == m_soft_texture_resolve &&
+			                  it->second.page_sum == DrawRepeat::ImagePageEpochSum(it->second.desc.info.data.address, it->second.desc.info.data.size);
+			const ImageId id = same ? cache.ReplayImageCheck(it->second.id) : ImageId {};
+			if (!id) {
+				klass = PeekImages::ReplayMiss;
+			} else if (it->second.desc.type != TextureCache::BindingType::Texture) {
+				klass = PeekImages::NotTexture;
+			} else if (it->second.desc.info.data.Empty()) {
+				klass = PeekImages::NullImage;
+			} else {
+				const auto& desc     = it->second.desc;
+				const auto& resource = program.info.images[i];
+				bool        views    = true;
+				if (resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::Dynamic) {
+					views = resource.mip_count != 0u && resource.mip_count == desc.view_info.level_count;
+					for (uint32_t mip = 0; views && mip < resource.mip_count; mip++) {
+						auto mip_desc = desc;
+						mip_desc.view_info.base_level += mip;
+						mip_desc.view_info.level_count = 1;
+						mip_desc.view_info.min_lod     = 0;
+						const auto view = cache.PeekTextureView(id, mip_desc);
+						views           = static_cast<bool>(view);
+						peek.mips[i].push_back(view);
+					}
+					if (views) peek.views[i] = peek.mips[i].front();
+				} else {
+					peek.views[i] = cache.PeekTextureView(id, desc);
+					views         = static_cast<bool>(peek.views[i]);
+				}
+				klass       = views ? PeekImages::Replay : PeekImages::ViewMissing;
+				peek.ids[i] = id;
+			}
+			all = all && klass == PeekImages::Replay;
+			st.slots[klass]++;
+		}
+		peek.samplers_answered = set != nullptr || program.info.samplers.empty();
+		if (set != nullptr) peek.samplers = set->samplers;
+		--t_translator;
+		st.stages++;
+		if (all) st.all_slots++;
+		if (peek.samplers_answered) st.samplers++;
+		const bool answered = all && peek.samplers_answered;
+		if (answered) st.answered++;
+		if (t_peek_member == 1) {
+			st.member_stages++;
+			if (answered) st.member_answered++;
+		}
+		PeekImages::Report();
+	}
 	// The stage's table set and its PrepareBindings proof.
 	const bool table_sets = (!program.info.images.empty() || !program.info.samplers.empty()) && TableSetsUsable();
 	TableSet* table_set = nullptr; // the set stored under this stage's key
@@ -4856,6 +5024,43 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		prepared.table_store = nullptr;
 	}
 	prepared.table_hit = nullptr;
+	if (PeekImages::Check()) {
+		// KYTY_CHECK_PEEK=2 (S2b): an answered slot must hold the peeked image and views.
+		auto& pending = PeekImages::Pending();
+		auto& st      = PeekImages::g_stats;
+		if (const auto it = pending.find(&prepared); it != pending.end() && it->second.pending) {
+			auto& peek       = it->second;
+			peek.pending     = false;
+			const bool moved = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) != peek.epoch;
+			for (size_t i = 0; i < images.size() && i < peek.klass.size(); i++) {
+				if (peek.klass[i] != PeekImages::SetSlot && peek.klass[i] != PeekImages::Replay) continue;
+				st.compared++;
+				auto       view  = peek.views[i];
+				const bool fault = PeekImages::FaultEvery() != 0 && st.compared % PeekImages::FaultEvery() == 0;
+				if (fault) {
+					view = PeekImages::Shifted(view);
+					st.injected++;
+				}
+				const bool same = images[i].image_id == peek.ids[i] && images[i].image_view == view && images[i].mip_views == peek.mips[i];
+				if (same) continue;
+				if (fault) {
+					st.detected++;
+				} else if (moved) {
+					st.race++;
+				} else {
+					st.bad++;
+					if (st.logged++ < 20u) {
+						std::fprintf(stderr, "CHECK_PEEK_IMAGES bad slot=%zu class=%u id_same=%d view_same=%d mips=%zu/%zu\n", i, peek.klass[i],
+						             images[i].image_id == peek.ids[i] ? 1 : 0, images[i].image_view == peek.views[i] ? 1 : 0,
+						             images[i].mip_views.size(), peek.mips[i].size());
+					}
+				}
+			}
+			if (peek.samplers_answered && !program.info.samplers.empty() && prepared.samplers != peek.samplers) st.sampler_bad++;
+		} else {
+			st.unchecked++;
+		}
+	}
 }
 
 // PrepareGraphicsBindings: a color target whose image was replaced (unregistered with data, or to be rebound) is found

@@ -3451,6 +3451,15 @@ bool TextureCache::TableTexturesReadyChecks(std::span<const ImageId> ids) const 
 // - RefreshImage: no depth association, tracked over exactly its range (TrackImage returns), not maybe-CPU-dirty, not
 //   buffer-modified, not CPU-dirty (it returns before any upload).
 // The checks run under m_lock, where the fault and upload paths set those flags.
+static bool TextureReplayReady(const Image& image);
+
+vk::ImageView TextureCache::PeekTextureView(ImageId id, const ImageDesc& desc) const {
+	if (desc.type != BindingType::Texture) return nullptr;
+	const auto* image = m_slot_images.try_get(id);
+	if (image == nullptr || image->info.data.Empty() || !TextureReplayReady(*image)) return nullptr;
+	return image->FindViewExisting(desc.view_info);
+}
+
 vk::ImageView TextureCache::FindTextureReplay(ImageId id, const ImageDesc& desc) {
 	if (desc.type != BindingType::Texture) {
 		return FindTexture(id, desc);
