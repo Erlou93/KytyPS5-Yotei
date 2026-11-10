@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/host_gpu/renderer/perfCounters.h"
+#include "graphics/host_gpu/translatorGuard.h"
 
 #include <array>
 #include <atomic>
@@ -174,6 +175,7 @@ public:
 private:
 	// The holder may write image state from here on (odd); the fence orders that before its writes.
 	void OpenWrite() noexcept {
+		if (t_translator != 0) TranslatorNoteSite(5); // project 15 S2a: an image-state write inside a peek
 		m_write_open = true;
 		g_tc_write_seq.store(g_tc_write_seq.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
 		std::atomic_thread_fence(std::memory_order_release);

@@ -183,6 +183,9 @@ public:
 	void               InvalidateMemory(uint64_t address, uint64_t size);
 	void               InvalidateMemoryFromGPU(uint64_t address, uint64_t size);
 	[[nodiscard]] bool IsRegionRegistered(uint64_t address, uint64_t size);
+	// Whether a registered image may start in the address's 64 KiB granule (lock-free, writes nothing; a hash collision
+	// only answers true). Project 15 S2a: today's buffer path touches an image only when this is true.
+	[[nodiscard]] static bool ImageMayStartAt(uint64_t address);
 	// RenderContext::UnmapMemory's wait: whether `test` holds for an image an unmap of the range frees (UnmapMemory: the images
 	// over it and their stencil associations).
 	[[nodiscard]] bool AnyUnmapImage(uint64_t address, uint64_t size, const std::function<bool(ImageId)>& test);

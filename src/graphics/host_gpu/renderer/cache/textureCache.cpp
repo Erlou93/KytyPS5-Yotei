@@ -329,6 +329,10 @@ std::atomic<uint32_t>& ImageStartCount(uint64_t address) {
 }
 } // namespace
 
+bool TextureCache::ImageMayStartAt(uint64_t address) {
+	return ImageStartCount(address).load(std::memory_order_acquire) != 0u;
+}
+
 TextureCache::RegisteredPageCounts::~RegisteredPageCounts() {
 	for (auto& leaf: m_leaves) {
 		delete leaf.load(std::memory_order_relaxed);

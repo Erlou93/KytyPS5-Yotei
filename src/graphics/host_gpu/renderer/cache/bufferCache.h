@@ -8,6 +8,7 @@
 #include "common/uniqueFunction.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
+#include "graphics/host_gpu/translatorGuard.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -119,7 +120,7 @@ public:
 	// are marks "in order" (the commit obtains that binding itself): Stream (a small CPU-dirty read the stream ring would
 	// copy), Upload (CPU-dirty, or not proven clean), Create (no buffer holds the range), Texel (an image over it).
 	struct BufferPeek {
-		enum Class : uint8_t { Ready, Direct, Null, Stream, Upload, Create, Texel, Count };
+		enum Class : uint8_t { Ready, Direct, Null, Stream, Upload, Create, Image, NoProof, Written, Count };
 		Class    klass = Create;
 		BufferId id {};
 		uint64_t offset       = 0;
@@ -128,11 +129,14 @@ public:
 		uint32_t regions = 0;
 	};
 	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint);
-	// Whether a Ready peek's proof still holds (the obtain memo's check).
-	[[nodiscard]] static bool PeekProofHolds(const BufferPeek& peek, uint64_t vaddr, uint64_t size);
-	// The translator guard (KYTY_CHECK_PEEK=2): writes noted inside a peek (expected 0; PERF peek counts them).
-	inline static thread_local int t_translator = 0;
-	static void                    TranslatorNote(int site);
+	// Whether a Ready or Direct peek's proof still holds (the obtain memo's check); PeekProofFail names the failed part
+	// (0 holds, 1 buffer registry, 2 CPU-dirty region epochs, 3 image pages, 4 not a proved class).
+	[[nodiscard]] static uint32_t PeekProofFail(const BufferPeek& peek, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] static bool     PeekProofHolds(const BufferPeek& peek, uint64_t vaddr, uint64_t size) {
+        return PeekProofFail(peek, vaddr, size) == 0;
+	}
+	// The translator guard (KYTY_CHECK_PEEK=2, translatorGuard.h): writes noted inside a peek (expected 0).
+	static void TranslatorNote(int site) { TranslatorNoteSite(site); }
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
 	                                                        bool     is_written,
 	                                                        bool     is_texel_buffer = false,
