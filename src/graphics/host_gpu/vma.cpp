@@ -2,7 +2,6 @@
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/guest_gpu/chunkCensus.h"
 #include "graphics/host_gpu/vulkanCommon.h"
-#include "graphics/host_gpu/renderer/cache/streamBuffer.h" // FlushBufferFrees
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -311,7 +310,6 @@ void GraphicContext::DestroyAllocator() {
 	if (allocator == nullptr) {
 		return;
 	}
-	FlushBufferFrees(); // KYTY_PERF_ASYNC_FREE
 	{
 		std::lock_guard lock(g_recycle_mutex);
 		TrimRecycled(allocator, true);
