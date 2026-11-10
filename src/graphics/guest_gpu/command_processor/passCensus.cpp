@@ -180,6 +180,7 @@ static bool Active() {
 	                           std::getenv("KYTY_TRACE_CHUNK_LEAD") != nullptr || std::getenv("KYTY_TRACE_PEEK_CENSUS") != nullptr ||
 	                           std::getenv("KYTY_CHECK_PEEK") != nullptr || std::getenv("KYTY_TRACE_CHUNK_PLAN") != nullptr ||
 	                           std::getenv("KYTY_CHECK_PLAN_BUFFERS") != nullptr || std::getenv("KYTY_TRACE_HELPER_WAITS") != nullptr ||
+	                           std::getenv("KYTY_CHECK_RESOLVE") != nullptr ||
 	                           std::getenv("KYTY_LIVE_AB") != nullptr;
 	return active;
 }

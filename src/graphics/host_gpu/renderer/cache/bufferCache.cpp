@@ -3218,6 +3218,11 @@ struct PlanBufferStats {
 	std::array<uint64_t, 4>                by_distance {}; // compared, by distance from the chunk's opening
 	uint64_t                               unplanned = 0, injected = 0, detected = 0;
 	uint32_t                               logged    = 0;
+	// N7.1: a race (the proof held before today's path, not after) by the part that failed after it
+	// [registry|cpu|image] and whether today's path itself did work (its own change, not another thread's)
+	std::array<uint64_t, 4> race_why {};
+	uint64_t                race_own_work = 0;
+	uint32_t                race_logged   = 0;
 };
 PlanBufferStats              g_plan_buffer_stats; // GPU thread
 std::vector<PlanBuffer>*     g_plan_buffers = nullptr;
@@ -3250,10 +3255,12 @@ void PlanBufferReport() {
 	for (size_t k = 0; k < 4; k++) fail += std::string(k == 0 ? "" : " ") + std::to_string(s.fail[k][1]) + "|" + std::to_string(s.fail[k][2]) + "|" + std::to_string(s.fail[k][3]);
 	std::fprintf(stderr,
 	             "PERF plan_buffers [buffer|range|vertex|index] lookups=%s compared=%s bad=%s race=%s not_ready=%s "
-	             "fail[registry|cpu|image]=%s by_distance=%s unplanned=%llu fault[injected|detected]=%llu|%llu\n",
+	             "fail[registry|cpu|image]=%s by_distance=%s unplanned=%llu fault[injected|detected]=%llu|%llu "
+	             "race_why[-|registry|cpu|image]=%s race_own_work=%llu\n",
 	             join(s.lookups).c_str(), join(s.compared).c_str(), join(s.bad).c_str(), join(s.race).c_str(),
 	             join(s.not_ready).c_str(), fail.c_str(), join(s.by_distance).c_str(), static_cast<unsigned long long>(s.unplanned),
-	             static_cast<unsigned long long>(s.injected), static_cast<unsigned long long>(s.detected));
+	             static_cast<unsigned long long>(s.injected), static_cast<unsigned long long>(s.detected), join(s.race_why).c_str(),
+	             static_cast<unsigned long long>(s.race_own_work));
 }
 } // namespace
 
@@ -3310,8 +3317,16 @@ std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_
 	if (!same) {
 		if (fault) {
 			s.detected++;
-		} else if (!PeekProofHolds(entry.peek, vaddr, size)) {
+		} else if (const uint32_t after = PeekProofFail(entry.peek, vaddr, size); after != 0) {
 			s.race[k]++;
+			s.race_why[after & 3u]++;
+			const bool own = t_obtain_work != work0;
+			if (own) s.race_own_work++;
+			if (s.race_logged++ < 20u) {
+				std::fprintf(stderr, "CHECK_PLAN_BUFFER race kind=%u why=%u own_work=%d addr=%llx size=%llx same_buffer=%d quiet=%d\n", k,
+				             after, own ? 1 : 0, static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size),
+				             entry.peek.id && result.first == &m_slot_buffers[entry.peek.id] ? 1 : 0, quiet ? 1 : 0);
+			}
 		} else {
 			s.bad[k]++;
 			if (s.logged++ < 20u) {

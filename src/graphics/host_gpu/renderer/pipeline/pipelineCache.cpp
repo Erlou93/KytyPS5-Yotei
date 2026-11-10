@@ -326,15 +326,23 @@ uint8_t RemapSourceAlphaFactor(uint8_t factor) {
 }
 
 vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front, bool cull_back) {
+	// Project 15 N7.1: in the plan's builder (t_describe_soft) an unsupported mode fails the key, never stops the emulator
+	// (today's path meets the same registers when the draw runs).
+	const auto fail = [] {
+		t_describe_failed = true;
+		return vk::PolygonMode::eFill;
+	};
 	// CxPrimitiveSetup::PolygonMode disables both per-face modes when it is zero.
 	if (mode.poly_mode == 0) {
 		return vk::PolygonMode::eFill;
 	}
+	if (t_describe_soft && mode.poly_mode != 1) return fail();
 	EXIT_NOT_IMPLEMENTED(mode.poly_mode != 1);
 	if (cull_front && cull_back) {
 		return vk::PolygonMode::eFill;
 	}
 	if (!cull_front && !cull_back && mode.polymode_front_ptype != mode.polymode_back_ptype) {
+		if (t_describe_soft) return fail();
 		EXIT("Pipeline: different polygon modes for two visible faces are unsupported\n");
 	}
 	// Vulkan has one polygon mode. A culled face does not constrain that mode.
@@ -343,7 +351,9 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 		case 0: return vk::PolygonMode::ePoint;
 		case 1: return vk::PolygonMode::eLine;
 		case 2: return vk::PolygonMode::eFill;
-		default: EXIT("Pipeline: invalid polygon mode %u\n", polygon_mode);
+		default:
+			if (t_describe_soft) return fail();
+			EXIT("Pipeline: invalid polygon mode %u\n", polygon_mode);
 	}
 }
 
