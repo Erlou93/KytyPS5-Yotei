@@ -3168,7 +3168,7 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 		const bool proof = ObtainMemoRegions(vaddr, size, p.region, p.regions, p.epochs);
 		p.image_sum      = DrawRepeat::ImagePageEpochSum(vaddr, size);
 		const bool clean = m_memory_tracker.PeekCpuClean(vaddr, size);
-		if (!bda && size <= CACHING_PAGESIZE && !clean && !m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+		if (!bda && size <= CACHING_PAGESIZE && !clean && !m_memory_tracker.PeekGpuModified(vaddr, size)) {
 			p.klass = BufferPeek::Stream;
 			return;
 		}

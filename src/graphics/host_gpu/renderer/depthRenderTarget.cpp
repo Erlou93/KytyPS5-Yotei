@@ -409,7 +409,7 @@ bool RenderExecutor::DescribeRenderDepthTarget(GraphicContext& graphics, const H
 			r.stencil_back = r.stencil_front;
 		}
 	}
-	return !t_describe_failed; // N5.1
+	return !(t_describe_soft && t_describe_failed); // N5.1: the flag counts only in the soft mode
 }
 
 void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {

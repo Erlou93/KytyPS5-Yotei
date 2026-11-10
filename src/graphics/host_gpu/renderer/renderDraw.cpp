@@ -3953,7 +3953,8 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		                                                 state.ps_active ? &state.ps_input_info : nullptr, topology, restart,
 		                                                 state.programs, true);
 		t_describe_soft = false;
-		if (t_describe_failed) {
+		const bool describe_failed = std::exchange(t_describe_failed, false); // never left set (n5-1-uwagi.md 0.1)
+		if (describe_failed) {
 			a.describe_failed++;
 			PipelineCache::RestoreAhead(*slot->stages, saved);
 			slot->ahead.planned = false;

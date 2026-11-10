@@ -202,7 +202,7 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type, rt.info.channel_order);
 	// KYTY_TRACE_PERF (PERF workaround_hits fmt30): a target programmed COLOR_10_11_11 + UNORM (guest format 30), taken as
 	// packed unsigned floats by KYTY_FIX_RT_11_11_10_FLOAT; its address is kept for the T#s that read it.
-	if (Common::WorkaroundHits::Enabled() &&
+	if (!t_describe_soft && Common::WorkaroundHits::Enabled() && // (not for a plan: N5.1)
 	    Prospero::ResolveRenderTargetFormat(rt.info.format, rt.info.channel_type).buffer_format ==
 	        Prospero::BufferFormat::k11_11_10UNorm &&
 	    Prospero::Diagnostic111110UnormAsFloat()) {
@@ -294,7 +294,7 @@ bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColo
 	r.guest_mip_level          = rt.view.current_mip_level;
 	r.guest_array_layer        = view.base_layer;
 	r.export_mapping           = target_format.export_mapping;
-	return !t_describe_failed;
+	return !(t_describe_soft && t_describe_failed); // the flag counts only in the soft mode
 }
 
 void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
