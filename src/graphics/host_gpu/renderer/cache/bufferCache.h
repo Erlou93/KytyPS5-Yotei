@@ -141,6 +141,7 @@ public:
 		uint32_t regions = 0;
 		bool     bda     = false; // ObtainBdaRange's peek: no image in the proof
 		bool     helper_direct = false; // way B W0: a helper's peek of a range overlapping a direct range (Upload, in order)
+		uint64_t direct_gen    = 0;     // W2.2: a Direct answer's generation of the direct ranges (g_direct_generation)
 	};
 	// bda: ObtainBdaRange's peek (no direct ranges, no stream copy, no image copy).
 	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint,
@@ -744,6 +745,19 @@ private:
 	std::vector<DirectGpuWrite> m_direct_cp_overlay;
 	uint32_t                    m_direct_mode_seen = 0;
 	bool                        m_direct_parsed    = false;
+	// W2.2: the execution thread's changes of the direct ranges' fields (start, end, id, active, refused) and of the mode
+	// seen, nested: the outermost bumps the generation to odd before and to even after (a helper reads the fields between
+	// two equal even generations; a Direct plan answer holds while the generation is the one it saw).
+	uint32_t m_direct_change_depth = 0;
+	void     DirectChangeBegin();
+	void     DirectChangeEnd();
+	struct DirectChange {
+		BufferCache& cache;
+		explicit DirectChange(BufferCache& c): cache(c) { cache.DirectChangeBegin(); }
+		~DirectChange() { cache.DirectChangeEnd(); }
+		DirectChange(const DirectChange&)            = delete;
+		DirectChange& operator=(const DirectChange&) = delete;
+	};
 	[[nodiscard]] uint32_t DirectMode();
 	// The active direct buffer holding [vaddr, vaddr + size) (activating or growing its range), else a null id.
 	[[nodiscard]] BufferId DirectBufferFor(uint64_t vaddr, uint64_t size);

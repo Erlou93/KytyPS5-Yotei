@@ -1818,9 +1818,23 @@ uint32_t BufferCache::DirectMode() {
 	return mode;
 }
 
+namespace {
+// Project 15 way B W2.2: the generation of the direct ranges (odd while the execution thread changes them).
+std::atomic<uint64_t> g_direct_generation {0};
+} // namespace
+
+void BufferCache::DirectChangeBegin() {
+	if (m_direct_change_depth++ == 0) g_direct_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void BufferCache::DirectChangeEnd() {
+	if (--m_direct_change_depth == 0) g_direct_generation.fetch_add(1, std::memory_order_release);
+}
+
 BufferId BufferCache::DirectBufferFor(uint64_t vaddr, uint64_t size) {
 	const uint32_t mode = DirectMode();
 	if (mode != m_direct_mode_seen) {
+		const DirectChange change(*this); // (W2.2)
 		// Live A/B: off ends the active ranges (their memory is tracked again from guest memory).
 		if (mode == 0) {
 			for (auto& range: m_direct_ranges) DeactivateDirect(range);
@@ -1832,6 +1846,7 @@ BufferId BufferCache::DirectBufferFor(uint64_t vaddr, uint64_t size) {
 	for (auto& range: m_direct_ranges) {
 		if (range.refused || end <= range.start || vaddr >= range.end) continue;
 		if (vaddr < range.start || end > range.end) {
+			const DirectChange change(*this); // (W2.2)
 			// A request reaching past the range: the range grows to hold it (a direct buffer is never joined).
 			DeactivateDirect(range, false);
 			range.start = Common::AlignDown(std::min(vaddr, range.start), CACHING_PAGESIZE);
@@ -1851,6 +1866,7 @@ BufferId BufferCache::DirectBufferFor(uint64_t vaddr, uint64_t size) {
 
 void BufferCache::ActivateDirect(DirectRange& range) {
 	if (range.active || range.refused) return;
+	const DirectChange change(*this); // (W2.2)
 	const uint64_t size = range.end - range.start;
 	if (m_texture_cache.IsRegionRegistered(range.start, size)) {
 		range.refused = true;
@@ -1909,6 +1925,7 @@ void BufferCache::ActivateDirect(DirectRange& range) {
 
 void BufferCache::DeactivateDirect(DirectRange& range, bool replace) {
 	if (!range.active) return;
+	const DirectChange change(*this); // (W2.2)
 	// The GPU's writes to the range are in guest memory once it finished; the pages stay CPU-dirty, so the next
 	// ordinary buffer over them uploads guest memory.
 	m_scheduler.Finish();
@@ -3121,7 +3138,10 @@ void PeekReport() {
 uint32_t BufferCache::PeekProofFail(const BufferPeek& peek, uint64_t vaddr, uint64_t size) {
 	if (peek.klass != BufferPeek::Ready && peek.klass != BufferPeek::Direct) return 4;
 	if (peek.buffer_epoch != DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire)) return 1;
-	if (peek.klass == BufferPeek::Direct) return 0;
+	if (peek.klass == BufferPeek::Direct) {
+		// W2.2: and the direct ranges as the peek saw them (the mode is checked where the answer is taken)
+		return peek.direct_gen == g_direct_generation.load(std::memory_order_acquire) ? 0 : 1;
+	}
 	auto* table = g_cpu_dirty_region_epochs.load(std::memory_order_acquire);
 	for (uint32_t i = 0; i < peek.regions; i++) {
 		if (table[peek.region + i].load(std::memory_order_acquire) != peek.epochs[i]) return 2;
@@ -3150,21 +3170,46 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 		if (direct_mode != 0) {
 			const uint64_t end = vaddr + size;
 			if (!GuestGpu::IsGpuThread()) {
-				// N5.3: a helper reads only the ranges' fixed spans (the flags are the execution thread's): in order.
-				for (const auto& range: m_direct_ranges) {
-					if (end > range.start && vaddr < range.end) {
-						p.klass         = BufferPeek::Upload;
-						p.helper_direct = true; // (way B W0: the B3 split)
-						return;
+				// W2.2 (replaces N5.3's "in order"): a helper reads the ranges' fields between two equal even generations,
+				// as the loop below reads them; a range being changed or changed meanwhile: in order.
+				const uint64_t gen0 = g_direct_generation.load(std::memory_order_acquire);
+				bool           seen = false; // the request overlaps a range that is not refused
+				BufferPeek     d    = p;
+				if ((gen0 & 1u) == 0) {
+					for (const auto& range: m_direct_ranges) {
+						if (range.refused || end <= range.start || vaddr >= range.end) continue;
+						seen = true;
+						if (range.active && vaddr >= range.start && end <= range.end) {
+							d.klass      = BufferPeek::Direct;
+							d.id         = range.id;
+							d.offset     = vaddr - range.start; // (the direct buffer starts at the range's start)
+							d.direct_gen = gen0;
+						} else {
+							d.klass = BufferPeek::Upload; // the range grows or activates: in order
+						}
+						break;
 					}
+				}
+				std::atomic_thread_fence(std::memory_order_acquire);
+				if ((gen0 & 1u) != 0 || g_direct_generation.load(std::memory_order_relaxed) != gen0) {
+					p.klass         = BufferPeek::Upload;
+					p.helper_direct = true; // (way B W0: the B3 split)
+					return;
+				}
+				if (seen) {
+					p               = d;
+					p.helper_direct = d.klass != BufferPeek::Direct;
+					return;
 				}
 			}
 			for (const auto& range: m_direct_ranges) {
+				if (!GuestGpu::IsGpuThread()) break; // (W2.2: a helper read the ranges above, under the generation)
 				if (range.refused || end <= range.start || vaddr >= range.end) continue;
 				if (range.active && vaddr >= range.start && end <= range.end) {
-					p.klass  = BufferPeek::Direct;
-					p.id     = range.id;
-					p.offset = m_slot_buffers[range.id].Offset(vaddr);
+					p.klass      = BufferPeek::Direct;
+					p.id         = range.id;
+					p.offset     = m_slot_buffers[range.id].Offset(vaddr);
+					p.direct_gen = g_direct_generation.load(std::memory_order_acquire);
 				} else {
 					p.klass = BufferPeek::Upload; // the range grows or activates: in order
 				}
@@ -3293,7 +3338,7 @@ std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_
 	entry.used   = true;
 	const auto k = std::min<uint32_t>(entry.kind, 5u);
 	s.lookups[k]++;
-	if (entry.peek.klass != BufferPeek::Ready) {
+	if (entry.peek.klass != BufferPeek::Ready && entry.peek.klass != BufferPeek::Direct) { // (W2.2: Direct compared too)
 		s.not_ready[k]++;
 		return path();
 	}
@@ -3349,10 +3394,12 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	if (!PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
 		// N4.3: the plan's answer - what today's path does for a clean, registered range with no image at its start: the touch.
 		auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false);
-		if (entry != nullptr && entry->peek.klass == BufferPeek::Ready && PeekProofHolds(entry->peek, vaddr, size)) {
+		// W2.2: a Direct entry answers as today's path does for an active direct range: the buffer and offset, no touch.
+		const bool direct = entry != nullptr && entry->peek.klass == BufferPeek::Direct && DirectMode() == m_direct_mode_seen;
+		if (entry != nullptr && (entry->peek.klass == BufferPeek::Ready || direct) && PeekProofHolds(entry->peek, vaddr, size)) {
 			entry->used  = true;
 			auto& buffer = m_slot_buffers[entry->peek.id];
-			TouchBuffer(buffer);
+			if (!direct) TouchBuffer(buffer);
 			g_ahead.buffers_answered++;
 			if (ChunkLead::t_floor_bucket >= 0) ChunkLead::NoteB3(entry->kind, 0);
 			return {&buffer, entry->peek.offset};
@@ -4771,6 +4818,7 @@ void BufferCache::RunGarbageCollector() {
 	}
 	for (auto& range: m_direct_ranges) { // KYTY_PERF_DIRECT_RANGES: an image in a direct range ends it
 		if (range.active && m_texture_cache.IsRegionRegistered(range.start, range.end - range.start)) {
+			const DirectChange change(*this); // (W2.2)
 			std::fprintf(stderr, "PERF_DIRECT_RANGES 0x%llx-0x%llx ended: an image was registered in it\n",
 			             static_cast<unsigned long long>(range.start), static_cast<unsigned long long>(range.end));
 			m_texture_cache.DescribeImagesInRegion(range.start, range.end - range.start, 16);
