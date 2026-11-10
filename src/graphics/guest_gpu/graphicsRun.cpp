@@ -995,7 +995,7 @@ void GuestGpu::ExecutionThread() {
 			const char* oracle = std::getenv("KYTY_CHECK_CHUNKS");
 			// N5.3: with the plans or the buffer check the helpers build the plans; the opening builds them under the oracle,
 			// and under the peek checks without plans.
-			const bool helpers = (BufferCache::DrawPlansOn() || BufferCache::PlanBufferCheck()) && !(oracle != nullptr && oracle[0] == '2');
+			const bool helpers = (BufferCache::DrawPlansPossible() || BufferCache::PlanBufferCheck()) && !(oracle != nullptr && oracle[0] == '2');
 			return !helpers && ((env != nullptr && env[0] == '2') || (oracle != nullptr && oracle[0] == '2'));
 		}();
 		if (plan_census || peek_ahead) {
@@ -1438,7 +1438,7 @@ void GuestGpu::ResolveHelperThread(uint32_t index) {
 	// execution thread builds them), for member draws with a lead of at least 32 operations - never making anyone wait.
 	static const bool helper_plans = [] {
 		const char* oracle = std::getenv("KYTY_CHECK_CHUNKS");
-		return (BufferCache::DrawPlansOn() || BufferCache::PlanBufferCheck()) && !(oracle != nullptr && oracle[0] == '2');
+		return (BufferCache::DrawPlansPossible() || BufferCache::PlanBufferCheck()) && !(oracle != nullptr && oracle[0] == '2');
 	}();
 	constexpr uint64_t PlanMargin = 32;
 	while (auto task = tasks.Pop()) {

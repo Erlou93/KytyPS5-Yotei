@@ -3262,14 +3262,23 @@ void BufferCache::SetPlanBuffers(std::vector<PlanBuffer>* entries) {
 	g_plan_cursor  = 0;
 }
 
-bool BufferCache::DrawPlansOn() {
-	static const bool on = [] {
-		const char* env = std::getenv("KYTY_PERF_DRAW_PLANS");
-		const bool  m   = env != nullptr && env[0] == '1';
-		if (m) std::fprintf(stderr, "PERF_DRAW_PLANS=1: draws with a plan are committed from it\n");
+static uint32_t DrawPlansFixed() {
+	static const uint32_t on = [] {
+		const char*    env = std::getenv("KYTY_PERF_DRAW_PLANS");
+		const uint32_t m   = env != nullptr && env[0] == '1' ? 1u : 0u;
+		if (m != 0) std::fprintf(stderr, "PERF_DRAW_PLANS=1: draws with a plan are committed from it\n");
 		return m;
 	}();
 	return on;
+}
+
+bool BufferCache::DrawPlansOn() {
+	return Common::LiveAb::Gate(Common::LiveAb::Switch::DrawPlans, DrawPlansFixed()) != 0u; // (KYTY_LIVE_AB: per call)
+}
+
+bool BufferCache::DrawPlansPossible() {
+	static const bool possible = Common::LiveAb::Possible(Common::LiveAb::Switch::DrawPlans, DrawPlansFixed());
+	return possible;
 }
 
 bool BufferCache::PlanBufferCheck() {

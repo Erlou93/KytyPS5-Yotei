@@ -51,6 +51,9 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
+    // Project 15 N5 (checkpoint 2): whether a draw with a plan is committed from it (read once per draw; a plan entry is
+    // valid by its own proof, so either phase continues from what the other left; the helpers build plans in both).
+    {Switch::DrawPlans, "KYTY_PERF_DRAW_PLANS", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

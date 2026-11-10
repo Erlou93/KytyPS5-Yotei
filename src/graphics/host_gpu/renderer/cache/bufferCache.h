@@ -160,6 +160,8 @@ public:
 	// N4.3: KYTY_PERF_DRAW_PLANS=1 (test switch): a draw with a plan is committed from it (its pipeline, table sets and
 	// buffer entries: an acquisition whose entry is Ready and whose proof holds only touches the buffer).
 	[[nodiscard]] static bool DrawPlansOn();
+	// Whether the plans can be on at any time of this run (the switch set, or KYTY_LIVE_AB toggles it): the helpers build.
+	[[nodiscard]] static bool DrawPlansPossible();
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferPath(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
 	                                                            BufferId id, bool image_source);
 	// KYTY_CHECK_PEEK=2: ObtainBufferPath's work that a Ready peek promised away (uploads, stream copies, image syncs).
