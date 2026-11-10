@@ -3373,7 +3373,10 @@ ImageId TextureCache::FindImageFromRange(uint64_t address, uint64_t size, bool e
 }
 
 vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
+	std::optional<Common::SlowFrame::Scope> slow_lock;
+	slow_lock.emplace(Common::SlowFrame::FtLock); // KYTY_TRACE_SLOW_FRAMES
 	std::unique_lock lock {m_lock};
+	slow_lock.reset();
 	auto& image = m_slot_images[id];
 	TouchImage(image);
 	if (!image.info.data.Empty()) {
@@ -3382,12 +3385,15 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 		}
 	}
 	const uint32_t shared_mode = SharedImageMemoryMode(); // KYTY_FIX_SHARED_IMAGE_MEMORY
+	std::optional<Common::SlowFrame::Scope> slow_sync;
+	slow_sync.emplace(Common::SlowFrame::FtSync); // KYTY_TRACE_SLOW_FRAMES
 	if (shared_mode != 0u) {
 		if (shared_mode >= 3u) ProbeSharedImageRead(id, desc.type == BindingType::Storage ? 1u : 0u);
 		SyncSharedImageMemory(id, desc.type == BindingType::Storage ? 1u : 0u);
 	} else {
 		SyncExtentAliases(id);
 	}
+	slow_sync.reset();
 	if (desc.type == BindingType::Storage) {
 		image.MarkGpuModified();
 		image.shader_write_serial = image.content_serial;
@@ -3410,17 +3416,23 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 	}
 	// KYTY_FIX_IMAGE_MEMORY_OWNER: after the refresh from guest memory, the bytes other images hold (and for a storage
 	// binding, the write).
-	if (ImageMemoryOwnerMode() != 0u) OwnerSyncImage(id, desc.type == BindingType::Storage ? 1u : 0u);
+	if (ImageMemoryOwnerMode() != 0u) {
+		const Common::SlowFrame::Scope slow_owner(Common::SlowFrame::FtOwner); // KYTY_TRACE_SLOW_FRAMES
+		OwnerSyncImage(id, desc.type == BindingType::Storage ? 1u : 0u);
+	}
 	switch (desc.type) {
 		case BindingType::Texture: break;
-		case BindingType::Storage:
+		case BindingType::Storage: {
+			const Common::SlowFrame::Scope slow_storage(Common::SlowFrame::FtStorage); // KYTY_TRACE_SLOW_FRAMES
 			if (!image.info.data.Empty()) {
 				CommitGpuWrite(image);
 			}
 			ArmWrittenImage(image);
 			break;
+		}
 		default: EXIT("TextureCache: invalid texture binding\n");
 	}
+	const Common::SlowFrame::Scope slow_view(Common::SlowFrame::FtView); // KYTY_TRACE_SLOW_FRAMES
 	return image.FindView(desc.view_info);
 }
 

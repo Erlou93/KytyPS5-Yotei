@@ -50,10 +50,15 @@ enum Part : uint32_t {
 	FtFast,      // FindTextureReplay: the read section and the ready check (lock wait included)
 	FtFull,      // FindTextureReplay: FindTexture (the slow path)
 	FtTail,      // FindTextureReplay: the exclusive lock and the alias scan after it
+	FtLock,      // FindTexture: waiting for the texture cache lock
+	FtSync,      // FindTexture: shared memory / extent alias sync
+	FtOwner,     // FindTexture: OwnerSyncImage
+	FtStorage,   // FindTexture: CommitGpuWrite + ArmWrittenImage (storage)
+	FtView,      // FindTexture: FindView
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready", "ft_fast", "ft_full", "ft_tail"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready", "ft_fast", "ft_full", "ft_tail", "ft_lock", "ft_sync", "ft_owner", "ft_storage", "ft_view"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {
