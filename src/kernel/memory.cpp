@@ -541,9 +541,7 @@ static bool g_test_fail_next_range_replace = false;
 // (locked; after the map could not tell: unknown, a change in progress: in_change, a change meanwhile: changed) and, with
 // =2, the fast answers checked against the locked one and the different ones. PERF clamp_ahead every 8M calls.
 struct ClampAheadStats {
-	std::atomic<uint64_t> calls {0}, fast {0}, locked {0}, unknown {0}, in_change {0}, changed {0}, checked {0}, different {0}, spun {0};
-	std::atomic<uint64_t> map_sets {0};
-	std::array<std::atomic<uint64_t>, 6> changes {}; // add, remove, release, replace, rename, protect
+	std::atomic<uint64_t> calls {0}, fast {0}, locked {0}, unknown {0}, in_change {0}, changed {0}, checked {0}, different {0};
 	std::atomic<uint32_t> logged {0};
 };
 static ClampAheadStats g_clamp_ahead_stats;
@@ -552,22 +550,9 @@ static void            ClampAheadReport() {
 	auto&             st   = g_clamp_ahead_stats;
 	if (!perf || ((st.calls.fetch_add(1, std::memory_order_relaxed) + 1) & ((1u << 23u) - 1u)) != 0) return;
 	const auto get = [](const std::atomic<uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
-	std::fprintf(stderr,
-	             "PERF clamp_ahead calls=%llu fast=%llu locked=%llu spun=%llu unknown=%llu in_change=%llu changed=%llu checked=%llu different=%llu "
-	             "map_sets=%llu changes[add|remove|release|replace|rename|protect]=%llu|%llu|%llu|%llu|%llu|%llu\n",
-	             get(st.calls), get(st.fast), get(st.locked), get(st.spun), get(st.unknown), get(st.in_change), get(st.changed),
-	             get(st.checked), get(st.different), get(st.map_sets), get(st.changes[0]), get(st.changes[1]), get(st.changes[2]),
-	             get(st.changes[3]), get(st.changes[4]), get(st.changes[5]));
-}
-static void NoteRangesChange(int kind) {
-	g_clamp_ahead_stats.changes[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
-}
-static bool RangesNarrowGeneration() {
-	static const uint32_t fixed = [] {
-		const char* env = std::getenv("KYTY_PERF_RANGES_NARROW");
-		return env != nullptr && env[0] == '1' ? 1u : 0u;
-	}();
-	return Common::LiveAb::Gate(Common::LiveAb::Switch::RangesNarrow, fixed) != 0u;
+	std::fprintf(stderr, "PERF clamp_ahead calls=%llu fast=%llu locked=%llu unknown=%llu in_change=%llu changed=%llu checked=%llu different=%llu\n",
+	             get(st.calls), get(st.fast), get(st.locked), get(st.unknown), get(st.in_change), get(st.changed), get(st.checked),
+	             get(st.different));
 }
 
 class VirtualRanges {
@@ -586,9 +571,7 @@ public:
 	bool Add(uint64_t start, uint64_t size, uint64_t offset, int protection, int memory_type,
 	         VirtualRangeType type, const char* name, bool disallow_merge = false) {
 		Common::LockGuard lock(m_mutex);
-		const bool        narrow = RangesNarrowGeneration(); // KYTY_PERF_RANGES_NARROW (project 15)
-		const ChangeScope change(*this, !narrow);
-		NoteRangesChange(0);
+		const ChangeScope change(*this);
 
 		// A range that wraps past the end of the address space is rejected (upstream f7ae86c98).
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
@@ -616,17 +599,15 @@ public:
 		m_ranges.insert(position, r);
 		MergeAroundUnlocked(index);
 		if (IsCommittedRangeType(type)) {
-			SetCommitted(start, size, true, narrow);
+			m_committed.Set(start, size, true);
 		}
 		return true;
 	}
 
 	bool Remove(uint64_t start, uint64_t size) {
 		Common::LockGuard lock(m_mutex);
-		const bool        narrow = RangesNarrowGeneration(); // KYTY_PERF_RANGES_NARROW (project 15)
-		const ChangeScope change(*this, !narrow);
-		NoteRangesChange(1);
-		SetCommitted(start, size, false, narrow);
+		const ChangeScope change(*this);
+		m_committed.Set(start, size, false);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -661,9 +642,7 @@ public:
 
 	bool ReleaseReserved(uint64_t start, uint64_t size) {
 		Common::LockGuard lock(m_mutex);
-		const bool        narrow = RangesNarrowGeneration(); // KYTY_PERF_RANGES_NARROW (project 15)
-		const ChangeScope change(*this, !narrow);
-		NoteRangesChange(2);
+		const ChangeScope change(*this);
 
 		// Starts are unique (the ranges never overlap and are never empty): the one range starting at `start`.
 		auto position = LowerBound(start);
@@ -678,9 +657,7 @@ public:
 	                 uint64_t offset, int protection, int memory_type, VirtualRangeType type,
 	                 const char* name, bool disallow_merge = false) {
 		Common::LockGuard lock(m_mutex);
-		const bool        narrow = RangesNarrowGeneration(); // KYTY_PERF_RANGES_NARROW (project 15)
-		const ChangeScope change(*this, !narrow);
-		NoteRangesChange(3);
+		const ChangeScope change(*this);
 
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
@@ -720,15 +697,13 @@ public:
 		const auto index = static_cast<size_t>(position - m_ranges.begin());
 		m_ranges.insert(position, replacement);
 		MergeAroundUnlocked(index);
-		SetCommitted(start, size, IsCommittedRangeType(type), narrow);
+		m_committed.Set(start, size, IsCommittedRangeType(type));
 		return true;
 	}
 
 	void Rename(uint64_t start, uint64_t size, const char* name) {
 		Common::LockGuard lock(m_mutex);
-		const bool        narrow = RangesNarrowGeneration(); // KYTY_PERF_RANGES_NARROW (project 15)
-		const ChangeScope change(*this, !narrow);
-		NoteRangesChange(4);
+		const ChangeScope change(*this);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -741,9 +716,7 @@ public:
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
 		Common::LockGuard lock(m_mutex);
-		const bool        narrow = RangesNarrowGeneration(); // KYTY_PERF_RANGES_NARROW (project 15)
-		const ChangeScope change(*this, !narrow);
-		NoteRangesChange(5);
+		const ChangeScope change(*this);
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
@@ -863,8 +836,7 @@ public:
 	// generation of the ranges it searched (every change bumps it under the lock first). Project 15 (the only path since
 	// 10.11: 612M answers checked, 0 different; live A/B in the noise): first the page map's answer without the lock
 	// (ClampRangeSize's, which the execution thread takes), valid when the generation was even and the same before and
-	// after it; else the search under the lock, but without waiting for it: a lock held by a change answers "busy"
-	// (generation ClampBusyGeneration; the execution thread then looks the buffer up itself). KYTY_CHECK_CLAMP_SEQLOCK=2
+	// after it; else the search under the lock. KYTY_CHECK_CLAMP_SEQLOCK=2
 	// (diagnostic): the locked answer too, compared when the generation did not change (PERF clamp_ahead).
 	uint64_t ClampRangeSizeAt(uint64_t virtual_addr, uint64_t size, uint64_t& generation) {
 		if (virtual_addr == 0 || size == 0 || size > UINT64_MAX - virtual_addr) {
@@ -875,19 +847,9 @@ public:
 			return env != nullptr && env[0] == '2' ? 2u : 1u;
 		}();
 		auto& st = g_clamp_ahead_stats;
-		for (uint32_t attempt = 0; attempt < 2u; attempt++) {
-			uint64_t g = m_generation.load(std::memory_order_acquire);
-			if ((g & 1u) != 0) {
-				// A map change in progress: with the narrow generation it lasts as long as setting the bits.
-				st.in_change.fetch_add(1, std::memory_order_relaxed);
-				for (uint32_t spin = 0; spin < 1000u && (g & 1u) != 0; spin++) {
-					_mm_pause();
-					g = m_generation.load(std::memory_order_acquire);
-				}
-				if ((g & 1u) != 0) break; // a game thread preempted inside the change: the lock
-				st.spun.fetch_add(1, std::memory_order_relaxed);
-			}
-			{
+		{
+			const uint64_t g = m_generation.load(std::memory_order_acquire);
+			if ((g & 1u) == 0) {
 				const auto run = m_committed.CommittedRun(virtual_addr, size);
 				std::atomic_thread_fence(std::memory_order_acquire);
 				const bool stable = m_generation.load(std::memory_order_relaxed) == g;
@@ -913,11 +875,15 @@ public:
 					return run;
 				}
 				(run == CommittedPageMap::Unknown ? st.unknown : st.changed).fetch_add(1, std::memory_order_relaxed);
-				if (run == CommittedPageMap::Unknown) break;
+			} else {
+				st.in_change.fetch_add(1, std::memory_order_relaxed);
 			}
 		}
 		st.locked.fetch_add(1, std::memory_order_relaxed);
 		ClampAheadReport();
+		// A change in progress: wait for it under the lock. In a burst of changes (the game's memory pool) this keeps the
+		// helper's results valid; not waiting (a busy answer) or a narrow generation both lost more than they saved
+		// (MAPA 10.11 ~02:00).
 		return ClampRangeSizeLockedAt(virtual_addr, size, generation);
 	}
 
@@ -1224,34 +1190,17 @@ private:
 	// change is in progress and even otherwise, so ClampRangeSizeAt's lock-free path can tell a stable map.
 	class ChangeScope {
 	public:
-		ChangeScope(VirtualRanges& ranges, bool active): m_ranges(ranges), m_active(active) {
-			if (m_active) m_ranges.BeginMapChange();
+		explicit ChangeScope(VirtualRanges& ranges): m_ranges(ranges) {
+			m_ranges.m_generation.fetch_add(1, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_release);
 		}
-		~ChangeScope() {
-			if (m_active) m_ranges.EndMapChange();
-		}
+		~ChangeScope() { m_ranges.m_generation.fetch_add(1, std::memory_order_release); }
 		ChangeScope(const ChangeScope&)            = delete;
 		ChangeScope& operator=(const ChangeScope&) = delete;
 
 	private:
 		VirtualRanges& m_ranges;
-		bool           m_active;
 	};
-	void BeginMapChange() {
-		m_generation.fetch_add(1, std::memory_order_relaxed);
-		std::atomic_thread_fence(std::memory_order_release);
-	}
-	void EndMapChange() { m_generation.fetch_add(1, std::memory_order_release); }
-	// KYTY_PERF_RANGES_NARROW (project 15, test switch, live A/B): the clamp's answer depends only on the committed pages
-	// (the page map, and the committed ranges the locked search walks, both changed only where the map is set), so the
-	// generation changes only around the map's change: odd for the few microseconds of Set, not for the whole change
-	// (protection, names, reserved ranges do not change it at all). Mixing the modes is safe: extra bumps only invalidate.
-	void SetCommitted(uint64_t start, uint64_t size, bool committed, bool narrow) {
-		if (narrow) BeginMapChange();
-		m_committed.Set(start, size, committed);
-		if (narrow) EndMapChange();
-		if (narrow) g_clamp_ahead_stats.map_sets.fetch_add(1, std::memory_order_relaxed);
-	}
 
 
 	// Each instance counts from its own base, so no thread's cache matches another instance.
@@ -1502,10 +1451,6 @@ std::vector<std::pair<uint64_t, uint64_t>> FindDirectMemoryAliases(uint64_t vadd
 bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space != nullptr &&
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
-}
-
-static void AheadPrefetchBacking(uint64_t vaddr) { // project 15: the ahead path's prefetch (KYTY_PERF_TABLE_MEMO)
-	if (g_guest_address_space != nullptr) g_guest_address_space->PrefetchBacking(vaddr);
 }
 
 int CompareBacking(uint64_t vaddr, const void* expected, uint64_t size) {
@@ -1960,7 +1905,6 @@ void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
 	g_gpu_resources = resources;
 	// Only used by materialization ahead of the GPU thread; no effect otherwise.
 	Graphics::ShaderRecompiler::IR::SetAheadReadHook(resources != nullptr ? &AheadReadBacking : nullptr);
-	Graphics::ShaderRecompiler::IR::SetAheadPrefetchHook(resources != nullptr ? &AheadPrefetchBacking : nullptr);
 	Graphics::ShaderRecompiler::IR::SetPlainReadHook(resources != nullptr ? &ReadGuestPlain : nullptr);
 	// Only used by ReadsUnchangedFast; no effect otherwise.
 	Graphics::ShaderRecompiler::IR::SetFastVerifyHook(resources != nullptr ? &FastVerifyLoggedReads : nullptr);

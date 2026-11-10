@@ -249,19 +249,6 @@ public:
 		return true;
 	}
 
-	// Project 15 (KYTY_PERF_TABLE_MEMO): starts loading the cache line TryReadBacking would copy `vaddr` from, when this
-	// thread's slot cache knows it (no lock); nothing otherwise.
-	void PrefetchBacking(uint64_t vaddr) {
-#if !defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
-		uint64_t offset = 0;
-		if (IsAvailable() && TryCachedOffset(vaddr, 4u, &offset)) {
-			_mm_prefetch(reinterpret_cast<const char*>(m_backing_base + offset), _MM_HINT_T0);
-		}
-#else
-		(void)vaddr;
-#endif
-	}
-
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (!IsAvailable() || data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
@@ -963,7 +950,6 @@ public:
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		return m_backing->TryReadBacking(vaddr, data, size);
 	}
-	void PrefetchBacking(uint64_t vaddr) { m_backing->PrefetchBacking(vaddr); }
 
 	using BackingCompareSpan   = GuestBackingStore::CompareSpan;
 	using BackingCompareResult = GuestBackingStore::CompareResult;

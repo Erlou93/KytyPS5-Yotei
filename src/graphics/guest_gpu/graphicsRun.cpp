@@ -1196,8 +1196,7 @@ void GuestGpu::ResolveThread() {
 					std::snprintf(buf, sizeof(buf), "%s%llu/%.1f", i == 0 ? "" : " ", get(hs.hist_n[i]), static_cast<double>(get(hs.hist_ns[i])) / 1e6);
 					hist += buf;
 				}
-				std::fprintf(stderr, "PERF resolve_wait_hist count/ms[<5us <20 <100 <500 <2000 >=2000]=[%s] long=%llu dumps=%llu\n", hist.c_str(),
-				             get(hs.long_waits), get(hs.dumps));
+				std::fprintf(stderr, "PERF resolve_wait_hist count/ms[<5us <20 <100 <500 <2000 >=2000]=[%s]\n", hist.c_str());
 			}
 		}
 	}
@@ -1252,19 +1251,9 @@ void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context
 		const auto start       = std::chrono::steady_clock::now();
 		bool       commands    = false;
 		uint64_t   commands_ns = 0;
-		bool       dumped      = false;
 		for (Common::SpinWait spin;;) {
 			claim = RenderExecutor::TryClaimResolvedDraw(r, steal);
 			if (claim != RenderExecutor::ResolvedClaim::Running) break;
-			if (!dumped && g_gpu_stage_stats && std::chrono::steady_clock::now() - start > std::chrono::microseconds(200)) {
-				// What the helper stands on in a long resolution (diagnostics, PERF only): its stack, every 8th one.
-				dumped = true;
-				if ((hs.long_waits.fetch_add(1, std::memory_order_relaxed) & 7u) == 0 && hs.dumps.fetch_add(1, std::memory_order_relaxed) < 4000u) {
-					char label[64];
-					std::snprintf(label, sizeof(label), "RESOLVE_WAIT seq=%llu", static_cast<unsigned long long>(operation.sequence));
-					PerfDumpThreadStack(m_resolve_helper.native_handle(), label);
-				}
-			}
 			if (m_pending_commands.load(std::memory_order_acquire) != 0) {
 				const auto c0 = std::chrono::steady_clock::now();
 				RunCommands();
@@ -1283,7 +1272,7 @@ void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context
 		if (commands) hs.wait_commands.fetch_add(1, std::memory_order_relaxed);
 		for (uint64_t max = hs.wait_max_ns.load(std::memory_order_relaxed); ns > max && !hs.wait_max_ns.compare_exchange_weak(max, ns);) {
 		}
-		if (all > 1000000u || dumped) {
+		if (all > 1000000u) {
 			std::fprintf(stderr, "RESOLVE_HELPER wait %.3f ms commands %.3f ms (sequence %llu)\n", static_cast<double>(all) / 1e6,
 			             static_cast<double>(commands_ns) / 1e6, static_cast<unsigned long long>(operation.sequence));
 		}

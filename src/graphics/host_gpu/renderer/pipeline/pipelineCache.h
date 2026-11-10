@@ -45,8 +45,6 @@ void                          DeleteResolvedStages(ResolvedStages* stages);
 void               SetResolveCheck(bool on);
 [[nodiscard]] int  ResolvedStagesCompare(const ResolvedStages& a, const ResolvedStages& b, const char** field);
 void               ResolvedStagesFault(ResolvedStages& stages, uint32_t fault);
-// The size of a resolution's read log (RESOLVE_LONG lines).
-void               ResolvedStagesLogSize(const ResolvedStages& stages, size_t* entries, size_t* bytes);
 inline thread_local ResolvedStages* t_resolved_stages = nullptr;
 // KYTY_TRACE_DISPATCH_CENSUS: how ProgramCache::Get<Compute> got the last compute stage's resources on this thread
 // (2 materialized, 3 the resolve thread's result, 4 compiled: a program miss). Not touched when the selection is adopted.

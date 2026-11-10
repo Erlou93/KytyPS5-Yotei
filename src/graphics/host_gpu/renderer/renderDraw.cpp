@@ -3407,19 +3407,6 @@ void RenderExecutor::ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept {
 
 // Project 15 N2.2: the helper's resolution of a task (the draw's pre-check included) and the phases around it.
 bool RenderExecutor::ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task) {
-	// RESOLVE_LONG (diagnostics, KYTY_TRACE_PERF only): a resolution longer than 200 us, its pass and read log (before the
-	// slot is ready: afterwards it is the execution thread's).
-	static const bool long_lines_on = std::getenv("KYTY_TRACE_PERF") != nullptr;
-	const auto        long_t0       = long_lines_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-	const auto        long_line     = [&](bool resolved) {
-        static std::atomic<uint32_t> lines {0};
-        const auto us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - long_t0).count();
-        if (us <= 200.0 || lines.fetch_add(1, std::memory_order_relaxed) >= 200u) return;
-        size_t entries = 0, bytes = 0;
-        if (resolved) ResolvedStagesLogSize(*slot.stages, &entries, &bytes);
-        std::fprintf(stderr, "RESOLVE_LONG us=%.0f pass=[%s] dispatch=%d entries=%zu bytes=%zu\n", us, PassCensus::PassName(task.pass_id).c_str(),
-		             task.dispatch ? 1 : 0, entries, bytes);
-	};
 	bool ok = false;
 	if (task.dispatch) {
 		ok = ResolveDispatchInto(slot, *task.shaders, task.groups_x, task.groups_y, task.groups_z, task.mode, task.indirect,
@@ -3433,7 +3420,6 @@ bool RenderExecutor::ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task
 		ResolveCheckFault(slot, task.fault);
 		slot.fault = task.fault;
 	}
-	if (long_lines_on) long_line(ok);
 	slot.empty = !ok;
 	slot.phase.store(PhaseReady, std::memory_order_release);
 	return ok;
@@ -3491,10 +3477,6 @@ int RenderExecutor::CompareResolved(const ResolvedDraw& reference, const Resolve
 
 uint32_t RenderExecutor::ResolvedFault(const ResolvedDraw* slot) noexcept {
 	return slot->fault;
-}
-
-void RenderExecutor::ResolvedLogSize(const ResolvedDraw* slot, size_t* entries, size_t* bytes) {
-	ResolvedStagesLogSize(*slot->stages, entries, bytes);
 }
 
 void RenderExecutor::SetResolveCheckMode(bool on) {

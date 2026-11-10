@@ -149,9 +149,6 @@ struct ReadLog {
 enum class AheadReadStatus : uint8_t { Ok, GpuDirty, Backing };
 using AheadReadHook = AheadReadStatus (*)(uint64_t vaddr, void* data, uint64_t size);
 void SetAheadReadHook(AheadReadHook hook);
-// Project 15 (KYTY_PERF_TABLE_MEMO): starts loading the guest bytes at vaddr for a later ahead read (no effect on results).
-using AheadPrefetchHook = void (*)(uint64_t vaddr);
-void SetAheadPrefetchHook(AheadPrefetchHook hook);
 
 // The ahead reader as an SrtMemoryReader (the specialization reader of an ahead runtime; ordinary reads are
 // redirected inside ReadOrdinaryMemory). Fails (and refuses the materialization) outside MaterializeResourcesAhead.
