@@ -36,6 +36,7 @@ enum class Switch : uint32_t {
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
 	DiagTablesAssume,          // KYTY_DIAG_TABLES_ASSUME_UNCHANGED (measurement only, APPROXIMATION)
 	TableMemo,                 // KYTY_PERF_TABLE_MEMO (project 15, test switch: a two-level descriptor table read once per materialization)
+	RangesNarrow,              // KYTY_PERF_RANGES_NARROW (project 15, test switch: the ranges' generation only around the page map's change)
 	Count
 };
 

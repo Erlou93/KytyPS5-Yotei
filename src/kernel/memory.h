@@ -175,9 +175,7 @@ private:
 [[nodiscard]] uint64_t TryClampReservedRangeSize(uint64_t vaddr, uint64_t size);
 // The resolve thread's lookups (any thread; never exits or logs): ClampRangeSize's answer (0 where ClampRangeSize exits),
 // and in *generation the generation of the virtual ranges it was computed at; while RangesGeneration() still returns
-// that value, ClampRangeSize gives the same answer. *generation ClampBusyGeneration (the answer 0): a change of the ranges
-// held their lock; no answer (project 15: the resolve helper does not wait for a game thread's change).
-inline constexpr uint64_t ClampBusyGeneration = UINT64_MAX;
+// that value, ClampRangeSize gives the same answer.
 [[nodiscard]] uint64_t ClampRangeSizeAhead(uint64_t vaddr, uint64_t size, uint64_t* generation);
 [[nodiscard]] uint64_t RangesGeneration();
 void                   WriteBacking(uint64_t vaddr, const void* data, uint64_t size) noexcept;

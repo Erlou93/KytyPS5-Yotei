@@ -54,6 +54,9 @@ constexpr SwitchInfo Switches[] = {
     // Project 15: whether a materialization remembers a two-level table's record pointers and repeated descriptors (read
     // once per table walk; a materialization's reads of the same bytes are one snapshot either way, =2 checks it).
     {Switch::TableMemo, "KYTY_PERF_TABLE_MEMO", 1},
+    // Project 15: whether a change of the virtual ranges moves their generation only around the page map's change (read
+    // once per change; extra generation bumps only invalidate, so the modes mix safely).
+    {Switch::RangesNarrow, "KYTY_PERF_RANGES_NARROW", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

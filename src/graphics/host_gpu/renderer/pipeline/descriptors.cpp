@@ -1327,10 +1327,6 @@ void BuildBufferSources(RenderContext& renderer, const ShaderRecompiler::IR::Res
 			ChunkLead::t_part_buffers++;
 			clamped = Libs::LibKernel::Memory::ClampRangeSizeAhead(address, size, &generation);
 		}
-		if (generation == Libs::LibKernel::Memory::ClampBusyGeneration) {
-			b.outcome = BufferOutcome::Busy; // a game thread changes the ranges: the execution thread looks it up itself
-			continue;
-		}
 		if (clamped != size) {
 			b.outcome = BufferOutcome::Clamped;
 			continue;
@@ -1350,10 +1346,6 @@ void BuildBufferSources(RenderContext& renderer, const ShaderRecompiler::IR::Res
 		g.written         = range.written;
 		uint64_t generation = 0;
 		const auto clamped_range = Libs::LibKernel::Memory::ClampRangeSizeAhead(range.address, range.size, &generation);
-		if (generation == Libs::LibKernel::Memory::ClampBusyGeneration) {
-			g.outcome = BufferOutcome::Busy; // as above
-			continue;
-		}
 		if (clamped_range != range.size) {
 			g.outcome = BufferOutcome::Clamped;
 			continue;
@@ -1418,6 +1410,22 @@ bool BufferSourceHolds(const ResolveRecord::BufferSource& source) {
 		return false;
 	}
 	NoteBufferUse(BufferUse::Used);
+	// KYTY_CHECK_CLAMP_SEQLOCK=2 (project 15, the narrow generation): an accepted source's clamp is the one the ranges
+	// give now (proof that protection, names and reserved ranges, which no longer change the generation, change nothing).
+	static const bool check = [] {
+		const char* env = std::getenv("KYTY_CHECK_CLAMP_SEQLOCK");
+		return env != nullptr && env[0] == '2';
+	}();
+	if (check) {
+		static uint64_t accepted = 0, different = 0;
+		accepted++;
+		uint64_t now_generation = 0; // the locked search (never exits or logs, unlike ClampRangeSize)
+		if (source.size != 0 && Libs::LibKernel::Memory::ClampRangeSizeAhead(source.address, source.size, &now_generation) != source.size) different++;
+		if ((accepted & ((1u << 20u) - 1u)) == 0) {
+			std::fprintf(stderr, "PERF clamp_accepted accepted=%llu different=%llu\n", static_cast<unsigned long long>(accepted),
+			             static_cast<unsigned long long>(different));
+		}
+	}
 	return true;
 }
 
