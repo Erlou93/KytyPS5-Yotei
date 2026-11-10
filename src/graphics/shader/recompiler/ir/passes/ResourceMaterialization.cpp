@@ -236,6 +236,7 @@ std::atomic<OrdinaryReadHook>        g_ordinary_read_hook {nullptr};
 std::atomic<PlainReadHook>           g_plain_read_hook {nullptr};
 std::atomic<OrdinaryReadSessionHook> g_ordinary_read_session_hook {nullptr};
 std::atomic<AheadReadHook>           g_ahead_read_hook {nullptr};
+std::atomic<AheadPrefetchHook>       g_ahead_prefetch_hook {nullptr}; // project 15 (KYTY_PERF_TABLE_MEMO)
 std::atomic<FastVerifyHook>          g_fast_verify_hook {nullptr};
 
 bool CaptureOrdinaryRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
@@ -536,12 +537,20 @@ void GroupIndirectImageCandidates(const ImageResource& base, std::vector<Descrip
 // materialization reads one snapshot of these bytes already: a repeated read is only compared with the first (AheadRead);
 // a change by the game in between fails the first entry's check at the adoption, as today. =2 reads them anyway and counts
 // the memo's answers that differ (PERF table_memo).
-struct TableMemoEntry {
-	uint64_t                epoch = 0, base = 0, offset = 0;
-	std::array<uint32_t, 2> value {};
+// The pointer column of one table (by record key), valid for one materialization (epoch) and one table layout.
+struct TablePointerColumn {
+	uint64_t                             epoch = 0, base = 0, stride = 0, offset = 0, immediate = 0;
+	std::vector<uint64_t>                tags; // per key: the epoch it was read in
+	std::vector<std::array<uint32_t, 2>> values;
 };
-static thread_local std::array<TableMemoEntry, 8192> t_table_memo {};
-static thread_local uint64_t                         t_table_memo_epoch = 1;
+static thread_local TablePointerColumn t_table_column;
+static thread_local uint64_t           t_table_memo_epoch = 1;
+// A table's next records' lines, PrefetchDistance records ahead (the ahead path only).
+constexpr uint32_t TablePrefetchDistance = 8;
+static void TablePrefetch(uint64_t address) {
+	if (t_ahead.log == nullptr) return;
+	if (const auto hook = g_ahead_prefetch_hook.load(std::memory_order_relaxed); hook != nullptr) hook(address);
+}
 struct TableMemoStats {
 	std::atomic<uint64_t> pointer_hits {0}, descriptor_hits {0}, checked {0}, different {0}, reads {0};
 };
@@ -932,13 +941,32 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 					if (!ReadScalarTable(table_base, table_size, table_offset, runtime, pointer))
 						return IndirectFailAt(__LINE__);
 				} else {
-					// KYTY_PERF_TABLE_MEMO: the record's pointer once per materialization.
-					auto&      st   = g_table_memo_stats;
-					auto&      slot = t_table_memo[((table_base >> 4u) ^ table_offset ^ (table_offset >> 13u)) & (t_table_memo.size() - 1u)];
-					const bool hit  = slot.epoch == t_table_memo_epoch && slot.base == table_base && slot.offset == table_offset;
+					// KYTY_PERF_TABLE_MEMO: the record's pointer once per materialization (a column by record key), and the
+					// line of the record PrefetchDistance keys ahead started loading (cold records written by the game).
+					auto& st  = g_table_memo_stats;
+					auto& col = t_table_column;
+					if (col.epoch != t_table_memo_epoch || col.base != table_base || col.stride != indirect.table_stride ||
+					    col.offset != indirect.table_offset || col.immediate != indirect.table_immediate) {
+						col.epoch     = t_table_memo_epoch;
+						col.base      = table_base;
+						col.stride    = indirect.table_stride;
+						col.offset    = indirect.table_offset;
+						col.immediate = indirect.table_immediate;
+						col.tags.assign(col.tags.size(), 0u);
+					}
+					if (entry + TablePrefetchDistance < key_count) {
+						const auto next = keys[entry + TablePrefetchDistance];
+						TablePrefetch(table_base + uint64_t {(next * indirect.table_stride + indirect.table_offset) & ~3u} +
+						              (indirect.table_immediate & ~3u));
+					}
+					if (key >= col.tags.size()) {
+						col.tags.resize(static_cast<size_t>(key) + 1u, 0u);
+						col.values.resize(static_cast<size_t>(key) + 1u);
+					}
+					const bool hit = col.tags[key] == t_table_memo_epoch;
 					TableMemoReport();
 					if (hit) {
-						pointer = slot.value;
+						pointer = col.values[key];
 						st.pointer_hits.fetch_add(1, std::memory_order_relaxed);
 					}
 					if (!hit || memo_mode == 2u) {
@@ -948,8 +976,9 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 							st.checked.fetch_add(1, std::memory_order_relaxed);
 							if (read != pointer) st.different.fetch_add(1, std::memory_order_relaxed);
 						}
-						pointer = read;
-						slot    = {t_table_memo_epoch, table_base, table_offset, read};
+						pointer          = read;
+						col.tags[key]    = t_table_memo_epoch;
+						col.values[key]  = read;
 					}
 				}
 				const auto base = (static_cast<uint64_t>(pointer[1] & 0xffffu) << 32u) | pointer[0];
@@ -1212,10 +1241,15 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 			    program.shader_hash, range.source, key, count, why, candidate.dwords[0], candidate.dwords[1],
 			    candidate.dwords[2], candidate.dwords[3]));
 		};
+		const bool range_prefetch = TableMemoMode() != 0u; // KYTY_PERF_TABLE_MEMO: the records' lines ahead
 		for (uint32_t key = 0; key < count; ++key) {
 			// The GPU's record offset: 32-bit shader arithmetic, then the dword-aligned instruction offset.
 			const uint64_t offset = uint64_t {(key * indirect.table_stride + indirect.table_offset) & ~3u} +
 			                        (indirect.table_immediate & ~3u);
+			if (range_prefetch && key + TablePrefetchDistance < count) {
+				TablePrefetch(table_base + uint64_t {((key + TablePrefetchDistance) * indirect.table_stride + indirect.table_offset) & ~3u} +
+				              (indirect.table_immediate & ~3u));
+			}
 			DescriptorValue candidate {.dword_count = 4u};
 			if (!address_table && table.NumRecords() == UINT32_MAX && offset + 16u > UnboundedTableBoundBytes) {
 				if (indirect.widened) {
@@ -2254,6 +2288,10 @@ void SetOrdinaryReadHook(OrdinaryReadHook hook) {
 
 void SetOrdinaryReadSessionHook(OrdinaryReadSessionHook hook) {
 	g_ordinary_read_session_hook.store(hook, std::memory_order_relaxed);
+}
+
+void SetAheadPrefetchHook(AheadPrefetchHook hook) {
+	g_ahead_prefetch_hook.store(hook, std::memory_order_relaxed);
 }
 
 void SetAheadReadHook(AheadReadHook hook) {

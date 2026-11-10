@@ -1504,6 +1504,10 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+static void AheadPrefetchBacking(uint64_t vaddr) { // project 15: the ahead path's prefetch (KYTY_PERF_TABLE_MEMO)
+	if (g_guest_address_space != nullptr) g_guest_address_space->PrefetchBacking(vaddr);
+}
+
 int CompareBacking(uint64_t vaddr, const void* expected, uint64_t size) {
 	if (g_guest_address_space == nullptr) return 2;
 	const GuestAddressSpace::BackingCompareSpan span {vaddr, static_cast<const uint8_t*>(expected), size};
@@ -1956,6 +1960,7 @@ void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
 	g_gpu_resources = resources;
 	// Only used by materialization ahead of the GPU thread; no effect otherwise.
 	Graphics::ShaderRecompiler::IR::SetAheadReadHook(resources != nullptr ? &AheadReadBacking : nullptr);
+	Graphics::ShaderRecompiler::IR::SetAheadPrefetchHook(resources != nullptr ? &AheadPrefetchBacking : nullptr);
 	Graphics::ShaderRecompiler::IR::SetPlainReadHook(resources != nullptr ? &ReadGuestPlain : nullptr);
 	// Only used by ReadsUnchangedFast; no effect otherwise.
 	Graphics::ShaderRecompiler::IR::SetFastVerifyHook(resources != nullptr ? &FastVerifyLoggedReads : nullptr);

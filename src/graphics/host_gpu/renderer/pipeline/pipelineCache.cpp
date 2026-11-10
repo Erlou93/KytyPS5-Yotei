@@ -174,7 +174,8 @@ int ResolvedStagesCompare(const ResolvedStages& a, const ResolvedStages& b, cons
 		    !std::equal(x.user_data.begin(), x.user_data.begin() + x.user_data_count, y.user_data.begin())) {
 			return bad("user_data");
 		}
-		if (x.workgroup_counts != y.workgroup_counts) return bad("workgroup_counts");
+		// Only a compute stage sets them (a draw's stage keeps what the slot's last dispatch left; the draw never reads it).
+		if (x.stage == ShaderType::Compute && x.workgroup_counts != y.workgroup_counts) return bad("workgroup_counts");
 		if (x.null_share_kinds != y.null_share_kinds) return bad("null_share_kinds");
 		if (x.resources.flattened_srt != y.resources.flattened_srt) return bad("flat_srt");
 		if (x.resources.buffers != y.resources.buffers) return bad("buffers");
