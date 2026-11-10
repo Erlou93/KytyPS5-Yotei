@@ -3063,6 +3063,9 @@ struct PeekStats {
 	std::array<uint64_t, BufferCache::BufferPeek::Count> classes {}, member {}, bda {};
 	uint64_t image_granule_only = 0, bda_compared = 0, compared = 0, bad = 0, race = 0, lag_compared = 0, lag_bad = 0, lag_race = 0, injected = 0, detected = 0;
 	std::array<uint64_t, 4> image_split {}; // Image peeks: [plain found, plain not found, formatted found, formatted not found]
+	// W2.3: an Image peek with no image taken - any image starting there at all (ensure_valid off): [any, none]; the images
+	std::array<uint64_t, 2> image_any {};
+	uint64_t                image_count = 0;
 	std::array<uint64_t, 4> lag_age {};  // calls since the kept peek: <16, <128, <1024, >=1024
 	std::array<uint64_t, 3> lag_op_age {}; // operations since the kept peek: <16, <128, >=128 (N4.1)
 	std::array<std::array<uint64_t, 5>, 3> lag_fail_by_op_age {};
@@ -3127,11 +3130,12 @@ void PeekReport() {
 	std::fprintf(stderr,
 	             "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu image_granule_only=%llu "
 	             "image[plain_found|plain_none|formatted_found|formatted_none]=%s member_draws=%llu plan_draws=%llu "
-	             "plan_by_in_order[0|1|2|3+]=%s\n",
+	             "plan_by_in_order[0|1|2|3+]=%s image_none_any[image|nothing]=%s images=%llu\n",
 	             classes(st.member).c_str(), join(t_peek_marker_hist, 4).c_str(), classes(st.bda).c_str(),
 	             static_cast<unsigned long long>(st.bda_compared), static_cast<unsigned long long>(st.image_granule_only),
 	             join(st.image_split, 4).c_str(), static_cast<unsigned long long>(t_member_draws),
-	             static_cast<unsigned long long>(t_plan_draws), join(t_plan_marker_hist, 4).c_str());
+	             static_cast<unsigned long long>(t_plan_draws), join(t_plan_marker_hist, 4).c_str(), join(st.image_any, 2).c_str(),
+	             static_cast<unsigned long long>(st.image_count));
 }
 } // namespace
 
@@ -3437,6 +3441,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		// Diagnostic, outside the peek: a real image at the address or a collision of the exact-start table.
 		const bool found = static_cast<bool>(m_texture_cache.FindImageFromRange(vaddr, size, true));
 		g_peek_stats.image_split[(is_texel_buffer ? 2u : 0u) + (found ? 0u : 1u)]++;
+		if (!found) g_peek_stats.image_any[static_cast<bool>(m_texture_cache.FindImageFromRange(vaddr, size, false)) ? 0u : 1u]++;
+		g_peek_stats.image_count = m_texture_cache.ImageCount();
 	}
 	return PeekChecked(peek, vaddr, size, is_written, false,
 	                   [&] { return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source); });
