@@ -55,10 +55,11 @@ enum Part : uint32_t {
 	FtOwner,     // FindTexture: OwnerSyncImage
 	FtStorage,   // FindTexture: CommitGpuWrite + ArmWrittenImage (storage)
 	FtView,      // FindTexture: FindView
+	CreateView,  // vkCreateImageView (Image::FindView)
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready", "ft_fast", "ft_full", "ft_tail", "ft_lock", "ft_sync", "ft_owner", "ft_storage", "ft_view"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready", "ft_fast", "ft_full", "ft_tail", "ft_lock", "ft_sync", "ft_owner", "ft_storage", "ft_view", "create_view"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {

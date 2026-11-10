@@ -1,3 +1,4 @@
+#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/image/imageView.h"
 
 #include "common/assert.h"
@@ -413,7 +414,20 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	create.subresourceRange.layerCount     = normalized.layer_count;
 
 	vk::ImageView view   = nullptr;
-	const auto    result = m_graphics.device.createImageView(&create, nullptr, &view);
+	const uint64_t slow_t0 = Common::SlowFrame::NowNs(); // KYTY_TRACE_SLOW_FRAMES
+	vk::Result     result;
+	{
+		const Common::SlowFrame::Scope slow_view(Common::SlowFrame::CreateView); // KYTY_TRACE_SLOW_FRAMES
+		result = m_graphics.device.createImageView(&create, nullptr, &view);
+	}
+	if (Common::SlowFrame::Threshold() != 0u && Common::SlowFrame::NowNs() - slow_t0 >= 2'000'000u) {
+		std::fprintf(stderr, "SLOW_VIEW ms=%.1f image_format=%d view_format=%d type=%d usage=0x%x levels=%u layers=%u extent=%ux%ux%u views=%zu
+",
+		             static_cast<double>(Common::SlowFrame::NowNs() - slow_t0) / 1e6, static_cast<int>(image.format),
+		             static_cast<int>(normalized.format), static_cast<int>(normalized.type),
+		             static_cast<uint32_t>(static_cast<vk::ImageUsageFlags::MaskType>(usage.usage)), normalized.level_count,
+		             normalized.layer_count, image.extent.width, image.extent.height, image.extent.depth, views.size());
+	}
 	if (result != vk::Result::eSuccess || view == nullptr) {
 		EXIT("failed to create image view: result=%d image_format=%d view_format=%d type=%d "
 		     "aspect=0x%x mip=%u+%u layer=%u+%u usage=0x%x\n",
