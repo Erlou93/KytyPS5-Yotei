@@ -3250,6 +3250,44 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			                    : view_mip >= 0 || view_layer >= 0 ? 6
 			                                                    : -1;
 			if (why >= 0) NoteNonRepeat(why);
+			// T1b diagnostic (KYTY_TRACE_PEEK_CENSUS): the first non-repeatable target searches in the walk, with the
+			// candidates and the first SameBacking field that differs (1 address, 2 size, 3 extent, 4 levels/layers,
+			// 5 samples, 6 bytes per block, 7 tile mode, 8 colour transform, 9 format/type, 10 exact format).
+			static uint32_t logged = 0;
+			if (why == 2 && ChunkLead::PeekCensusOn() && DebugPresentCount().load() > 2500u && logged < 24u) {
+				logged++;
+				const auto first_diff = [&](const ImageInfo& c) {
+					const auto& q = desc.info;
+					if (c.data.address != q.data.address) return 1;
+					if (c.data.size != q.data.size) return 2;
+					if (c.extent != q.extent) return 3;
+					if (c.resources.levels < q.resources.levels || c.resources.layers < q.resources.layers) return 4;
+					if (c.samples != q.samples) return 5;
+					if (c.bytes_per_block != q.bytes_per_block) return 6;
+					if (c.tile_mode != q.tile_mode) return 7;
+					if (c.GetColorTransform() != q.GetColorTransform()) return 8;
+					if (!ImageViewOps::FormatsCompatible(c.pixel_format, q.pixel_format) || c.type != q.type) return 9;
+					if (exact_format && c.pixel_format != q.pixel_format) return 10;
+					return 0;
+				};
+				std::string text;
+				for (size_t i = 0; i < candidates.size() && i < 4u; i++) {
+					const auto& c = m_slot_images[candidates[i]].info;
+					char        buf[256];
+					std::snprintf(buf, sizeof(buf), " [cand %u addr=0x%llx size=0x%llx %ux%u fmt=%d bpb=%u tile=%u diff=%d]",
+					              static_cast<uint32_t>(candidates[i].index), static_cast<unsigned long long>(c.data.address),
+					              static_cast<unsigned long long>(c.data.size), c.extent.width, c.extent.height,
+					              static_cast<int>(c.pixel_format), c.bytes_per_block, static_cast<uint32_t>(c.tile_mode), first_diff(c));
+					text += buf;
+				}
+				std::fprintf(stderr, "T1B_NOTSAME frame=%u bucket=%d type=%u addr=0x%llx size=0x%llx %ux%u fmt=%d bpb=%u tile=%u candidates=%zu result=%u%s
+",
+				             DebugPresentCount().load(), ChunkLead::t_floor_bucket, static_cast<uint32_t>(desc.type),
+				             static_cast<unsigned long long>(desc.info.data.address), static_cast<unsigned long long>(desc.info.data.size),
+				             desc.info.extent.width, desc.info.extent.height, static_cast<int>(desc.info.pixel_format),
+				             desc.info.bytes_per_block, static_cast<uint32_t>(desc.info.tile_mode), candidates.size(),
+				             static_cast<uint32_t>(result.index), text.c_str());
+			}
 		}
 		g_last_find_plain = plain_source && !inserted_new && view_mip < 0 && view_layer < 0 && !block_alias &&
 		                    (desc.type == BindingType::Texture || desc.type == BindingType::RenderTarget) &&
