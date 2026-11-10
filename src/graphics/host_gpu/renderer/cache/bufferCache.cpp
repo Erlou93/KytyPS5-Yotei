@@ -300,6 +300,61 @@ void BufferCache::MapTimeWorker() {
 		}
 		if ((piece & MapTimeGranuleItem) != 0) { // one granule (MapTimeRequestGranule)
 			const size_t   granule = piece & ~MapTimeGranuleItem;
+			// KYTY_PERF_GRANULE_SPAN=<n> (test switch, hitch study 10.11): the aligned group of n granules around it in one
+			// import (each import holds the driver ~50 ms whatever its size; the execution thread's vkCreateImageView /
+			// vkAllocateMemory wait behind it: 45-80 ms hitches, one per granule import after the start).
+			static const size_t span = [] {
+				const char* value = std::getenv("KYTY_PERF_GRANULE_SPAN");
+				const auto  n     = value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t {1};
+				if (n > 1) std::fprintf(stderr, "PERF_GRANULE_SPAN %zu granules per import\n", n);
+				return std::max<size_t>(1, n);
+			}();
+			if (span > 1) {
+				const size_t   first = granule / span * span;
+				size_t         count = 0;
+				const uint64_t sstart = static_cast<uint64_t>(first) * FallbackChunkBytes;
+				const uint64_t sbytes = std::min<uint64_t>(span * FallbackChunkBytes, total - sstart) & ~uint64_t {0xfff};
+				const auto     t0     = std::chrono::steady_clock::now();
+				const auto     memory = sbytes == 0 || !Buffer::CanImportGuestMemory(m_graphics, base + sstart, sbytes)
+				                            ? vk::DeviceMemory {}
+				                            : Buffer::ImportGuestMemory(m_graphics, base + sstart, sbytes);
+				std::vector<std::pair<size_t, std::unique_ptr<Buffer>>> views;
+				if (memory) {
+					std::vector<size_t> wanted;
+					{
+						std::scoped_lock lock(m_maptime.mutex);
+						for (size_t g = first; g < first + span && static_cast<uint64_t>(g - first) * FallbackChunkBytes < sbytes; g++) {
+							if (g == granule || m_maptime.granule_requested[g] == 0) {
+								m_maptime.granule_requested[g] = 1;
+								wanted.push_back(g);
+							}
+						}
+					}
+					for (const size_t g: wanted) {
+						const uint64_t at     = static_cast<uint64_t>(g - first) * FallbackChunkBytes;
+						bool           failed = false;
+						auto view = std::make_unique<Buffer>(m_graphics, m_scheduler, GuestDirectTag {&failed, memory, at}, base + sstart + at,
+						                                     std::min(FallbackChunkBytes, sbytes - at));
+						if (!failed) views.emplace_back(g, std::move(view));
+					}
+				}
+				const auto us = static_cast<uint64_t>(
+				    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+				if (memory) {
+					std::scoped_lock lock(m_maptime.mutex);
+					m_maptime.import_us += us;
+					m_maptime.granule_imports++;
+					m_maptime.imported_bytes += sbytes;
+					m_maptime.memories.push_back(memory);
+					for (auto& view: views) {
+						m_maptime.granule_requested[view.first] = 2;
+						m_maptime.ready.push_back(std::move(view));
+						count++;
+					}
+					continue;
+				}
+				// the span could not be imported: the granule alone, as without the switch
+			}
 			const uint64_t start   = static_cast<uint64_t>(granule) * FallbackChunkBytes;
 			const uint64_t bytes   = std::min(FallbackChunkBytes, total - start) & ~uint64_t {0xfff};
 			const auto     t0      = std::chrono::steady_clock::now();
