@@ -614,7 +614,8 @@ GuestGpu::GuestGpu(RenderContext& renderer)
 	m_executor = std::jthread([this] { ExecutionThread(); });
 	m_resolver = std::jthread([this] { ResolveThread(); });
 	RenderExecutor::SetResolveCheckMode(ResolveCheckOn()); // project 15 N2.2: the helper resolves
-	m_resolve_helper = std::jthread([this] { ResolveHelperThread(); });
+	m_resolve_helper = std::jthread([this] { ResolveHelperThread(0); });
+	if (ResolveHelpers() >= 2) m_resolve_helper2 = std::jthread([this] { ResolveHelperThread(1); }); // N5.2
 	m_thread   = std::jthread(ThreadRun, this);
 	StallWatch::StartIfEnabled(); // KYTY_DIAG_STALL_WATCH (diagnostic)
 }
@@ -1360,7 +1361,10 @@ void GuestGpu::ResolveThread() {
 			} else {
 				task.slot = &slot;
 			}
-			if (!m_tasks.TryPush(task)) EXIT("resolve helper: the task queue is full\n"); // a task holds a slot: never full
+			// N5.2: with two helpers the tasks go in turns of 8 (warm caches); slots are independent, the execution thread
+			// takes them in order by their phase.
+			auto& queue = ResolveHelpers() >= 2 && (m_deal_turn++ & 8u) != 0 ? m_tasks2 : m_tasks;
+			if (!queue.TryPush(task)) EXIT("resolve helper: the task queue is full\n"); // a task holds a slot: never full
 			m_tasks_pushed++;
 			hs.tasks.fetch_add(1, std::memory_order_relaxed);
 			operation->resolved = &slot;
@@ -1405,15 +1409,27 @@ void GuestGpu::ResolveThread() {
 
 // Project 15 N2.2: the resolve helper. It resolves the tasks in order into their slots; a task whose slot the execution
 // thread stole is skipped (its slot freed). It never waits for the resolve or execution thread.
-void GuestGpu::ResolveHelperThread() {
+uint32_t GuestGpu::ResolveHelpers() {
+	static const uint32_t helpers = [] {
+		const char*    env = std::getenv("KYTY_PERF_RESOLVE_HELPERS");
+		const uint32_t n   = env != nullptr && env[0] == '2' ? 2u : 1u;
+		if (n == 2) std::fprintf(stderr, "PERF_RESOLVE_HELPERS=2: two resolve helpers\n");
+		return n;
+	}();
+	return helpers;
+}
+
+void GuestGpu::ResolveHelperThread(uint32_t index) {
 	KYTY_PROFILER_THREAD("Thread_GpuResolveHelper");
-	ShaderRecompiler::IR::t_ahead_scratch_slot = 3; // a slot of its own (>= 3: ShaderIR.h RecordsNullShare)
-	Config::ConfigureGpuStageThread(Config::GpuStageThread::ResolveHelper);
+	// a scratch slot of its own (>= 3: ShaderIR.h RecordsNullShare); the second helper (N5.2) the next one
+	ShaderRecompiler::IR::t_ahead_scratch_slot = 3 + index;
+	Config::ConfigureGpuStageThread(index == 0 ? Config::GpuStageThread::ResolveHelper : Config::GpuStageThread::ResolveHelper2);
 	const bool lead = ChunkLead::On();
-	if (lead) ChunkLead::ResolveThreadStart(true, "helper");
+	if (lead) ChunkLead::ResolveThreadStart(index == 0, index == 0 ? "helper" : "helper2");
 	auto& executor = m_renderer.GetRenderExecutor();
 	auto& hs       = m_helper_stats;
-	while (auto task = m_tasks.Pop()) {
+	auto& tasks    = index == 0 ? m_tasks : m_tasks2;
+	while (auto task = tasks.Pop()) {
 		if (!RenderExecutor::BeginResolveTask(task->slot)) {
 			hs.skipped.fetch_add(1, std::memory_order_relaxed);
 			m_tasks_finished.fetch_add(1, std::memory_order_release);
@@ -1530,8 +1546,12 @@ void GuestGpu::StopExecution() {
 		m_resolver.join();
 	}
 	m_tasks.Stop(); // project 15 N2.2: after the resolve thread, the only producer of tasks
+	m_tasks2.Stop();
 	if (m_resolve_helper.joinable()) {
 		m_resolve_helper.join();
+	}
+	if (m_resolve_helper2.joinable()) {
+		m_resolve_helper2.join();
 	}
 	m_execution_stop.store(true, std::memory_order_seq_cst);
 	RingExecution();

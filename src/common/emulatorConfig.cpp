@@ -300,6 +300,23 @@ void ConfigureGpuStageThread(GpuStageThread stage) {
 		Common::Thread::PinCurrent(cpus[static_cast<uint32_t>(GpuStageThread::Resolve)]);
 		return;
 	}
+	if (stage == GpuStageThread::ResolveHelper2) {
+		const char* value = std::getenv("KYTY_HELPER2_CPU");
+		if (value != nullptr && std::string_view(value) == "free") return;
+		static const int sibling = [] {
+			const int helper = cpus[static_cast<uint32_t>(GpuStageThread::Resolve)];
+			if (helper < 0) return -1;
+			const auto all  = Common::Thread::SystemLogicalCpus();
+			const auto self = std::find_if(all.begin(), all.end(), [&](const Common::LogicalCpu& c) { return c.logical == helper; });
+			if (self == all.end()) return -1;
+			for (const auto& c: all) {
+				if (c.core == self->core && c.logical != helper) return c.logical;
+			}
+			return -1;
+		}();
+		if (sibling >= 0) Common::Thread::PinCurrent(sibling);
+		return;
+	}
 	if (stage == GpuStageThread::ResolveDispatcher) {
 		// The SMT sibling of the command processor's processor: the operations it writes are in that core's caches.
 		static const int sibling = [] {

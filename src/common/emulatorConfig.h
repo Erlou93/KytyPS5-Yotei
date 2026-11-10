@@ -188,7 +188,8 @@ bool SkipNoticeScreen();
 // Project 15 N2.2: ResolveHelper (the resolve helper) takes the resolve stage's processor; ResolveDispatcher (the resolve
 // thread while a helper resolves) the SMT sibling of the command processor's (unpinned when there is none).
 enum class GpuStageThread : uint32_t {
-	Execution = 0, Recording = 1, Resolve = 2, CommandProcessor = 3, ResolveHelper = 4, ResolveDispatcher = 5
+	Execution = 0, Recording = 1, Resolve = 2, CommandProcessor = 3, ResolveHelper = 4, ResolveDispatcher = 5,
+	ResolveHelper2 = 6 // project 15 N5.2: the SMT sibling of the first helper's processor (KYTY_HELPER2_CPU=free: unpinned)
 };
 // Applies the priority and affinity of `stage` to the calling thread.
 void ConfigureGpuStageThread(GpuStageThread stage);

@@ -137,7 +137,9 @@ private:
 	void              ResolveThread();
 	// Project 15 N2.2: the resolve helper (KYTY_PERF_RESOLVE_HELPERS=1 or KYTY_CHECK_RESOLVE=2) and the execution
 	// thread's claim of an operation's resolution before it executes (waits for a running one, steals a pending one).
-	void              ResolveHelperThread();
+	void              ResolveHelperThread(uint32_t index);
+	// Project 15 N5.2: KYTY_PERF_RESOLVE_HELPERS=2 (test switch): two resolve helpers, the tasks dealt in turns of 8.
+	[[nodiscard]] static uint32_t ResolveHelpers();
 	// busy(context, true) before a wait for the helper, (context, false) after it: the caller's work scopes.
 	void              ClaimResolved(GpuOperation& operation, void (*busy)(void* context, bool waiting), void* busy_context);
 	// Execution thread: runs the queued commands, then lets the blocked queues try again.
@@ -238,6 +240,8 @@ private:
 	// Project 15 N2.2: the resolve thread's tasks for the helper (each task holds a slot of the 320-slot ring, so 512 never
 	// fill), the tasks pushed (resolve thread) and finished (helper), and the counters of PERF resolve_helper.
 	Common::SpscQueue<RenderExecutor::ResolveTask> m_tasks {512};
+	Common::SpscQueue<RenderExecutor::ResolveTask> m_tasks2 {512}; // N5.2: the second helper's
+	uint32_t                                       m_deal_turn = 0; // N5.2: the tasks dealt in the current turn
 	uint64_t                                       m_tasks_pushed = 0;
 	std::atomic<uint64_t>                          m_tasks_finished {0};
 	struct HelperStats {
@@ -253,6 +257,7 @@ private:
 	std::jthread    m_executor;
 	std::jthread    m_resolver;
 	std::jthread    m_resolve_helper;
+	std::jthread    m_resolve_helper2; // N5.2
 	std::jthread    m_thread;
 
 	friend class CommandProcessor;
