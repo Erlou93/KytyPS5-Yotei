@@ -529,7 +529,6 @@ void GroupIndirectImageCandidates(const ImageResource& base, std::vector<Descrip
 	specializations.resize(first + grouped.size(), child);
 }
 
-template <typename Specialization, typename Normalize>
 // KYTY_PERF_TABLE_MEMO (project 15, test switch, live A/B; =2: the check): a two-level descriptor table (a record's pointer,
 // the descriptor at pointer + offset; e.g. Proxy Set Cull: ~3 500 records, one hi-Z texture) is read once per
 // materialization: a record's pointer is remembered for the materialization (the image and the sampler of the same table
@@ -563,6 +562,7 @@ static void TableMemoReport() {
 	             get(st.pointer_hits), get(st.descriptor_hits), get(st.checked), get(st.different));
 }
 
+template <typename Specialization, typename Normalize>
 bool MaterializeIndirectDescriptor(const ResourcePlan&                         program,
                                    const DescriptorSource::IndirectDescriptor& indirect,
                                    uint32_t source_index, uint32_t resource_index, uint32_t dword_count,
