@@ -327,10 +327,21 @@ std::atomic<uint32_t> g_image_starts[kImageStartSlots] {};
 std::atomic<uint32_t>& ImageStartCount(uint64_t address) {
 	return g_image_starts[(address >> 16u) & (kImageStartSlots - 1u)];
 }
+// Project 15 S2a: the same count keyed by a hash of the exact first byte (a collision only keeps a count above 0), so
+// the buffer peek answers for a buffer in a granule where another image starts.
+constexpr uint32_t    kImageExactBits = 20u;
+std::atomic<uint32_t> g_image_exact_starts[1u << kImageExactBits] {};
+std::atomic<uint32_t>& ImageExactStartCount(uint64_t address) {
+	return g_image_exact_starts[((address >> 8u) * 0x9E3779B97F4A7C15ull) >> (64u - kImageExactBits)];
+}
 } // namespace
 
 bool TextureCache::ImageMayStartAt(uint64_t address) {
 	return ImageStartCount(address).load(std::memory_order_acquire) != 0u;
+}
+
+bool TextureCache::ImageMayStartExactlyAt(uint64_t address) {
+	return ImageExactStartCount(address).load(std::memory_order_acquire) != 0u;
 }
 
 TextureCache::RegisteredPageCounts::~RegisteredPageCounts() {
@@ -373,6 +384,7 @@ void TextureCache::RegisterImage(ImageId id) {
 		m_image_page_table[page].push_back(id);
 	});
 	ImageStartCount(image.info.data.address).fetch_add(1, std::memory_order_release); // common/lookupMemo.h
+	ImageExactStartCount(image.info.data.address).fetch_add(1, std::memory_order_release); // before the registry epoch
 	image.registered = true;
 	DrawRepeat::NoteImageRegistryChange(image.info.data.address, image.info.data.size); // the registry epoch (drawRepeat.h)
 	{
@@ -438,6 +450,10 @@ void TextureCache::UnregisterImage(ImageId id) {
 	if (ImageStartCount(image.info.data.address).fetch_sub(1, std::memory_order_release) == 0u) {
 		ImageStartCount(image.info.data.address).fetch_add(1, std::memory_order_release);
 		std::fprintf(stderr, "IMAGE_START_UNDERFLOW addr=0x%llx\n", static_cast<unsigned long long>(image.info.data.address));
+	}
+	if (ImageExactStartCount(image.info.data.address).fetch_sub(1, std::memory_order_release) == 0u) {
+		ImageExactStartCount(image.info.data.address).fetch_add(1, std::memory_order_release);
+		std::fprintf(stderr, "IMAGE_EXACT_START_UNDERFLOW addr=0x%llx\n", static_cast<unsigned long long>(image.info.data.address));
 	}
 	DrawRepeat::NoteImageRegistryChange(image.info.data.address, image.info.data.size); // the registry epoch (drawRepeat.h)
 }

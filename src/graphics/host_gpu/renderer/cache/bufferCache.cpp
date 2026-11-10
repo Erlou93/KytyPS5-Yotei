@@ -3043,7 +3043,7 @@ void BufferCache::PrefetchObtainMemo(uint64_t vaddr, uint64_t size, bool is_writ
 namespace {
 struct PeekStats {
 	std::array<uint64_t, BufferCache::BufferPeek::Count> classes {}, member {}, bda {};
-	uint64_t bda_compared = 0, compared = 0, bad = 0, race = 0, lag_compared = 0, lag_bad = 0, lag_race = 0, injected = 0, detected = 0;
+	uint64_t image_granule_only = 0, bda_compared = 0, compared = 0, bad = 0, race = 0, lag_compared = 0, lag_bad = 0, lag_race = 0, injected = 0, detected = 0;
 	std::array<uint64_t, 4> lag_age {};  // calls since the kept peek: <16, <128, <1024, >=1024
 	std::array<uint64_t, 5> lag_fail {}; // PeekProofFail of a kept entry that no longer holds
 	uint32_t logged = 0;
@@ -3098,9 +3098,10 @@ void PeekReport() {
 	             static_cast<unsigned long long>(st.lag_bad), static_cast<unsigned long long>(st.lag_race), join(st.lag_age, 4).c_str(),
 	             join(&st.lag_fail[1], 4).c_str(), static_cast<unsigned long long>(st.injected), static_cast<unsigned long long>(st.detected),
 	             join(t_translator_writes, 6).c_str());
-	std::fprintf(stderr, "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu\n",
+	std::fprintf(stderr,
+	             "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu image_granule_only=%llu\n",
 	             classes(st.member).c_str(), join(t_peek_marker_hist, 4).c_str(), classes(st.bda).c_str(),
-	             static_cast<unsigned long long>(st.bda_compared));
+	             static_cast<unsigned long long>(st.bda_compared), static_cast<unsigned long long>(st.image_granule_only));
 }
 } // namespace
 
@@ -3169,8 +3170,11 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 			return;
 		}
 		if (!bda && TextureCache::ImageMayStartAt(vaddr)) {
-			p.klass = BufferPeek::Image; // today's path may copy from an image starting at the address
-			return;
+			if (TextureCache::ImageMayStartExactlyAt(vaddr)) {
+				p.klass = BufferPeek::Image; // today's path may copy from an image starting at the address
+				return;
+			}
+			if (PeekCheckMode() != 0) g_peek_stats.image_granule_only++; // another image starts in the granule
 		}
 		if (!proof) {
 			p.klass = BufferPeek::NoProof; // more than two tracker regions
