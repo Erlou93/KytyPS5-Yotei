@@ -228,6 +228,22 @@ public:
 	// the resolve thread found every stage and everything it read reads the same now.
 	[[nodiscard]] bool AdoptResolvedPrograms(ResolvedStages& results);
 	[[nodiscard]] bool AdoptResolvedProgramsChecked(ResolvedStages& results); // KYTY_CHECK_PEEK=2 (project 15 S2d)
+	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): PeekAdopt for an operation ahead (the slot keeps the prediction, checked when it
+	// is adopted); InstallAhead puts the predicted programs into the slot's state for the other peeks (saved), RestoreAhead
+	// puts back what was there.
+	struct AheadSaved {
+		std::array<const ShaderRecompiler::IR::CompiledShaderInfo*, 4> program {};
+		std::array<ShaderProgram, 4>                                   handle {};
+		uint32_t                                                       count = 0;
+	};
+	[[nodiscard]] bool PeekAdoptAhead(ResolvedStages& results, uint32_t distance);
+	static void        InstallAhead(ResolvedStages& results, AheadSaved& saved);
+	static void        RestoreAhead(ResolvedStages& results, const AheadSaved& saved);
+	[[nodiscard]] static bool     StagesAdoptable(const ResolvedStages& results);
+	[[nodiscard]] static bool     AheadProgramsOk(const ResolvedStages& results);
+	[[nodiscard]] static uint32_t StageCount(const ResolvedStages& results);
+	[[nodiscard]] static const ShaderRecompiler::IR::CompiledShaderInfo* AheadProgram(const ResolvedStages& results, uint32_t i);
+	[[nodiscard]] static const ShaderRecompiler::IR::ResourceSnapshot*   StageResources(const ResolvedStages& results, uint32_t i);
 
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,
@@ -262,6 +278,7 @@ private:
 	struct TableCompileJob;
 	class TableCompileWorkers;
 
+public:
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
 		std::array<uint64_t, 3>  vertex_shader_ids {};
@@ -276,6 +293,7 @@ private:
 		}
 	};
 
+private:
 	struct PipelineKeyHash {
 		static void Mix(std::size_t& hash, std::size_t value) {
 			hash ^= value + static_cast<std::size_t>(0x9e3779b97f4a7c15ull) + (hash << 6u) +

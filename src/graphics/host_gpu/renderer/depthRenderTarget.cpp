@@ -410,21 +410,34 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	BindRenderTarget(r.image_id);
 }
 
-bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
-	const auto& hw       = buffer.GetRegisters();
+// The depth and stencil copies the registers ask instead of a draw; true when either (none unless the color mode is 0).
+static bool DepthStencilCopyKinds(const HW::Context& hw, bool& depth_copy, bool& stencil_copy) {
 	const auto& z        = hw.GetDepthRenderTarget();
 	const auto& override = hw.GetDepthRenderOverride();
 	if (hw.GetColorControl().mode != 0) {
 		return false;
 	}
-	const bool depth_copy = override.force_z_dirty && override.force_z_valid &&
-	                        z.z_info.format != Prospero::DepthFormat::kInvalid &&
-	                        z.z_read_base_addr != 0 && z.z_write_base_addr != 0 &&
-	                        z.z_read_base_addr != z.z_write_base_addr;
-	const bool stencil_copy = override.force_stencil_dirty && override.force_stencil_valid &&
-	                          z.stencil_info.format != Prospero::StencilFormat::kInvalid &&
-	                          z.stencil_read_base_addr != 0 && z.stencil_write_base_addr != 0 &&
-	                          z.stencil_read_base_addr != z.stencil_write_base_addr;
+	depth_copy = override.force_z_dirty && override.force_z_valid &&
+	             z.z_info.format != Prospero::DepthFormat::kInvalid &&
+	             z.z_read_base_addr != 0 && z.z_write_base_addr != 0 &&
+	             z.z_read_base_addr != z.z_write_base_addr;
+	stencil_copy = override.force_stencil_dirty && override.force_stencil_valid &&
+	               z.stencil_info.format != Prospero::StencilFormat::kInvalid &&
+	               z.stencil_read_base_addr != 0 && z.stencil_write_base_addr != 0 &&
+	               z.stencil_read_base_addr != z.stencil_write_base_addr;
+	return depth_copy || stencil_copy;
+}
+
+bool RenderExecutor::DepthStencilCopyAsked(const HW::Context& hw) {
+	bool depth_copy = false, stencil_copy = false;
+	return DepthStencilCopyKinds(hw, depth_copy, stencil_copy);
+}
+
+bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
+	const auto& hw = buffer.GetRegisters();
+	const auto& z  = hw.GetDepthRenderTarget();
+	bool        depth_copy = false, stencil_copy = false;
+	(void)DepthStencilCopyKinds(hw, depth_copy, stencil_copy);
 	if (!depth_copy && !stencil_copy) {
 		return false;
 	}

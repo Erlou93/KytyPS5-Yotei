@@ -4135,15 +4135,10 @@ void Report() {
 // PrepareBindings, compared with what RebindImages leaves (execution thread).
 namespace PeekImages {
 enum Slot : uint8_t { SetSlot, Replay, NotTexture, ReplayMiss, ViewMissing, NullImage, Count };
-struct Stage {
-	bool                                    pending = false, samplers_answered = false;
-	std::vector<uint8_t>                    stale; // today's path took a slow path for the slot
-	uint64_t                                epoch   = 0;
-	std::vector<uint8_t>                    klass;
-	std::vector<ImageId>                    ids;
-	std::vector<vk::ImageView>              views;
-	std::vector<std::vector<vk::ImageView>> mips;
-	std::vector<vk::Sampler>                samplers;
+struct Stage: PeekStageImagesResult {
+	bool                  has_ahead      = false; // N4.1: the peek made for this stage when the chunk opened
+	uint32_t              ahead_distance = 0;
+	PeekStageImagesResult ahead;
 };
 struct Stats {
 	std::array<uint64_t, Count> slots {};
@@ -4204,6 +4199,131 @@ vk::ImageView Shifted(vk::ImageView view) {
 	return vk::ImageView(reinterpret_cast<VkImageView>(reinterpret_cast<uintptr_t>(static_cast<VkImageView>(view)) + 1u));
 }
 } // namespace PeekImages
+
+// Project 15 S2b: a stage's images and samplers without a write (no set moved, no replay slot inserted, no view created,
+// no touch), under the cache's read section and inside the translator section. N4.1 calls it for draws ahead too
+// (count false: today's statistics and the operation's plan are left alone).
+bool RenderExecutor::PeekStageImages(const ShaderRecompiler::IR::CompiledShaderInfo& program,
+                                     const ShaderRecompiler::IR::ResourceSnapshot& snapshot, bool soft, PeekStageImagesResult& peek,
+                                     bool count) {
+	++t_translator;
+	auto&       cache = m_context.GetTextureCache();
+	cache.LockPeekRead();
+	PeekImages::Stats  scratch;
+	auto&       st    = count ? PeekImages::g_stats : scratch;
+	const auto  slot_count = program.info.images.size();
+	peek.pending  = true;
+	peek.epoch    = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
+	peek.klass.assign(slot_count, PeekImages::ReplayMiss);
+	peek.stale.assign(slot_count, 0u);
+	peek.ids.assign(slot_count, ImageId {});
+	peek.views.assign(slot_count, nullptr);
+	peek.mips.assign(slot_count, {});
+	const TableSet* set = nullptr;
+	if ((!program.info.images.empty() || !program.info.samplers.empty()) && TableSetsUsable()) {
+		const auto& sets = TableSets();
+		if (const auto it = sets.find(&program); it != sets.end()) {
+			const auto& list  = it->second;
+			const size_t found = TableSetFindHashed(program, snapshot, soft, list);
+			const TableSet* candidate = found < list.size() ? list[found].get() : nullptr;
+			if (candidate != nullptr && candidate->views_ready) {
+				bool   pages  = true;
+				size_t member = 0;
+				for (size_t i = 0; i < candidate->images.size() && pages; i++) {
+					if (candidate->memo[i] == 0u) continue;
+					const auto& data = candidate->images[i].desc.info.data;
+					pages = DrawRepeat::ImagePageEpochSum(data.address, data.size) == candidate->page_sums[member++];
+				}
+				if (pages && cache.TableReplayStageChecks(candidate->member_ids) &&
+				    cache.TableTexturesReadyChecks(candidate->member_ids)) {
+					set = candidate;
+				}
+			}
+		}
+	}
+	bool all = true;
+	for (uint32_t i = 0; i < slot_count; i++) {
+		auto& klass = peek.klass[i];
+		if (set != nullptr && set->memo[i] != 0u) {
+			klass         = PeekImages::SetSlot;
+			peek.ids[i]   = set->images[i].image_id;
+			peek.views[i] = set->images[i].image_view;
+			peek.mips[i]  = set->images[i].mip_views;
+			st.slots[klass]++;
+			continue;
+		}
+		const uint32_t compare_funcs = ImageCompareFuncs(program, snapshot, i);
+		const auto&    slots         = ImageReplaySlots();
+		const auto     it            = slots.find(reinterpret_cast<uint64_t>(&program) * 64u + i);
+		const auto&    value         = snapshot.images[i];
+		const bool     same = it != slots.end() && it->second.valid && it->second.shader_hash == program.shader_hash &&
+		                  it->second.dword_count == value.dword_count && it->second.words == value.dwords &&
+		                  it->second.compare_funcs == compare_funcs && it->second.soft == soft &&
+		                  it->second.page_sum == DrawRepeat::ImagePageEpochSum(it->second.desc.info.data.address, it->second.desc.info.data.size);
+		const ImageId id = same ? cache.ReplayImageCheck(it->second.id) : ImageId {};
+		if (!id) {
+			klass = PeekImages::ReplayMiss;
+			uint32_t cause = 12;
+			if (it == slots.end()) {
+				cause = 0;
+			} else if (!it->second.valid) {
+				cause = it->second.why == 10u ? 13u : std::min<uint32_t>(it->second.why, 9u);
+			} else if (it->second.shader_hash != program.shader_hash || it->second.dword_count != value.dword_count ||
+			           it->second.words != value.dwords || it->second.compare_funcs != compare_funcs ||
+			           it->second.soft != soft) {
+				cause = 10;
+			} else if (!same) {
+				cause = 11;
+			}
+			st.miss[cause]++;
+			if (count && t_peek_member == 1) st.member_miss[cause]++;
+		} else if (it->second.desc.type != TextureCache::BindingType::Texture) {
+			klass = PeekImages::NotTexture;
+		} else if (it->second.desc.info.data.Empty()) {
+			klass = PeekImages::NullImage;
+		} else {
+			const auto& desc     = it->second.desc;
+			const auto& resource = program.info.images[i];
+			bool        views    = true;
+			if (resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::Dynamic) {
+				views = resource.mip_count != 0u && resource.mip_count == desc.view_info.level_count;
+				for (uint32_t mip = 0; views && mip < resource.mip_count; mip++) {
+					auto mip_desc = desc;
+					mip_desc.view_info.base_level += mip;
+					mip_desc.view_info.level_count = 1;
+					mip_desc.view_info.min_lod     = 0;
+					const auto view = cache.PeekTextureView(id, mip_desc);
+					views           = static_cast<bool>(view);
+					peek.mips[i].push_back(view);
+				}
+				if (views) peek.views[i] = peek.mips[i].front();
+			} else {
+				peek.views[i] = cache.PeekTextureView(id, desc);
+				views         = static_cast<bool>(peek.views[i]);
+			}
+			klass       = views ? PeekImages::Replay : PeekImages::ViewMissing;
+			peek.ids[i] = id;
+		}
+		all = all && klass == PeekImages::Replay;
+		st.slots[klass]++;
+	}
+	peek.samplers_answered = set != nullptr || program.info.samplers.empty();
+	if (set != nullptr) peek.samplers = set->samplers;
+	cache.UnlockPeekRead();
+	--t_translator;
+	st.stages++;
+	if (all) st.all_slots++;
+	if (peek.samplers_answered) st.samplers++;
+	const bool answered = all && peek.samplers_answered;
+	if (answered) st.answered++;
+	if (count && t_peek_member == 1) {
+		st.member_stages++;
+		if (answered) st.member_answered++;
+		if (!answered) t_peek_markers++; // an image stage in order (the operation's plan)
+	}
+	if (count) PeekImages::Report();
+	return answered;
+}
 
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
@@ -4345,125 +4465,13 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 	};
 	if (PeekImages::Check() && GuestGpu::IsGpuThread()) {
 		// KYTY_CHECK_PEEK=2 (S2b): the stage's images and samplers without a write (no set moved, no replay slot inserted,
-		// no view created, no touch), inside the translator section.
-		++t_translator;
-		auto&       cache = m_context.GetTextureCache();
-		auto&       peek  = PeekImages::Pending()[&prepared];
-		peek_entry        = &peek;
-		cache.LockPeekRead();
-		auto&       st    = PeekImages::g_stats;
-		const auto  count = program.info.images.size();
-		peek          = {};
-		peek.pending  = true;
-		peek.epoch    = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
-		peek.klass.assign(count, PeekImages::ReplayMiss);
-		peek.stale.assign(count, 0u);
-		peek.ids.assign(count, ImageId {});
-		peek.views.assign(count, nullptr);
-		peek.mips.assign(count, {});
-		const TableSet* set = nullptr;
-		if ((!program.info.images.empty() || !program.info.samplers.empty()) && TableSetsUsable()) {
-			const auto& sets = TableSets();
-			if (const auto it = sets.find(&program); it != sets.end()) {
-				const auto& list  = it->second;
-				const size_t found = TableSetFindHashed(program, snapshot, m_soft_texture_resolve, list);
-				const TableSet* candidate = found < list.size() ? list[found].get() : nullptr;
-				if (candidate != nullptr && candidate->views_ready) {
-					bool   pages  = true;
-					size_t member = 0;
-					for (size_t i = 0; i < candidate->images.size() && pages; i++) {
-						if (candidate->memo[i] == 0u) continue;
-						const auto& data = candidate->images[i].desc.info.data;
-						pages = DrawRepeat::ImagePageEpochSum(data.address, data.size) == candidate->page_sums[member++];
-					}
-					if (pages && cache.TableReplayStageChecks(candidate->member_ids) &&
-					    cache.TableTexturesReadyChecks(candidate->member_ids)) {
-						set = candidate;
-					}
-				}
-			}
-		}
-		bool all = true;
-		for (uint32_t i = 0; i < count; i++) {
-			auto& klass = peek.klass[i];
-			if (set != nullptr && set->memo[i] != 0u) {
-				klass         = PeekImages::SetSlot;
-				peek.ids[i]   = set->images[i].image_id;
-				peek.views[i] = set->images[i].image_view;
-				peek.mips[i]  = set->images[i].mip_views;
-				st.slots[klass]++;
-				continue;
-			}
-			const uint32_t compare_funcs = ImageCompareFuncs(program, snapshot, i);
-			const auto&    slots         = ImageReplaySlots();
-			const auto     it            = slots.find(reinterpret_cast<uint64_t>(&program) * 64u + i);
-			const auto&    value         = snapshot.images[i];
-			const bool     same = it != slots.end() && it->second.valid && it->second.shader_hash == program.shader_hash &&
-			                  it->second.dword_count == value.dword_count && it->second.words == value.dwords &&
-			                  it->second.compare_funcs == compare_funcs && it->second.soft == m_soft_texture_resolve &&
-			                  it->second.page_sum == DrawRepeat::ImagePageEpochSum(it->second.desc.info.data.address, it->second.desc.info.data.size);
-			const ImageId id = same ? cache.ReplayImageCheck(it->second.id) : ImageId {};
-			if (!id) {
-				klass = PeekImages::ReplayMiss;
-				uint32_t cause = 12;
-				if (it == slots.end()) {
-					cause = 0;
-				} else if (!it->second.valid) {
-					cause = it->second.why == 10u ? 13u : std::min<uint32_t>(it->second.why, 9u);
-				} else if (it->second.shader_hash != program.shader_hash || it->second.dword_count != value.dword_count ||
-				           it->second.words != value.dwords || it->second.compare_funcs != compare_funcs ||
-				           it->second.soft != m_soft_texture_resolve) {
-					cause = 10;
-				} else if (!same) {
-					cause = 11;
-				}
-				st.miss[cause]++;
-				if (t_peek_member == 1) st.member_miss[cause]++;
-			} else if (it->second.desc.type != TextureCache::BindingType::Texture) {
-				klass = PeekImages::NotTexture;
-			} else if (it->second.desc.info.data.Empty()) {
-				klass = PeekImages::NullImage;
-			} else {
-				const auto& desc     = it->second.desc;
-				const auto& resource = program.info.images[i];
-				bool        views    = true;
-				if (resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::Dynamic) {
-					views = resource.mip_count != 0u && resource.mip_count == desc.view_info.level_count;
-					for (uint32_t mip = 0; views && mip < resource.mip_count; mip++) {
-						auto mip_desc = desc;
-						mip_desc.view_info.base_level += mip;
-						mip_desc.view_info.level_count = 1;
-						mip_desc.view_info.min_lod     = 0;
-						const auto view = cache.PeekTextureView(id, mip_desc);
-						views           = static_cast<bool>(view);
-						peek.mips[i].push_back(view);
-					}
-					if (views) peek.views[i] = peek.mips[i].front();
-				} else {
-					peek.views[i] = cache.PeekTextureView(id, desc);
-					views         = static_cast<bool>(peek.views[i]);
-				}
-				klass       = views ? PeekImages::Replay : PeekImages::ViewMissing;
-				peek.ids[i] = id;
-			}
-			all = all && klass == PeekImages::Replay;
-			st.slots[klass]++;
-		}
-		peek.samplers_answered = set != nullptr || program.info.samplers.empty();
-		if (set != nullptr) peek.samplers = set->samplers;
-		cache.UnlockPeekRead();
-		--t_translator;
-		st.stages++;
-		if (all) st.all_slots++;
-		if (peek.samplers_answered) st.samplers++;
-		const bool answered = all && peek.samplers_answered;
-		if (answered) st.answered++;
-		if (t_peek_member == 1) {
-			st.member_stages++;
-			if (answered) st.member_answered++;
-			if (!answered) t_peek_markers++; // an image stage in order (the operation's plan)
-		}
-		PeekImages::Report();
+		// no view created, no touch).
+		auto& peek = PeekImages::Pending()[&prepared];
+		peek_entry = &peek;
+		peek       = {};
+		(void)PeekStageImages(program, snapshot, m_soft_texture_resolve, peek, true);
+		// N4.1: the peek made for this stage ahead, when the chunk opened (its program: the predicted one).
+		peek.has_ahead = TakeAheadImages(&program, peek.ahead, peek.ahead_distance);
 	}
 	// The stage's table set and its PrepareBindings proof.
 	const bool table_sets = (!program.info.images.empty() || !program.info.samplers.empty()) && TableSetsUsable();
@@ -5120,6 +5128,42 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				}
 			}
 			if (peek.samplers_answered && !program.info.samplers.empty() && prepared.samplers != peek.samplers) st.sampler_bad++;
+			if (peek.has_ahead) {
+				// N4.1: the slots the opening's peek answered must hold its image and views too.
+				auto&          a      = g_ahead;
+				const auto&    ah     = peek.ahead;
+				const uint32_t bucket = AheadBucket(peek.ahead_distance);
+				const bool     moved  = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) != ah.epoch;
+				a.i_stages++;
+				for (size_t i = 0; i < images.size() && i < ah.klass.size(); i++) {
+					const bool ahead_answer = ah.klass[i] == PeekImages::SetSlot || ah.klass[i] == PeekImages::Replay;
+					const bool fresh_answer = peek.klass[i] == PeekImages::SetSlot || peek.klass[i] == PeekImages::Replay;
+					if (!ahead_answer) {
+						if (fresh_answer) a.i_lost++;
+						continue;
+					}
+					a.i_compared++;
+					a.i_compared_by_distance[bucket]++;
+					auto       view  = ah.views[i];
+					const bool fault = PeekImages::FaultEvery() != 0 && a.i_compared % PeekImages::FaultEvery() == 0;
+					if (fault) {
+						view = PeekImages::Shifted(view);
+						a.i_injected++;
+					}
+					const bool same = images[i].image_id == ah.ids[i] && images[i].image_view == view && images[i].mip_views == ah.mips[i];
+					if (same) continue;
+					if (fault) {
+						a.i_detected++;
+					} else if (moved) {
+						a.i_moved++;
+						a.i_moved_by_distance[bucket]++;
+					} else if (peek.stale[i] != 0u) {
+						a.i_stale++;
+					} else {
+						a.i_bad++;
+					}
+				}
+			}
 		} else {
 			st.unchecked++;
 		}

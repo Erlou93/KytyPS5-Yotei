@@ -988,7 +988,12 @@ void GuestGpu::ExecutionThread() {
 		// KYTY_TRACE_CHUNK_PLAN (project 15 N4.0, diagnostic): how many chunk-member draws with a ready slot follow in the
 		// queue when the execution thread opens a chunk, and what ends it. Nothing changes.
 		static const bool plan_census = std::getenv("KYTY_TRACE_CHUNK_PLAN") != nullptr;
-		if (plan_census) {
+		// KYTY_CHECK_PEEK=2 (project 15 N4.1): the opening also peeks every draw of the chunk ahead (PeekAhead).
+		static const bool peek_ahead = [] {
+			const char* env = std::getenv("KYTY_CHECK_PEEK");
+			return env != nullptr && env[0] == '2';
+		}();
+		if (plan_census || peek_ahead) {
 			struct PlanCensus {
 				uint32_t                remaining = 0;
 				std::array<uint64_t, 5> chunks {}, draws {}, end {};
@@ -1036,6 +1041,54 @@ void GuestGpu::ExecutionThread() {
 							break;
 						}
 					}
+					if (peek_ahead) {
+						auto&      executor = m_renderer.GetRenderExecutor();
+						const auto peek_one = [&](const GpuOperation& op, uint32_t distance) {
+							const bool indexed = op.kind == GpuOperationKind::DrawIndex;
+							if (indexed) {
+								const auto& args = op.draw_index;
+								executor.PeekAhead(op.resolved, *op.state.context, *op.state.user_config, *op.state.shaders, true,
+								                   args.index_count, args.instance_count, args.index_type_and_size,
+								                   args.render_target_slice_offset, args.indirect.address, distance);
+							} else {
+								const auto& args = op.draw_auto;
+								executor.PeekAhead(op.resolved, *op.state.context, *op.state.user_config, *op.state.shaders, false,
+								                   args.vertex_count, args.instance_count, 0, args.render_target_slice_offset,
+								                   args.indirect.address, distance);
+							}
+						};
+						g_ahead.opened++;
+						peek_one(*operation, 0);
+						for (uint32_t i = 1; i < k; i++) peek_one(*m_resolved.PeekAt(i - 1u), i);
+						if ((g_ahead.opened & ((1u << 15u) - 1u)) == 0) {
+							const auto& a    = g_ahead;
+							const auto  join = [](const auto& v) {
+                                std::string out;
+                                for (size_t i = 0; i < v.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(v[i]);
+                                return out;
+							};
+							std::fprintf(stderr,
+							             "PERF peek_ahead opened=%llu planned=%llu gated[-|slot|shaders|adoptable|counts|color_op|topology|mesh]=%s "
+							             "compile=%llu peeked=%s front=%s programs[compared|bad|share_diff|lost]=%llu|%llu|%llu|%llu "
+							             "by_distance=%s fault=%llu|%llu key[compared|bad|unchecked|find_diff]=%llu|%llu|%llu|%llu fault=%llu|%llu "
+							             "images[stages|compared|bad|moved|stale|lost]=%llu|%llu|%llu|%llu|%llu|%llu compared_by_distance=%s "
+							             "moved_by_distance=%s fault=%llu|%llu\n",
+							             static_cast<unsigned long long>(a.opened), static_cast<unsigned long long>(a.planned),
+							             join(a.gated).c_str(), static_cast<unsigned long long>(a.compile), join(a.peeked).c_str(),
+							             join(a.front).c_str(), static_cast<unsigned long long>(a.p_compared),
+							             static_cast<unsigned long long>(a.p_bad), static_cast<unsigned long long>(a.p_share_diff),
+							             static_cast<unsigned long long>(a.p_lost), join(a.p_by_distance).c_str(),
+							             static_cast<unsigned long long>(a.p_injected), static_cast<unsigned long long>(a.p_detected),
+							             static_cast<unsigned long long>(a.k_compared), static_cast<unsigned long long>(a.k_bad),
+							             static_cast<unsigned long long>(a.k_unchecked), static_cast<unsigned long long>(a.k_find_diff),
+							             static_cast<unsigned long long>(a.k_injected), static_cast<unsigned long long>(a.k_detected),
+							             static_cast<unsigned long long>(a.i_stages), static_cast<unsigned long long>(a.i_compared),
+							             static_cast<unsigned long long>(a.i_bad), static_cast<unsigned long long>(a.i_moved),
+							             static_cast<unsigned long long>(a.i_stale), static_cast<unsigned long long>(a.i_lost),
+							             join(a.i_compared_by_distance).c_str(), join(a.i_moved_by_distance).c_str(),
+							             static_cast<unsigned long long>(a.i_injected), static_cast<unsigned long long>(a.i_detected));
+						}
+					}
 					const uint32_t bucket = k == 1u ? 0u : k < 16u ? 1u : k < 64u ? 2u : k < 128u ? 3u : 4u;
 					pc.chunks[bucket]++;
 					pc.draws[bucket] += k;
@@ -1043,7 +1096,7 @@ void GuestGpu::ExecutionThread() {
 					pc.remaining = k - 1u;
 					uint64_t chunks = 0;
 					for (const auto n: pc.chunks) chunks += n;
-					if ((chunks & ((1u << 16u) - 1u)) == 0) {
+					if (plan_census && (chunks & ((1u << 16u) - 1u)) == 0) {
 						const auto join = [](const auto& a) {
 							std::string out;
 							for (size_t i = 0; i < a.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);

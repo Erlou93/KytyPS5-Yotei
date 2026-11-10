@@ -3046,6 +3046,8 @@ struct PeekStats {
 	uint64_t image_granule_only = 0, bda_compared = 0, compared = 0, bad = 0, race = 0, lag_compared = 0, lag_bad = 0, lag_race = 0, injected = 0, detected = 0;
 	std::array<uint64_t, 4> image_split {}; // Image peeks: [plain found, plain not found, formatted found, formatted not found]
 	std::array<uint64_t, 4> lag_age {};  // calls since the kept peek: <16, <128, <1024, >=1024
+	std::array<uint64_t, 3> lag_op_age {}; // operations since the kept peek: <16, <128, >=128 (N4.1)
+	std::array<std::array<uint64_t, 5>, 3> lag_fail_by_op_age {};
 	std::array<uint64_t, 5> lag_fail {}; // PeekProofFail of a kept entry that no longer holds
 	uint32_t logged = 0;
 };
@@ -3053,6 +3055,7 @@ PeekStats g_peek_stats; // GPU thread
 struct PeekLagEntry {
 	uint64_t                vaddr = 0, size = 0, call = 0;
 	bool                    written = false, bda = false;
+	uint64_t                op      = 0; // t_op_index when kept
 	BufferCache::BufferPeek peek;
 };
 // The lag check keeps the oldest live peek of a range: replaced only when empty, another range, or its proof failed.
@@ -3099,6 +3102,10 @@ void PeekReport() {
 	             static_cast<unsigned long long>(st.lag_bad), static_cast<unsigned long long>(st.lag_race), join(st.lag_age, 4).c_str(),
 	             join(&st.lag_fail[1], 4).c_str(), static_cast<unsigned long long>(st.injected), static_cast<unsigned long long>(st.detected),
 	             join(t_translator_writes, 6).c_str());
+	std::string by_op;
+	for (uint32_t k = 0; k < 3u; k++) by_op += std::string(k == 0 ? "" : " ") + join(&st.lag_fail_by_op_age[k][1], 3);
+	std::fprintf(stderr, "PERF peek_lag_ops compared_by_op_age[<16|<128|>=128]=%s fail_by_op_age[registry|cpu|image]=%s\n",
+	             join(st.lag_op_age, 3).c_str(), by_op.c_str());
 	std::fprintf(stderr,
 	             "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu image_granule_only=%llu "
 	             "image[plain_found|plain_none|formatted_found|formatted_none]=%s member_draws=%llu plan_draws=%llu "
@@ -3231,7 +3238,12 @@ std::pair<Buffer*, uint64_t> BufferCache::PeekChecked(const BufferPeek& peek, ui
 	                     (lag.peek.klass == BufferPeek::Ready || lag.peek.klass == BufferPeek::Direct);
 	const uint32_t lag_fail = lag_hit ? PeekProofFail(lag.peek, vaddr, size) : 4u;
 	const bool     lag_live = lag_hit && lag_fail == 0;
-	if (lag_hit && !lag_live) st.lag_fail[lag_fail]++;
+	const uint64_t lag_ops    = t_op_index - lag.op;
+	const uint32_t lag_bucket = lag_ops < 16u ? 0u : lag_ops < 128u ? 1u : 2u;
+	if (lag_hit && !lag_live) {
+		st.lag_fail[lag_fail]++;
+		st.lag_fail_by_op_age[lag_bucket][lag_fail]++;
+	}
 	const uint64_t epoch0 = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
 	const uint64_t work0  = t_obtain_work;
 	const auto     result = path();
@@ -3268,13 +3280,15 @@ std::pair<Buffer*, uint64_t> BufferCache::PeekChecked(const BufferPeek& peek, ui
 		st.lag_compared++;
 		const uint64_t age = g_peek_calls - lag.call;
 		st.lag_age[age < 16u ? 0 : age < 128u ? 1 : age < 1024u ? 2 : 3]++;
+		st.lag_op_age[lag_bucket]++;
 		if (!same(lag.peek, lag.peek.offset)) {
 			// The proof checked again after today's path: a change during the path is a race, not a wrong answer.
 			(PeekProofHolds(lag.peek, vaddr, size) ? st.lag_bad : st.lag_race)++;
 		}
 	}
 	if ((peek.klass == BufferPeek::Ready || peek.klass == BufferPeek::Direct) && !lag_live) {
-		lag = {vaddr, size, g_peek_calls, is_written, bda, peek}; // the oldest live entry stays
+		lag    = {vaddr, size, g_peek_calls, is_written, bda, 0, peek}; // the oldest live entry stays
+		lag.op = t_op_index;
 	}
 	PeekReport();
 	return result;

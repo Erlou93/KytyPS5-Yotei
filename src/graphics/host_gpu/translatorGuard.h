@@ -33,7 +33,27 @@ inline thread_local bool t_stencil_tail = false;
 // Slow paths of today's image binding (S2b: a peeked-ready slot that took one went stale on the way).
 inline thread_local uint64_t t_peek_slow = 0;
 
+// Project 15 N4.1 (KYTY_CHECK_PEEK=2): the peeks a chunk's opening makes for the draws ahead, and their checks when each
+// draw runs (execution thread). Distance buckets from the opening draw: 0 | 1-15 | 16-63 | 64-127.
+struct AheadStats {
+	uint64_t                opened = 0, planned = 0, compile = 0;
+	std::array<uint64_t, 8> gated {}; // 0 unused, 1 slot, 2 shaders, 3 not adoptable, 4 counts/indirect, 5 color op/depth copy,
+	                                  // 6 topology/index type, 7 mesh or no vertex program
+	std::array<uint64_t, 4> peeked {}, front {};
+	uint64_t p_compared = 0, p_bad = 0, p_share_diff = 0, p_lost = 0, p_injected = 0, p_detected = 0;
+	uint64_t k_compared = 0, k_bad = 0, k_unchecked = 0, k_find_diff = 0, k_injected = 0, k_detected = 0;
+	uint64_t i_stages = 0, i_compared = 0, i_bad = 0, i_moved = 0, i_stale = 0, i_lost = 0, i_injected = 0, i_detected = 0;
+	std::array<uint64_t, 4> p_by_distance {}, i_moved_by_distance {}, i_compared_by_distance {};
+};
+inline AheadStats g_ahead;
+inline uint32_t   AheadBucket(uint32_t distance) {
+    return distance == 0u ? 0u : distance < 16u ? 1u : distance < 64u ? 2u : 3u;
+}
+// The operations the execution thread began (S2a's lag check measures its age in them).
+inline thread_local uint64_t t_op_index = 0;
+
 inline void PeekOperationBegin(bool member) {
+	t_op_index++;
 	t_peek_member  = member ? 1 : 0;
 	t_peek_markers = 0;
 	t_op_programs  = false;

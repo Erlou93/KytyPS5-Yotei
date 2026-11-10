@@ -464,6 +464,18 @@ private:
 	                                                    uint32_t rt_slot, bool ignore_target_mask);
 	// Project 15 S2c: the depth target from the registers alone (depthRenderTarget.cpp); false: no attachment.
 	[[nodiscard]] static bool DescribeRenderDepthTarget(GraphicContext& graphics, const HW::Context& hw, RenderDepthInfo& r);
+	// The registers ask a depth/stencil copy instead of a draw (DepthStencilCopy's condition).
+	[[nodiscard]] static bool DepthStencilCopyAsked(const HW::Context& hw);
+	// Project 15 S2b: a stage's images and samplers without a write (descriptors.cpp); true: every slot and the samplers
+	// answered. count: the KYTY_CHECK_PEEK=2 statistics of today's peek (false for the peeks ahead).
+	bool PeekStageImages(const ShaderRecompiler::IR::CompiledShaderInfo& program, const ShaderRecompiler::IR::ResourceSnapshot& snapshot,
+	                     bool soft, PeekStageImagesResult& peek, bool count);
+	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): the chunk's opening peeks a draw ahead in the queue (programs, targets,
+	// pipeline, stage images) into its slot, without a write; distance from the opening draw.
+	// N4.1: the stage images PeekAhead found for `program` in the running draw's slot (taken once).
+	bool TakeAheadImages(const void* program, PeekStageImagesResult& out, uint32_t& distance);
+	void PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders, bool indexed,
+	               uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset, uint64_t indirect, uint32_t distance);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
 	[[nodiscard]] bool CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                   const DrawEmitInfo& emit, DrawRenderState& state);

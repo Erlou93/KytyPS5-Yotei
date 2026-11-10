@@ -136,8 +136,16 @@ struct ResolvedStages {
 	bool                          adoptable  = false; // the execution thread may take the selection as a whole
 	Reads                         reads      = Reads::Unchecked;
 	ShaderRecompiler::IR::ReadLog log; // everything the operation's stages read, each read once
+	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): PeekAdopt when the chunk opened (PipelineCache::PeekAdoptAhead).
+	bool                                                           ahead_valid = false, ahead_predicted = false, ahead_share = false;
+	bool                                                           ahead_programs_ok = false;
+	uint32_t                                                       ahead_distance    = 0;
+	std::array<const ShaderRecompiler::IR::CompiledShaderInfo*, 4> ahead_programs {};
+	std::array<ShaderProgram, 4>                                   ahead_handles {};
 
 	void Reset() {
+		ahead_valid       = false;
+		ahead_programs_ok = false;
 		count       = 0;
 		push_start  = 0;
 		adoptable   = false;
@@ -2246,6 +2254,64 @@ bool PipelineCache::AdoptResolvedPrograms(ResolvedStages& results) {
 
 // KYTY_CHECK_PEEK=2 (S2d, diagnostic): PeekAdopt first, then today's adoption; a predicted keep must be an adoption that
 // looked nothing up again. KYTY_CHECK_PEEK_FAULT=N: every N-th keep is reported as a look-up and must be caught.
+bool PipelineCache::PeekAdoptAhead(ResolvedStages& results, uint32_t distance) {
+	ProgramCache::AdoptPeek peek;
+	const bool              predicted = m_program_cache->PeekAdopt(results, peek);
+	results.ahead_valid       = true;
+	results.ahead_predicted   = predicted;
+	results.ahead_distance    = distance;
+	results.ahead_share       = false;
+	results.ahead_programs_ok = false;
+	for (uint32_t i = 0; i < std::min(results.count, 4u); i++) {
+		const auto* permutation    = predicted ? peek.permutations[i] : nullptr;
+		results.ahead_programs[i]  = permutation != nullptr ? &permutation->program : nullptr;
+		results.ahead_handles[i]   = permutation != nullptr ? permutation->handle : ShaderProgram {};
+		if (((peek.flags >> (3u * i + 1u)) & 1u) != 0) results.ahead_share = true;
+	}
+	return predicted;
+}
+
+void PipelineCache::InstallAhead(ResolvedStages& results, AheadSaved& saved) {
+	saved.count = std::min(results.count, 4u);
+	for (uint32_t i = 0; i < saved.count; i++) {
+		auto& r = results.stages[i];
+		if (r.out_stage == nullptr || r.out_program == nullptr) continue;
+		saved.program[i]     = r.out_stage->program;
+		saved.handle[i]      = *r.out_program;
+		r.out_stage->program = results.ahead_programs[i];
+		*r.out_program       = results.ahead_handles[i];
+	}
+}
+
+void PipelineCache::RestoreAhead(ResolvedStages& results, const AheadSaved& saved) {
+	for (uint32_t i = 0; i < saved.count; i++) {
+		auto& r = results.stages[i];
+		if (r.out_stage == nullptr || r.out_program == nullptr) continue;
+		r.out_stage->program = saved.program[i];
+		*r.out_program       = saved.handle[i];
+	}
+}
+
+bool PipelineCache::StagesAdoptable(const ResolvedStages& results) {
+	return results.adoptable && results.count != 0;
+}
+
+bool PipelineCache::AheadProgramsOk(const ResolvedStages& results) {
+	return results.ahead_programs_ok;
+}
+
+uint32_t PipelineCache::StageCount(const ResolvedStages& results) {
+	return std::min(results.count, 4u);
+}
+
+const ShaderRecompiler::IR::CompiledShaderInfo* PipelineCache::AheadProgram(const ResolvedStages& results, uint32_t i) {
+	return i < 4u ? results.ahead_programs[i] : nullptr;
+}
+
+const ShaderRecompiler::IR::ResourceSnapshot* PipelineCache::StageResources(const ResolvedStages& results, uint32_t i) {
+	return i < 4u ? &results.stages[i].resources : nullptr;
+}
+
 bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 	auto& st = g_peek_adopt;
 	st.calls++;
@@ -2292,6 +2358,34 @@ bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 		if (!same) (fault ? st.detected : st.bad)++;
 	}
 	if (t_adopt_refinds == refinds0 && peek.found != 0) st.refind_kept++; // (the peek looked up, Adopt did not)
+	if (results.ahead_valid) {
+		// N4.1: the prediction made when the chunk opened, against what Adopt took.
+		auto&          a      = g_ahead;
+		const uint32_t bucket = AheadBucket(results.ahead_distance);
+		results.ahead_valid   = false;
+		if (!results.ahead_predicted) {
+			if (predicted) a.p_lost++;
+		} else if (adopted) {
+			a.p_compared++;
+			a.p_by_distance[bucket]++;
+			bool same = true;
+			for (uint32_t i = 0; i < std::min(results.count, 4u); i++) {
+				same = same && results.stages[i].out_stage->program == results.ahead_programs[i];
+			}
+			results.ahead_programs_ok = same;
+			const bool ahead_fault    = PeekAdoptFaultEvery() != 0 && a.p_compared % PeekAdoptFaultEvery() == 0;
+			if (ahead_fault) a.p_injected++;
+			if (!same || ahead_fault) {
+				if (ahead_fault) {
+					a.p_detected++;
+				} else if (results.ahead_share) {
+					a.p_share_diff++;
+				} else {
+					a.p_bad++;
+				}
+			}
+		}
+	}
 	(adopted ? g_resolve_stats.adopted : g_resolve_stats.not_adopted).fetch_add(1, std::memory_order_relaxed);
 	if ((st.calls & ((1u << 18u) - 1u)) == 0) {
 		std::fprintf(stderr,

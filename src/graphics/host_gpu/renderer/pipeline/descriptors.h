@@ -26,6 +26,18 @@ struct TextureBinding {
 	std::vector<vk::ImageView> mip_views;
 };
 
+// Project 15 S2b/N4.1: a stage's images and samplers answered without a write (RenderExecutor::PeekStageImages).
+struct PeekStageImagesResult {
+	bool                                    pending = false, samplers_answered = false;
+	std::vector<uint8_t>                    stale; // today's path took a slow path for the slot
+	uint64_t                                epoch = 0; // the image registry epoch at the peek
+	std::vector<uint8_t>                    klass;
+	std::vector<ImageId>                    ids;
+	std::vector<vk::ImageView>              views;
+	std::vector<std::vector<vk::ImageView>> mips;
+	std::vector<vk::Sampler>                samplers;
+};
+
 struct PreparedBindings {
 	struct BufferSource {
 		uint64_t address = 0;

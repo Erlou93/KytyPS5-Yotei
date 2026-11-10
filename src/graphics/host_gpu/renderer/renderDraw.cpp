@@ -1254,15 +1254,22 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& t
 // 8-bit path widens it to 0xffff. Custom: a reset value the host cannot take.
 enum class PrimitiveRestartKind { Unsupported, Off, Native, Custom };
 
+static PrimitiveRestartKind ClassifyPrimitiveRestartRegs(const HW::UserConfig& ucfg, const HW::Context& ctx, uint32_t element_size);
+
 static PrimitiveRestartKind ClassifyPrimitiveRestart(const CommandBuffer& buffer, uint32_t element_size) {
-	const auto control = buffer.GetUserConfig().GetPrimitiveResetControl();
+	return ClassifyPrimitiveRestartRegs(buffer.GetUserConfig(), buffer.GetRegisters(), element_size);
+}
+
+// Project 15 N4.1: the same from the registers alone.
+static PrimitiveRestartKind ClassifyPrimitiveRestartRegs(const HW::UserConfig& ucfg, const HW::Context& ctx, uint32_t element_size) {
+	const auto control = ucfg.GetPrimitiveResetControl();
 	if ((control & ~0x3u) != 0) {
 		return PrimitiveRestartKind::Unsupported;
 	}
 	if ((control & 0x1u) == 0) {
 		return PrimitiveRestartKind::Off;
 	}
-	switch (buffer.GetUserConfig().GetPrimType()) {
+	switch (ucfg.GetPrimType()) {
 		case Prospero::PrimitiveType::kLineStrip:
 		case Prospero::PrimitiveType::kTriFan:
 		case Prospero::PrimitiveType::kTriStrip: break;
@@ -1270,7 +1277,7 @@ static PrimitiveRestartKind ClassifyPrimitiveRestart(const CommandBuffer& buffer
 	}
 
 	const auto index_mask  = UINT32_MAX >> ((4 - element_size) * 8);
-	const auto reset_index = buffer.GetRegisters().GetPrimitiveResetIndex();
+	const auto reset_index = ctx.GetPrimitiveResetIndex();
 	if ((control & 0x2u) != 0 && (reset_index & ~index_mask) != 0) {
 		return PrimitiveRestartKind::Off;
 	}
@@ -2527,6 +2534,21 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                                      buffer.GetRegisters(), buffer.GetUserConfig(), ps_info, topology,
 		                                                      primitive_restart_enable, state.programs, false);
 		if (!(key_peek == key_today)) st.key_bad++;
+		if (m_resolved_draw != nullptr && m_resolved_draw->ahead.key_valid) {
+			// N4.1: the key and pipeline the opening's peek found, when its programs were predicted right.
+			auto& ah     = m_resolved_draw->ahead;
+			auto& a      = g_ahead;
+			ah.key_valid = false;
+			if (!PipelineCache::AheadProgramsOk(*m_resolved_draw->stages)) {
+				a.k_unchecked++;
+			} else {
+				a.k_compared++;
+				const bool fault = PeekTargets::FaultEvery() != 0 && a.k_compared % PeekTargets::FaultEvery() == 0;
+				if (fault) a.k_injected++;
+				if (!(ah.key == key_today) || fault) (fault ? a.k_detected : a.k_bad)++;
+				if (ah.find != pc.FindGraphicsPipeline(key_today)) a.k_find_diff++;
+			}
+		}
 		st.find[static_cast<size_t>(peek_find.second)]++;
 		if (peek_find.second == PipelineCache::PipelineFind::Found && !mesh_active) t_op_pipeline = true; // the operation's plan
 		if (t_peek_member == 1) st.member_find[static_cast<size_t>(peek_find.second)]++;
@@ -3430,6 +3452,14 @@ struct RenderExecutor::ResolvedDraw {
 	bool                   empty = false;
 	ResolvedDraw*          check = nullptr; // KYTY_CHECK_RESOLVE=2: the helper's slot of the same operation
 	uint32_t               fault = 0;       // KYTY_CHECK_RESOLVE_FAULT: the error put into this (helper's) result
+	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): what the chunk's opening peeked for this draw ahead (PeekAhead).
+	struct Ahead {
+		bool                                                             key_valid = false, front = false;
+		uint32_t                                                         distance  = 0;
+		PipelineCache::GraphicsPipelineKey                               key {};
+		std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> find {nullptr, PipelineCache::PipelineFind::Count};
+		std::vector<std::pair<const void*, PeekStageImagesResult>>      images;
+	} ahead;
 };
 
 namespace {
@@ -3457,6 +3487,8 @@ RenderExecutor::ResolvedDraw& RenderExecutor::NextResolvedDraw() {
 	}
 	ring.next     = (ring.next + 1) % ResolvedDrawRing::Size;
 	draw.consumed = false;
+	draw.ahead.key_valid = false; // N4.1
+	draw.ahead.images.clear();
 	draw.empty    = false;
 	draw.check    = nullptr;
 	draw.fault    = 0;
@@ -3710,6 +3742,125 @@ static bool SkipDirectDrawsCeiling() {
 		return set;
 	}();
 	return on;
+}
+
+bool RenderExecutor::TakeAheadImages(const void* program, PeekStageImagesResult& out, uint32_t& distance) {
+	if (m_resolved_draw == nullptr) return false;
+	for (auto& [ahead_program, ahead]: m_resolved_draw->ahead.images) {
+		if (ahead_program != program) continue;
+		out           = std::move(ahead);
+		distance      = m_resolved_draw->ahead.distance;
+		ahead_program = nullptr;
+		return true;
+	}
+	return false;
+}
+
+void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders,
+                               bool indexed, uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset,
+                               uint64_t indirect, uint32_t distance) {
+	auto&          a      = g_ahead;
+	const uint32_t bucket = AheadBucket(distance);
+	a.planned++;
+	a.peeked[bucket]++;
+	if (slot == nullptr || slot->empty || slot->is_compute) {
+		a.gated[1]++;
+		return;
+	}
+	slot->ahead.key_valid = false;
+	slot->ahead.front     = false;
+	slot->ahead.distance  = distance;
+	slot->ahead.images.clear();
+	// The gates DrawIndex / DrawAuto pass before the targets are described (their order).
+	if (slot->shaders != &shaders) {
+		a.gated[2]++;
+		return;
+	}
+	if (!PipelineCache::StagesAdoptable(*slot->stages)) {
+		a.gated[3]++;
+		return;
+	}
+	if (count == 0 || instances == 0 || indirect != 0) {
+		a.gated[4]++;
+		return;
+	}
+	if (ctx.GetColorControl().mode != 0 || DepthStencilCopyAsked(ctx)) {
+		a.gated[5]++;
+		return;
+	}
+	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
+	uint32_t              element  = 0;
+	if (indexed) {
+		switch (static_cast<Prospero::IndexType>(index_type)) {
+			case Prospero::IndexType::kIndex16: element = 2; break;
+			case Prospero::IndexType::kIndex32: element = 4; break;
+			case Prospero::IndexType::kIndex8: element = 1; break;
+			default: element = 0; break;
+		}
+	}
+	if (!GetDrawTopology(ucfg, topology) || (indexed && element == 0)) {
+		a.gated[6]++;
+		return;
+	}
+	auto& pc = m_context.GetPipelineCache();
+	++t_translator;
+	if (!pc.PeekAdoptAhead(*slot->stages, distance)) {
+		--t_translator;
+		a.compile++;
+		return;
+	}
+	PipelineCache::AheadSaved saved;
+	PipelineCache::InstallAhead(*slot->stages, saved);
+	auto& state = slot->state;
+	bool  front = false;
+	if (state.vertex_info[0].stage.program == nullptr || state.vertex_info[0].stage.program->stage == ShaderType::Mesh) {
+		a.gated[7]++;
+	} else {
+		// The targets as PrepareDrawRenderState finds them, from the predicted pixel program's outputs.
+		const auto color_output_mask = DrawColorOutputMask(ctx);
+		uint32_t   mrt_mask = 0, objprim_mask = 0;
+		if (state.ps_active && state.ps_input_info.stage.program != nullptr) {
+			for (const auto& output: state.ps_input_info.stage.program->info.outputs) {
+				if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
+				    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
+					mrt_mask |= 1u << output.location;
+				} else if (output.kind == ShaderRecompiler::IR::StageOutputKind::ObjPrimId) {
+					objprim_mask |= 1u << output.location;
+				}
+			}
+		}
+		mrt_mask = (mrt_mask & color_output_mask) | objprim_mask;
+		std::array<RenderColorInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};
+		uint32_t                                                  color_count = 0;
+		for (uint32_t target = 0; target < RENDER_COLOR_ATTACHMENTS_MAX; target++) {
+			if ((mrt_mask & (1u << target)) == 0) continue;
+			if (DescribeRenderColorTarget(ctx, colors[color_count], slice_offset, target, false)) color_count++;
+		}
+		RenderDepthInfo depth {};
+		(void)DescribeRenderDepthTarget(m_context.GetGraphics(), ctx, depth);
+		// A custom restart index: today's scan finds no restart (or stops the emulator), so false.
+		const bool restart = indexed && ClassifyPrimitiveRestartRegs(ucfg, ctx, element) == PrimitiveRestartKind::Native;
+		const auto vertex_stages = std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
+		slot->ahead.key = pc.MakeGraphicsPipelineKeyFrom(std::span {colors.data(), color_count}, depth, vertex_stages, ctx, ucfg,
+		                                                 state.ps_active ? &state.ps_input_info : nullptr, topology, restart,
+		                                                 state.programs, true);
+		slot->ahead.key_valid = true;
+		slot->ahead.find      = pc.FindGraphicsPipeline(slot->ahead.key);
+		front                 = slot->ahead.find.second == PipelineCache::PipelineFind::Found;
+		// The stages' images and samplers, with the predicted programs.
+		for (uint32_t i = 0; i < PipelineCache::StageCount(*slot->stages); i++) {
+			const auto* program   = PipelineCache::AheadProgram(*slot->stages, i);
+			const auto* resources = PipelineCache::StageResources(*slot->stages, i);
+			if (program == nullptr || resources == nullptr) continue;
+			PeekStageImagesResult images;
+			front = PeekStageImages(*program, *resources, false, images, false) && front;
+			slot->ahead.images.emplace_back(program, std::move(images));
+		}
+	}
+	PipelineCache::RestoreAhead(*slot->stages, saved);
+	--t_translator;
+	slot->ahead.front = front;
+	if (front) a.front[bucket]++;
 }
 
 bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
