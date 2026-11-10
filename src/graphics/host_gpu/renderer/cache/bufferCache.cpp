@@ -3213,8 +3213,9 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 // N4.2b (KYTY_CHECK_PLAN_BUFFERS=2): the plan's entry of an acquisition, checked like the lag check of S2a.
 namespace {
 struct PlanBufferStats {
-	std::array<uint64_t, 4>                lookups {}, compared {}, bad {}, race {}, not_ready {};
-	std::array<std::array<uint64_t, 4>, 4> fail {};        // [kind][PeekProofFail 1..3]
+	// kinds: 0 buffer, 1 range, 2 vertex, 3 index, 4 indirect arguments, 5 indirect count (N7.2)
+	std::array<uint64_t, 6>                lookups {}, compared {}, bad {}, race {}, not_ready {};
+	std::array<std::array<uint64_t, 4>, 6> fail {};        // [kind][PeekProofFail 1..3]
 	std::array<uint64_t, 4>                by_distance {}; // compared, by distance from the chunk's opening
 	uint64_t                               unplanned = 0, injected = 0, detected = 0;
 	uint32_t                               logged    = 0;
@@ -3252,9 +3253,9 @@ void PlanBufferReport() {
 		return out;
 	};
 	std::string fail;
-	for (size_t k = 0; k < 4; k++) fail += std::string(k == 0 ? "" : " ") + std::to_string(s.fail[k][1]) + "|" + std::to_string(s.fail[k][2]) + "|" + std::to_string(s.fail[k][3]);
+	for (size_t k = 0; k < 6; k++) fail += std::string(k == 0 ? "" : " ") + std::to_string(s.fail[k][1]) + "|" + std::to_string(s.fail[k][2]) + "|" + std::to_string(s.fail[k][3]);
 	std::fprintf(stderr,
-	             "PERF plan_buffers [buffer|range|vertex|index] lookups=%s compared=%s bad=%s race=%s not_ready=%s "
+	             "PERF plan_buffers [buffer|range|vertex|index|args|count] lookups=%s compared=%s bad=%s race=%s not_ready=%s "
 	             "fail[registry|cpu|image]=%s by_distance=%s unplanned=%llu fault[injected|detected]=%llu|%llu "
 	             "race_why[-|registry|cpu|image]=%s race_own_work=%llu\n",
 	             join(s.lookups).c_str(), join(s.compared).c_str(), join(s.bad).c_str(), join(s.race).c_str(),
@@ -3288,7 +3289,7 @@ template <typename Path>
 std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_t vaddr, uint64_t size, Path&& path) {
 	auto& s      = g_plan_buffer_stats;
 	entry.used   = true;
-	const auto k = entry.kind & 3u;
+	const auto k = std::min<uint32_t>(entry.kind, 5u);
 	s.lookups[k]++;
 	if (entry.peek.klass != BufferPeek::Ready) {
 		s.not_ready[k]++;

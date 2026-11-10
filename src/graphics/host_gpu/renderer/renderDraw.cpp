@@ -1315,13 +1315,104 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	return false;
 }
 
-// GPU indirect draws: ResolvePrimitiveRestart without the index scan (the index count of
-// the draw is in GPU memory). False: a custom restart index the CPU path would have to check.
-static bool ResolvePrimitiveRestartWithoutScan(const CommandBuffer& buffer, uint32_t element_size,
-                                               bool& restart) {
-	const auto kind = ClassifyPrimitiveRestart(buffer, element_size);
-	restart         = kind == PrimitiveRestartKind::Native;
-	return kind == PrimitiveRestartKind::Off || kind == PrimitiveRestartKind::Native;
+// Project 15 N7.2: a GPU indirect packet's checks that need only the registers and the packet (none of the draw's
+// programs): the execution thread's DrawIndirectGpu and a helper's plan (`ahead`: the ranges clamped without a write).
+// One function, so the two cannot differ.
+struct IndirectEarly {
+	DrawIndirectSource    indirect {};
+	DrawIndexBufferSource index_source {};
+	bool                  primitive_restart = false;
+	bool                  no_draw           = false; // max_count == 0
+};
+template <typename Graphics>
+static const char* IndirectEarlyChecks(const Graphics& graphics, const HW::UserConfig& ucfg, const HW::Context& regs,
+                                       const DrawIndirectGpuArgs& args, bool ahead, IndirectEarly& out) {
+	// Argument records larger than this, or index ranges, stay on the CPU path (cache buffers).
+	constexpr uint64_t MaxArgumentBytes = 4ull << 20u;
+	constexpr uint64_t MaxIndexBytes    = 64ull << 20u;
+	const auto         clamp            = [ahead](uint64_t address, uint64_t size) {
+        if (!ahead) return Libs::LibKernel::Memory::ClampRangeSize(address, size);
+        uint64_t generation = 0;
+        return Libs::LibKernel::Memory::ClampRangeSizeAhead(address, size, &generation);
+	};
+	out = {};
+	if (!graphics.gpu_indirect_draw_enabled) {
+		return "host device features";
+	}
+	switch (ucfg.GetPrimType()) {
+		case Prospero::PrimitiveType::kPointList:
+		case Prospero::PrimitiveType::kLineList:
+		case Prospero::PrimitiveType::kLineStrip:
+		case Prospero::PrimitiveType::kTriList:
+		case Prospero::PrimitiveType::kTriFan:
+		case Prospero::PrimitiveType::kTriStrip:
+		case Prospero::PrimitiveType::kPolygon: break;
+		default: return "primitive type";
+	}
+	// Merged (NGG GS) stages draw through the mesh path, which sizes its workgroups from the counts.
+	if ((regs.GetShaderStages() & 0x20u) != 0) {
+		return "mesh vertex stage";
+	}
+	const uint32_t record_size = args.indexed ? 20u : 16u;
+	static_assert(sizeof(vk::DrawIndexedIndirectCommand) == 20u && sizeof(vk::DrawIndirectCommand) == 16u);
+	if (args.max_count == 0) {
+		out.no_draw = true;
+		return nullptr;
+	}
+	if ((args.args_addr & 3u) != 0 || (args.count_addr & 3u) != 0) {
+		return "unaligned arguments";
+	}
+	if ((args.count_addr != 0 || args.max_count > 1u) && ((args.stride & 3u) != 0 || args.stride < record_size)) {
+		return "argument stride";
+	}
+	if (args.max_count > graphics.GetPhysicalDeviceProperties().limits.maxDrawIndirectCount) {
+		return "draw count limit";
+	}
+	out.indirect = DrawIndirectSource {
+	    .args_addr  = args.args_addr,
+	    .args_size  = uint64_t {args.stride} * (args.max_count - 1u) + record_size,
+	    .count_addr = args.count_addr,
+	    .max_count  = args.max_count,
+	    .stride     = args.stride,
+	};
+	if (out.indirect.args_size > MaxArgumentBytes || clamp(out.indirect.args_addr, out.indirect.args_size) != out.indirect.args_size) {
+		return "argument range";
+	}
+	if (args.indexed) {
+		auto& index_source = out.index_source;
+		switch (static_cast<Prospero::IndexType>(args.index_type_and_size)) {
+			case Prospero::IndexType::kIndex16:
+				index_source.type               = vk::IndexType::eUint16;
+				index_source.guest_element_size = 2;
+				break;
+			case Prospero::IndexType::kIndex32:
+				index_source.type               = vk::IndexType::eUint32;
+				index_source.guest_element_size = 4;
+				break;
+			default: return "index type"; // 8-bit indices are widened on the CPU
+		}
+		if (args.index_base_addr == 0 || (args.index_base_addr & (index_source.guest_element_size - 1u)) != 0) {
+			return "index base address";
+		}
+		// Without INDEX_BUFFER_SIZE the bound range would be unknown.
+		if (args.index_buffer_size == 0) {
+			return "index buffer size";
+		}
+		index_source.address = args.index_base_addr;
+		index_source.size    = uint64_t {args.index_buffer_size} * index_source.guest_element_size;
+		if (index_source.size > MaxIndexBytes) {
+			return "index range";
+		}
+		// ResolvePrimitiveRestart without the index scan (the index count is in GPU memory): a custom restart index the
+		// CPU path would have to check.
+		const auto kind = ClassifyPrimitiveRestartRegs(ucfg, regs, index_source.guest_element_size);
+		if (kind != PrimitiveRestartKind::Off && kind != PrimitiveRestartKind::Native) {
+			return "primitive restart index";
+		}
+		out.primitive_restart = kind == PrimitiveRestartKind::Native;
+		index_source.size     = clamp(index_source.address, index_source.size);
+	}
+	return nullptr;
 }
 
 // The export mapping of each color target the draw writes (RefreshShaders).
@@ -3582,6 +3673,9 @@ void RenderExecutor::UseResolvedDraw(ResolvedDraw* resolved) noexcept {
 }
 
 DrawRenderState* RenderExecutor::TakeResolvedState(const ShaderIndirectDrawInfo& indirect_draw) {
+	// N7.2: per draw, not per operation - a GPU indirect packet that took the slot and then went to the CPU expansion must
+	// not leave its plan to the expansion's draws (they fail to take the used slot).
+	m_slot_taken         = false;
 	auto* const resolved = m_resolved_draw;
 	if (resolved == nullptr || resolved->is_compute || std::exchange(resolved->consumed, true) ||
 	    t_draw_regs.sh != resolved->shaders || indirect_draw.Key() != resolved->state.indirect_draw.Key() ||
@@ -3629,11 +3723,15 @@ bool RenderExecutor::ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task
 	if (ok && !task.dispatch && task.build_plan) {
 		// N5.3: the helper builds the draw's plan while the slot is still its own (before it is marked ready).
 		PeekAhead(&slot, *task.context, *task.user_config, *task.shaders, task.indexed, task.draw_count, 1u, task.index_type,
-		          task.slice_offset, task.draw_indirect, std::min(task.lead, 127u), task.index_address);
+		          task.slice_offset, task.draw_indirect, std::min(task.lead, 127u), task.index_address,
+		          task.gpu_indirect ? &task.indirect_args : nullptr);
 		// N7.1: the outcome counters for the report (the helper's scratch slot 3 + index names its row)
 		if (slot.ahead.planned) t_helper_plans_made++;
+		if (task.gpu_indirect) t_helper_packets++;
 		const uint32_t row = ShaderRecompiler::IR::t_ahead_scratch_slot - 3u;
-		if ((t_ahead_helper.planned & 255u) == 0 && row < 2u) g_helper_plan_snap[row].Publish(t_ahead_helper, t_helper_plans_made);
+		if ((t_ahead_helper.planned & 255u) == 0 && row < 2u) {
+			g_helper_plan_snap[row].Publish(t_ahead_helper, t_helper_plans_made, t_helper_packets);
+		}
 	}
 	slot.phase.store(PhaseReady, std::memory_order_release);
 	return ok;
@@ -3867,7 +3965,8 @@ bool RenderExecutor::TakeAheadImages(const void* program, PeekStageImagesResult&
 
 void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders,
                                bool indexed, uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset,
-                               uint64_t indirect, uint32_t distance, uint64_t index_address) {
+                               uint64_t indirect, uint32_t distance, uint64_t index_address,
+                               const DrawIndirectGpuArgs* gpu_indirect) {
 	const bool     on_helper = !GuestGpu::IsGpuThread();
 	auto&          a         = on_helper ? t_ahead_helper : g_ahead;
 	const uint32_t bucket = AheadBucket(distance);
@@ -3893,7 +3992,14 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		a.gated[3]++;
 		return;
 	}
-	if (count == 0 || instances == 0 || indirect != 0) {
+	// N7.2: a GPU indirect packet passes the execution thread's early checks (ranges clamped without a write) or has no plan.
+	IndirectEarly early;
+	if (gpu_indirect != nullptr) {
+		if (IndirectEarlyChecks(m_context.GetGraphics(), ucfg, ctx, *gpu_indirect, true, early) != nullptr || early.no_draw) {
+			a.gated[8]++;
+			return;
+		}
+	} else if (count == 0 || instances == 0 || indirect != 0) {
 		a.gated[4]++;
 		return;
 	}
@@ -3932,6 +4038,9 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 	bool  front = false;
 	if (state.vertex_info[0].stage.program == nullptr || state.vertex_info[0].stage.program->stage == ShaderType::Mesh) {
 		a.gated[7]++;
+	} else if (gpu_indirect != nullptr &&
+	           (state.programs.VertexStageCount() != 1u || state.vertex_info[0].stage.program->stage != ShaderType::Vertex)) {
+		a.gated[9]++; // N7.2: the packet goes to the CPU expansion after taking the slot (no key: nothing else is planned)
 	} else {
 		// The targets as PrepareDrawRenderState finds them, from the predicted pixel program's outputs.
 		const auto color_output_mask = DrawColorOutputMask(ctx);
@@ -4011,13 +4120,33 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 			entry.distance = distance;
 			entry.peek     = cache.PeekBuffer(entry.vaddr, size, false, false, {});
 		}
-		if (lookup_held && indexed && (element == 2u || element == 4u) && index_address != 0) {
+		// (N7.2: a packet's index buffer is its whole bound range, clamped as the execution thread clamps it)
+		const uint64_t index_vaddr = gpu_indirect != nullptr ? early.index_source.address : index_address;
+		const uint64_t index_size  = gpu_indirect != nullptr ? early.index_source.size : static_cast<uint64_t>(count) * element;
+		if (lookup_held && indexed && (element == 2u || element == 4u) && index_vaddr != 0 && index_size != 0) {
 			auto& entry    = slot->ahead.buffers.emplace_back();
-			entry.vaddr    = index_address;
-			entry.size     = static_cast<uint64_t>(count) * element;
+			entry.vaddr    = index_vaddr;
+			entry.size     = index_size;
 			entry.kind     = 3;
 			entry.distance = distance;
 			entry.peek     = cache.PeekBuffer(entry.vaddr, entry.size, false, false, {});
+		}
+		if (lookup_held && gpu_indirect != nullptr) {
+			// N7.2: the packet's argument records and draw count (ExecutePreparedDraw's acquisitions)
+			auto& args    = slot->ahead.buffers.emplace_back();
+			args.vaddr    = early.indirect.args_addr;
+			args.size     = early.indirect.args_size;
+			args.kind     = 4;
+			args.distance = distance;
+			args.peek     = cache.PeekBuffer(args.vaddr, args.size, false, false, {});
+			if (early.indirect.count_addr != 0) {
+				auto& counter    = slot->ahead.buffers.emplace_back();
+				counter.vaddr    = early.indirect.count_addr;
+				counter.size     = sizeof(uint32_t);
+				counter.kind     = 5;
+				counter.distance = distance;
+				counter.peek     = cache.PeekBuffer(counter.vaddr, counter.size, false, false, {});
+			}
 		}
 		if (helper && lookup_held) cache.UnlockLookup();
 	}
@@ -4305,109 +4434,21 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 const char* RenderExecutor::DrawIndirectGpu(uint64_t submit_id, CommandBuffer& buffer,
                                             const DrawIndirectGpuArgs& args) {
-	// The checks that need only the registers and the packet (none of the draw's programs): at the queue and at the draw.
-	DrawIndirectSource    indirect {};
-	DrawIndexBufferSource index_source {};
-	bool                  primitive_restart = false;
-	bool                  no_draw           = false; // max_count == 0
-	const auto            early_checks      = [&]() -> const char* {
-		// Argument records larger than this, or index ranges, stay on the CPU path (cache buffers).
-		constexpr uint64_t MaxArgumentBytes = 4ull << 20u;
-		constexpr uint64_t MaxIndexBytes    = 64ull << 20u;
-
-		EXIT_IF(buffer.IsInvalid());
-		auto&       ucfg     = buffer.GetUserConfig();
-		const auto& graphics = m_context.GetGraphics();
-		if (!graphics.gpu_indirect_draw_enabled) {
-			return "host device features";
-		}
-		switch (ucfg.GetPrimType()) {
-			case Prospero::PrimitiveType::kPointList:
-			case Prospero::PrimitiveType::kLineList:
-			case Prospero::PrimitiveType::kLineStrip:
-			case Prospero::PrimitiveType::kTriList:
-			case Prospero::PrimitiveType::kTriFan:
-			case Prospero::PrimitiveType::kTriStrip:
-			case Prospero::PrimitiveType::kPolygon: break;
-			default: return "primitive type";
-		}
-		// Merged (NGG GS) stages draw through the mesh path, which sizes its workgroups from the counts.
-		if ((buffer.GetRegisters().GetShaderStages() & 0x20u) != 0) {
-			return "mesh vertex stage";
-		}
-		const uint32_t record_size = args.indexed ? 20u : 16u;
-		static_assert(sizeof(vk::DrawIndexedIndirectCommand) == 20u &&
-		              sizeof(vk::DrawIndirectCommand) == 16u);
-		if (args.max_count == 0) {
-			no_draw = true;
-			return nullptr;
-		}
-		if ((args.args_addr & 3u) != 0 || (args.count_addr & 3u) != 0) {
-			return "unaligned arguments";
-		}
-		if ((args.count_addr != 0 || args.max_count > 1u) &&
-		    ((args.stride & 3u) != 0 || args.stride < record_size)) {
-			return "argument stride";
-		}
-		if (args.max_count > graphics.GetPhysicalDeviceProperties().limits.maxDrawIndirectCount) {
-			return "draw count limit";
-		}
-		indirect = DrawIndirectSource {
-		    .args_addr  = args.args_addr,
-		    .args_size  = uint64_t {args.stride} * (args.max_count - 1u) + record_size,
-		    .count_addr = args.count_addr,
-		    .max_count  = args.max_count,
-		    .stride     = args.stride,
-		};
-		if (indirect.args_size > MaxArgumentBytes ||
-		    Libs::LibKernel::Memory::ClampRangeSize(indirect.args_addr, indirect.args_size) !=
-		        indirect.args_size) {
-			return "argument range";
-		}
-		index_source      = {};
-		primitive_restart = false;
-		if (args.indexed) {
-			switch (static_cast<Prospero::IndexType>(args.index_type_and_size)) {
-				case Prospero::IndexType::kIndex16:
-					index_source.type               = vk::IndexType::eUint16;
-					index_source.guest_element_size = 2;
-					break;
-				case Prospero::IndexType::kIndex32:
-					index_source.type               = vk::IndexType::eUint32;
-					index_source.guest_element_size = 4;
-					break;
-				default: return "index type"; // 8-bit indices are widened on the CPU
-			}
-			if (args.index_base_addr == 0 ||
-			    (args.index_base_addr & (index_source.guest_element_size - 1u)) != 0) {
-				return "index base address";
-			}
-			// Without INDEX_BUFFER_SIZE the bound range would be unknown.
-			if (args.index_buffer_size == 0) {
-				return "index buffer size";
-			}
-			index_source.address = args.index_base_addr;
-			index_source.size =
-			    uint64_t {args.index_buffer_size} * index_source.guest_element_size;
-			if (index_source.size > MaxIndexBytes) {
-				return "index range";
-			}
-			if (!ResolvePrimitiveRestartWithoutScan(buffer, index_source.guest_element_size,
-			                                        primitive_restart)) {
-				return "primitive restart index";
-			}
-			index_source.size =
-			    Libs::LibKernel::Memory::ClampRangeSize(index_source.address, index_source.size);
-		}
-		return nullptr;
-	};
+	// The checks that need only the registers and the packet (none of the draw's programs): IndirectEarlyChecks (N7.2: the
+	// same function builds a helper's plan).
+	IndirectEarly early;
 	GpuBurnAt(GpuBurnSite::Indirect); // KYTY_DIAG_GPU_BURN_AT=indirect (measurement only)
 	KYTY_PROFILER_FUNCTION();
 	if (!buffer.IsInvalid()) FlushComputeAccess(buffer.Handle());
-	if (const char* reason = early_checks(); reason != nullptr) {
+	EXIT_IF(buffer.IsInvalid());
+	if (const char* reason = IndirectEarlyChecks(m_context.GetGraphics(), buffer.GetUserConfig(), buffer.GetRegisters(), args, false, early);
+	    reason != nullptr) {
 		return reason;
 	}
-	if (no_draw) return nullptr;
+	if (early.no_draw) return nullptr;
+	const DrawIndirectSource&    indirect          = early.indirect;
+	const DrawIndexBufferSource& index_source      = early.index_source;
+	const bool                   primitive_restart = early.primitive_restart;
 	auto&       ucfg     = buffer.GetUserConfig();
 	auto&       sh_ctx   = buffer.GetShaders();
 

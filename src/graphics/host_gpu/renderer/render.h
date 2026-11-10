@@ -324,6 +324,9 @@ public:
 		uint64_t               seq = 0;
 		bool                   build_plan = false;
 		uint32_t               lead       = 0;
+		// N7.2: a GPU indirect packet (the SGPR layout made: indirect_draw.enabled) and its arguments
+		bool                   gpu_indirect = false;
+		DrawIndirectGpuArgs    indirect_args {};
 	};
 	// The helper (or, with KYTY_CHECK_RESOLVE=2, the resolve thread for the reference): resolves the task into `slot`
 	// (the draw's pre-check included) and marks it ready (empty when there was nothing to resolve).
@@ -356,7 +359,7 @@ public:
 	// pipeline, stage images) into its slot, without a write; distance from the opening draw.
 	void PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders, bool indexed,
 	               uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset, uint64_t indirect, uint32_t distance,
-	               uint64_t index_address = 0);
+	               uint64_t index_address = 0, const DrawIndirectGpuArgs* gpu_indirect = nullptr);
 	// N4.2b: hands the running draw's buffer plan entries to the buffer cache's check (null: none).
 	void PlanBuffersBegin();
 	// KYTY_DIAG_GPU_BURN_NS / KYTY_DIAG_GPU_BURN_AT (measurement only): GPU-thread spin at one of these places.

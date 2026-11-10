@@ -40,8 +40,9 @@ inline thread_local uint64_t t_peek_slow = 0;
 // draw runs (execution thread). Distance buckets from the opening draw: 0 | 1-15 | 16-63 | 64-127.
 struct AheadStats {
 	uint64_t                opened = 0, planned = 0, compile = 0;
-	std::array<uint64_t, 8> gated {}; // 0 unused, 1 slot, 2 shaders, 3 not adoptable, 4 counts/indirect, 5 color op/depth copy,
-	                                  // 6 topology/index type, 7 mesh or no vertex program
+	std::array<uint64_t, 10> gated {}; // 0 unused, 1 slot, 2 shaders, 3 not adoptable, 4 counts/indirect, 5 color op/depth copy,
+	                                   // 6 topology/index type, 7 mesh or no vertex program, 8 a GPU indirect packet's early
+	                                   // checks (N7.2), 9 a packet the execution thread expands after taking the slot
 	std::array<uint64_t, 4> peeked {}, front {};
 	uint64_t p_compared = 0, p_bad = 0, p_share_diff = 0, p_lost = 0, p_injected = 0, p_detected = 0;
 	uint64_t k_compared = 0, k_bad = 0, k_unchecked = 0, k_find_diff = 0, k_injected = 0, k_detected = 0;
@@ -62,18 +63,19 @@ inline AheadStats g_ahead;
 inline thread_local AheadStats t_ahead_helper; // N5.3: a resolve helper's plans count here (not into the execution thread's)
 // N7.1: a helper's plan outcomes, published from t_ahead_helper every 256 plans for the report (one row per helper, each
 // written by its own helper only: relaxed stores). 0 planned, 1 made, 2 compile, 3 describe_failed, 4 lookup_busy,
-// 5-11 gated[1..7].
+// 5-13 gated[1..9], 14 packets planned (N7.2).
 struct HelperPlanSnap {
-	static constexpr size_t              Count = 12;
-	std::array<std::atomic<uint64_t>, 12> v {};
-	void Publish(const AheadStats& a, uint64_t made) {
-		const uint64_t values[Count] = {a.planned,  made,        a.compile,   a.describe_failed, a.lookup_busy, a.gated[1],
-		                                a.gated[2], a.gated[3], a.gated[4], a.gated[5],        a.gated[6],    a.gated[7]};
+	static constexpr size_t              Count = 15;
+	std::array<std::atomic<uint64_t>, 15> v {};
+	void Publish(const AheadStats& a, uint64_t made, uint64_t packets) {
+		const uint64_t values[Count] = {a.planned,  made,       a.compile,  a.describe_failed, a.lookup_busy,
+		                                a.gated[1], a.gated[2], a.gated[3], a.gated[4],        a.gated[5],
+		                                a.gated[6], a.gated[7], a.gated[8], a.gated[9],        packets};
 		for (size_t i = 0; i < Count; i++) v[i].store(values[i], std::memory_order_relaxed);
 	}
 };
 inline HelperPlanSnap g_helper_plan_snap[2];
-inline thread_local uint64_t t_helper_plans_made = 0;
+inline thread_local uint64_t t_helper_plans_made = 0, t_helper_packets = 0;
 inline uint32_t   AheadBucket(uint32_t distance) {
     return distance == 0u ? 0u : distance < 16u ? 1u : distance < 64u ? 2u : 3u;
 }

@@ -1083,7 +1083,7 @@ void GuestGpu::ExecutionThread() {
                                 return out;
 							};
 							std::fprintf(stderr,
-							             "PERF peek_ahead opened=%llu planned=%llu gated[-|slot|shaders|adoptable|counts|color_op|topology|mesh]=%s "
+							             "PERF peek_ahead opened=%llu planned=%llu gated[-|slot|shaders|adoptable|counts|color_op|topology|mesh|indirect_early|indirect_refused]=%s "
 							             "compile=%llu peeked=%s front=%s programs[compared|bad|share_diff|lost]=%llu|%llu|%llu|%llu "
 							             "by_distance=%s fault=%llu|%llu key[compared|bad|unchecked|find_diff]=%llu|%llu|%llu|%llu fault=%llu|%llu "
 							             "images[stages|compared|bad|moved|stale|lost]=%llu|%llu|%llu|%llu|%llu|%llu compared_by_distance=%s "
@@ -1245,6 +1245,23 @@ void GuestGpu::ExecutionThread() {
 
 static const char* IndirectDrawLayout(const IndirectDrawRegisters& registers, ShaderIndirectDrawInfo& sgprs);
 
+// A GPU indirect packet's arguments (without the SGPR layout): CommandProcessor::DrawIndirectGpu and, for its plan (project
+// 15 N7.2), the resolve dispatcher - one builder, so the two cannot differ.
+static DrawIndirectGpuArgs MakeDrawIndirectGpuArgs(const GpuOperation& operation) {
+	const auto& indirect = operation.draw_indirect;
+	const bool  indexed  = indirect.indexed;
+	return DrawIndirectGpuArgs {
+	    .args_addr           = indirect.args_base + indirect.data_offset,
+	    .count_addr          = reinterpret_cast<uint64_t>(indirect.count_addr),
+	    .max_count           = indirect.max_count,
+	    .stride              = indirect.stride,
+	    .index_base_addr     = indexed ? indirect.index_base : 0,
+	    .index_buffer_size   = indexed ? indirect.index_buffer_size : 0,
+	    .index_type_and_size = indirect.index_type,
+	    .indexed             = indexed,
+	};
+}
+
 // Based on TheCruZ/KytyPS5-GTA daaf45201 (graphicsRun.cpp), GPL-2.0.
 // Project 15 N2.2 (design: the analysis session's n2-2-doprecyzowanie.md; the only path since 10.11, live A/B -0.04% se
 // 1.08, the execution thread's waits as before): a helper thread resolves the draws and dispatches, the resolve thread
@@ -1327,6 +1344,16 @@ void GuestGpu::ResolveThread() {
 					task.slice_offset  = args.render_target_slice_offset;
 					task.draw_indirect = args.indirect.address;
 				}
+			}
+			if (kind == GpuOperationKind::DrawIndirect && indirect_draw.enabled && operation->processor == m_gfx_cp.get()) {
+				// N7.2: a GPU indirect packet gets a plan too (its arguments; the helper runs the early checks)
+				task.member                      = true;
+				task.gpu_indirect                = true;
+				task.indexed                     = operation->draw_indirect.indexed;
+				task.draw_count                  = 1;
+				task.index_type                  = operation->draw_indirect.index_type;
+				task.indirect_args               = MakeDrawIndirectGpuArgs(*operation);
+				task.indirect_args.indirect_draw = indirect_draw;
 			}
 			if (dispatch) {
 				const auto& d      = operation->dispatch;
@@ -1416,8 +1443,10 @@ void GuestGpu::ResolveThread() {
 					}
 					std::fprintf(stderr,
 					             "PERF helper_plan_outcome planned=%llu made=%llu compile=%llu describe_failed=%llu lookup_busy=%llu "
-					             "gated[slot|shaders|adopt|counts|colorop|topology|mesh]=%llu|%llu|%llu|%llu|%llu|%llu|%llu\n",
-					             u(o[0]), u(o[1]), u(o[2]), u(o[3]), u(o[4]), u(o[5]), u(o[6]), u(o[7]), u(o[8]), u(o[9]), u(o[10]), u(o[11]));
+					             "gated[slot|shaders|adopt|counts|colorop|topology|mesh|indirect_early|indirect_refused]="
+					             "%llu|%llu|%llu|%llu|%llu|%llu|%llu|%llu|%llu packets=%llu\n",
+					             u(o[0]), u(o[1]), u(o[2]), u(o[3]), u(o[4]), u(o[5]), u(o[6]), u(o[7]), u(o[8]), u(o[9]), u(o[10]), u(o[11]),
+					             u(o[12]), u(o[13]), u(o[14]));
 				}
 				std::string hist;
 				for (size_t i = 0; i < hs.hist_n.size(); i++) {
@@ -3352,16 +3381,7 @@ bool CommandProcessor::DrawIndirectGpu(const GpuOperation& operation) {
 		NoteGpuIndirectFallback(reason, indexed, max_count_or_count, count_address);
 		return false;
 	};
-	DrawIndirectGpuArgs args {
-	    .args_addr           = indirect.args_base + indirect.data_offset,
-	    .count_addr          = count_address,
-	    .max_count           = max_count_or_count,
-	    .stride              = stride_in_bytes,
-	    .index_base_addr     = indexed ? indirect.index_base : 0,
-	    .index_buffer_size   = indexed ? indirect.index_buffer_size : 0,
-	    .index_type_and_size = indirect.index_type,
-	    .indexed             = indexed,
-	};
+	DrawIndirectGpuArgs args = MakeDrawIndirectGpuArgs(operation);
 	if (const char* reason = IndirectDrawLayout(registers, args.indirect_draw); reason != nullptr) {
 		return fallback(reason);
 	}
