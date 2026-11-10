@@ -328,7 +328,8 @@ public:
 	// Project 15 S2c: the pipeline of a key without a write. Found: in the map with its objects (the pointer stays valid:
 	// entries are never removed); the other classes go in order (today's GetGraphicsPipeline[Async]).
 	enum class PipelineFind : uint8_t { Found, Evicted, PendingDone, Pending, Missing, Count };
-	[[nodiscard]] std::pair<Pipeline*, PipelineFind> FindGraphicsPipeline(const GraphicsPipelineKey& key) const;
+	[[nodiscard]] std::pair<Pipeline*, PipelineFind> FindGraphicsPipeline(const GraphicsPipelineKey& key, bool read_object = true) const;
+	// (read_object false, N5.1: a resolve helper - the entry only, Found when it is in the map; the commit checks the object)
 	// N4.3: a plan's pipeline taken as GetGraphicsPipeline[Async] takes a found one (housekeeping, last_used); null when its
 	// objects were given back (today's lookup recreates them).
 	[[nodiscard]] Pipeline* TakePlannedPipeline(Pipeline* planned);

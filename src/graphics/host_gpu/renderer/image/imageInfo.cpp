@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
+#include "graphics/host_gpu/translatorGuard.h"
 
 #include "common/alignment.h"
 
@@ -131,21 +132,40 @@ void ImageInfo::UpdateSize() {
 		return;
 	}
 	UpdateSizeUncached();
+	if (t_describe_soft && t_describe_failed) return; // project 15 N5.1: a plan's description failed (nothing kept)
 	if (cache.size() >= 4096u) cache.clear();
 	cache.emplace(key, MakeLayoutResult(*this));
 }
 
+// Project 15 N5.1 (translatorGuard.h): in the plan's soft description a fail returns (no plan) instead of stopping.
+#define SIZE_FAIL_IF(x)                                                                                                 \
+	do {                                                                                                                \
+		if (t_describe_soft && (x)) {                                                                                   \
+			t_describe_failed = true;                                                                                   \
+			return;                                                                                                     \
+		}                                                                                                               \
+		EXIT_IF(x);                                                                                                     \
+	} while (false)
+#define SIZE_FAIL_NI(x)                                                                                                 \
+	do {                                                                                                                \
+		if (t_describe_soft && (x)) {                                                                                   \
+			t_describe_failed = true;                                                                                   \
+			return;                                                                                                     \
+		}                                                                                                               \
+		EXIT_NOT_IMPLEMENTED(x);                                                                                        \
+	} while (false)
+
 void ImageInfo::UpdateSizeUncached() {
-	EXIT_IF(guest_format == Prospero::BufferFormat::kInvalid || extent.width == 0 ||
+	SIZE_FAIL_IF(guest_format == Prospero::BufferFormat::kInvalid || extent.width == 0 ||
 	        extent.height == 0 || extent.depth == 0 || resources.levels == 0 ||
 	        resources.levels > mip_layout.size() || resources.layers == 0 || samples == 0 ||
 	        !std::has_single_bit(samples));
 	TileTextureElementLayout element {};
-	EXIT_NOT_IMPLEMENTED(!TileGetTextureElementLayout(guest_format, element));
+	SIZE_FAIL_NI(!TileGetTextureElementLayout(guest_format, element));
 	if (bytes_per_block == 0) {
 		bytes_per_block = element.bytes;
 	}
-	EXIT_IF(bytes_per_block != element.bytes);
+	SIZE_FAIL_IF(bytes_per_block != element.bytes);
 	mip_layout                     = {};
 	tiling                         = {};
 	tiling.texel_width             = element.texel_width;
@@ -156,7 +176,7 @@ void ImageInfo::UpdateSizeUncached() {
 	first_tail_level               = 16;
 
 	if (samples > 1) {
-		EXIT_NOT_IMPLEMENTED(IsVolume() || resources.levels != 1 ||
+		SIZE_FAIL_NI(IsVolume() || resources.levels != 1 ||
 		                     (tile_mode != Prospero::TileMode::kDepth &&
 		                      tile_mode != Prospero::TileMode::kRenderTarget));
 		const auto fragments = std::countr_zero(samples);
@@ -165,14 +185,14 @@ void ImageInfo::UpdateSizeUncached() {
 			            ? TileGetDepthPitch(extent.width, bytes_per_block, fragments)
 			            : TileGetRenderTargetPitch(extent.width, bytes_per_block, fragments);
 		}
-		EXIT_NOT_IMPLEMENTED(!TileGetTextureBlockLayout(guest_format, tile_mode, false, tiling));
+		SIZE_FAIL_NI(!TileGetTextureBlockLayout(guest_format, tile_mode, false, tiling));
 		if (data.size == 0) {
 			TileSizeAlign slice {};
-			EXIT_NOT_IMPLEMENTED(!TileGetRenderTargetSize(extent.width, extent.height, pitch,
+			SIZE_FAIL_NI(!TileGetRenderTargetSize(extent.width, extent.height, pitch,
 			                                              bytes_per_block, slice, fragments));
 			data.size = Multiply(slice.size, resources.layers);
 		}
-		EXIT_IF(data.size % resources.layers != 0);
+		SIZE_FAIL_IF(data.size % resources.layers != 0);
 		tiled_slice_stride = data.size / resources.layers;
 		mip_layout[0]      = {0, data.size, pitch, extent.height};
 		return;
@@ -181,11 +201,11 @@ void ImageInfo::UpdateSizeUncached() {
 	if (pitch == 0) {
 		pitch = TileGetTexturePitch(guest_format, extent.width, tile_mode);
 	}
-	EXIT_IF(pitch == 0);
+	SIZE_FAIL_IF(pitch == 0);
 	if (IsDepthPlane(*this) && resources.levels == 1) {
-		EXIT_NOT_IMPLEMENTED(IsVolume());
+		SIZE_FAIL_NI(IsVolume());
 		if (IsTiled()) {
-			EXIT_NOT_IMPLEMENTED(
+			SIZE_FAIL_NI(
 			    !TileGetTextureBlockLayout(guest_format, tile_mode, false, tiling));
 		}
 		if (data.size == 0) {
@@ -194,9 +214,9 @@ void ImageInfo::UpdateSizeUncached() {
 			                   nullptr, nullptr);
 			data.size = Multiply(slice.size, resources.layers);
 		}
-		EXIT_IF(data.size % resources.layers != 0);
+		SIZE_FAIL_IF(data.size % resources.layers != 0);
 		const auto slice = data.size / resources.layers;
-		EXIT_IF(Multiply(Multiply(pitch, extent.height), bytes_per_block) > slice);
+		SIZE_FAIL_IF(Multiply(Multiply(pitch, extent.height), bytes_per_block) > slice);
 		linear_slice_stride = slice;
 		tiled_slice_stride  = IsTiled() ? slice : 0;
 		mip_layout[0]       = {0, data.size, pitch, extent.height, 0, slice, pitch};
@@ -237,7 +257,7 @@ void ImageInfo::UpdateSizeUncached() {
 		                                          IsVolume() ? extent.depth : 1u,
 		                                          resources.levels,
 		                                          resources.layers};
-		EXIT_NOT_IMPLEMENTED(!TileGetTiledTextureLayout(description, surface));
+		SIZE_FAIL_NI(!TileGetTiledTextureLayout(description, surface));
 		tiling             = surface.texture;
 		first_tail_level   = surface.first_tail_level;
 		tiled_slice_stride = surface.block_slice_size;
@@ -265,7 +285,7 @@ void ImageInfo::UpdateSizeUncached() {
 			    Common::AlignUp(active.height, element.texel_height) / element.texel_height;
 			mip.linear_size      = Multiply(Multiply(mip.linear_pitch, rows), element.bytes);
 			const auto alignment = std::max(element.bytes, 4u);
-			EXIT_IF(linear_offset > UINT64_MAX - (alignment - 1u));
+			SIZE_FAIL_IF(linear_offset > UINT64_MAX - (alignment - 1u));
 			mip.linear_offset = Common::AlignUp<uint64_t>(linear_offset, alignment);
 			linear_offset     = Add(mip.linear_offset, Multiply(mip.linear_size, active.depth));
 			mip_pitch         = std::max(mip_pitch >> 1u, 1u);

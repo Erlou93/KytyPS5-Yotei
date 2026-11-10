@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/translatorGuard.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 
 #include "common/assert.h"
@@ -84,6 +85,10 @@ RenderTargetFormatInfo TextureGetRenderTargetFormat(Prospero::ChannelLayout layo
 			return {host_format.format, bytes, host_format.host_to_storage.Then(order_mapping),
 			        encoding.buffer_format};
 		}
+	}
+	if (t_describe_soft) { // project 15 N5.1: a plan's description fails instead of stopping
+		t_describe_failed = true;
+		return {};
 	}
 	EXIT("unsupported render-target format combination: layout=%u type=%u order=%u\n",
 	     static_cast<uint32_t>(layout), static_cast<uint32_t>(type), static_cast<uint32_t>(order));

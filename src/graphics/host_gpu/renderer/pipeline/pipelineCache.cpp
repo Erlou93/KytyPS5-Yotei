@@ -2438,13 +2438,15 @@ PipelineCache::Pipeline* PipelineCache::TakePlannedPipeline(Pipeline* planned) {
 }
 
 std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> PipelineCache::FindGraphicsPipeline(
-    const GraphicsPipelineKey& key) const {
+    const GraphicsPipelineKey& key, bool read_object) const {
 	const std::shared_lock pipelines_lock(m_pipelines_mutex); // N5.1: a resolve helper may ask
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
 		auto* found = iter->second.get();
+		if (!read_object) return {found, PipelineFind::Found}; // (the sweep writes the object without the lock)
 		return {found, found->pipeline != nullptr ? PipelineFind::Found : PipelineFind::Evicted};
 	}
 	if (auto pending = m_table_pending.find(key); pending != m_table_pending.end()) {
+		if (!read_object) return {nullptr, PipelineFind::Pending};
 		const auto& job = *pending->second;
 		return {nullptr, job.done.load(std::memory_order_acquire) && !job.failed ? PipelineFind::PendingDone : PipelineFind::Pending};
 	}

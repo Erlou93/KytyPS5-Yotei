@@ -3962,7 +3962,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 			return;
 		}
 		slot->ahead.key_valid = true;
-		slot->ahead.find      = pc.FindGraphicsPipeline(slot->ahead.key);
+		slot->ahead.find      = pc.FindGraphicsPipeline(slot->ahead.key, GuestGpu::IsGpuThread());
 		front                 = slot->ahead.find.second == PipelineCache::PipelineFind::Found;
 		// The stages' images and samplers, with the predicted programs.
 		for (uint32_t i = 0; i < PipelineCache::StageCount(*slot->stages); i++) {
