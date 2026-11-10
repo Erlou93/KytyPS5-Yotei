@@ -4851,16 +4851,15 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 		if (layout.BufferBindings() == 0) {
 			continue;
 		}
-		// P1.2 (KYTY_PERF_PLAN_BINDINGS): a read-only binding with a plan entry whose record source still holds (the
+		// P1.2: a read-only binding with a plan entry whose record source still holds (the
 		// registry and the virtual ranges unchanged - BufferSourceHolds' checks; the helper checked the words on the same
 		// record) takes its source from the entry; KYTY_CHECK_PLAN_BUFFERS=2 compares it with today's source.
-		const bool plan_sources = BufferCache::PlanBindingsOn() || BufferCache::PlanBufferCheck();
 		for (uint32_t resource = 0; resource < program.info.buffers.size(); ++resource) {
 			const auto& metadata = program.info.buffers[resource];
 			if (metadata.descriptor_index == UINT32_MAX) continue;
 			auto& source = prepared.buffer_sources[metadata.descriptor_index];
 			PlanBuffer* plan_entry = nullptr;
-			if (plan_sources && !metadata.written) {
+			if (!metadata.written) {
 				plan_entry = BufferCache::PlanStageEntry(&program, resource);
 				if (plan_entry != nullptr &&
 				    (plan_entry->source_epoch != DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_relaxed) ||
@@ -5036,7 +5035,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		auto&       cache = m_context.GetBufferCache();
 		m_gpu_word_addresses.clear();
 		m_gpu_word_values.clear();
-		const bool  quiet_words = BufferCache::Batch1On() && !BufferCache::PlanBufferCheck(); // (batch 1: the fast path)
+		const bool  quiet_words = !BufferCache::PlanBufferCheck(); // (batch 1: the fast path; the check run takes today's path)
 		for (const auto& word: words) {
 			EXIT_IF(word.slot >= flat.size() || word.hi >= flat.size());
 			const uint64_t address = (uint64_t {flat[word.hi]} << 32u) | flat[word.slot];
@@ -5141,10 +5140,10 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
 		} else {
 			// Project 15 way B P1.1: a read-only binding with a ready plan entry of the same source, whose proof holds, takes
-			// the helper's binding (KYTY_PERF_PLAN_BINDINGS; with KYTY_CHECK_PLAN_BUFFERS=2 today's binding is compared).
+			// the helper's binding (with KYTY_CHECK_PLAN_BUFFERS=2 today's binding is compared).
 			const bool  check      = BufferCache::PlanBufferCheck();
 			const auto& source     = prepared.buffer_sources[index];
-			PlanBuffer* plan_entry = !buffer.written && (check || BufferCache::PlanBindingsOn())
+			PlanBuffer* plan_entry = !buffer.written
 			                             ? (index < prepared.plan_entries.size() && prepared.plan_entries[index] != nullptr
 			                                    ? prepared.plan_entries[index]
 			                                    : BufferCache::PlanStageEntry(&program, resource))
