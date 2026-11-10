@@ -3253,9 +3253,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			// T1b diagnostic (KYTY_TRACE_PEEK_CENSUS): the first non-repeatable target searches in the walk, with the
 			// candidates and the first SameBacking field that differs (1 address, 2 size, 3 extent, 4 levels/layers,
 			// 5 samples, 6 bytes per block, 7 tile mode, 8 colour transform, 9 format/type, 10 exact format).
-			static uint32_t logged = 0;
-			if (why == 2 && ChunkLead::PeekCensusOn() && DebugPresentCount().load() > 2500u && logged < 24u) {
-				logged++;
+			static uint32_t logged[6] {};
+			const int       lb = ChunkLead::t_floor_bucket;
+			if (why == 2 && ChunkLead::PeekCensusOn() && DebugPresentCount().load() > 3000u && lb >= 0 && lb < 6 && logged[lb] < 12u) {
+				logged[lb]++;
 				const auto first_diff = [&](const ImageInfo& c) {
 					const auto& q = desc.info;
 					if (c.data.address != q.data.address) return 1;
