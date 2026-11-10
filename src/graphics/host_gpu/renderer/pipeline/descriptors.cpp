@@ -4252,8 +4252,11 @@ void RenderExecutor::PeekStageBuffers(const ShaderRecompiler::IR::CompiledShader
 		entry.peek       = cache.PeekBuffer(ahead->address, ahead->size, false, texel, ahead->id);
 		// P1: the binding RebindBuffers would compute (StorageBufferRange without its EXIT: a limit off - not ready, today's
 		// path meets it - and the record stride)
-		entry.program  = &program;
-		entry.resource = resource;
+		entry.program           = &program;
+		entry.resource          = resource;
+		entry.source_id         = ahead->id; // (P1.2)
+		entry.source_epoch      = ahead->buffer_epoch;
+		entry.ranges_generation = ahead->ranges_generation;
 		if ((entry.peek.klass == BufferCache::BufferPeek::Ready || entry.peek.klass == BufferCache::BufferPeek::Direct) && entry.peek.handle) {
 			const auto& graphics       = m_context.GetGraphics();
 			const auto  alignment      = graphics.StorageMinAlignment();
@@ -4757,6 +4760,27 @@ static std::optional<std::pair<uint64_t, uint64_t>> VSharpRange(RenderContext&  
 	return std::pair {address, size};
 }
 
+// Project 15 way B P1.2 (KYTY_CHECK_PLAN_BUFFERS=2): an entry's source against today's (address, size, buffer id).
+static void PlanSourceCheck(const PlanBuffer& entry, const PreparedBindings::BufferSource& today) {
+	static uint64_t compared = 0, bad = 0, logged = 0;
+	static auto     window   = std::chrono::steady_clock::now();
+	compared++;
+	if (entry.vaddr != today.address || entry.size != today.size || entry.source_id != today.id) {
+		bad++;
+		if (logged++ < 16u) {
+			std::fprintf(stderr, "CHECK_PLAN_SOURCE bad addr=%llx/%llx size=%llx/%llx id=%u/%u\n",
+			             static_cast<unsigned long long>(entry.vaddr), static_cast<unsigned long long>(today.address),
+			             static_cast<unsigned long long>(entry.size), static_cast<unsigned long long>(today.size),
+			             static_cast<uint32_t>(entry.source_id.index), static_cast<uint32_t>(today.id.index));
+		}
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now - window < std::chrono::seconds(5)) return;
+	window = now;
+	std::fprintf(stderr, "PERF plan_source_check compared=%llu bad=%llu\n", static_cast<unsigned long long>(compared),
+	             static_cast<unsigned long long>(bad));
+}
+
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 	const ChunkLead::FloorTimer floor_find(ChunkLead::FpFindBuffers); // KYTY_TRACE_PEEK_CENSUS (W3 P0)
 	KYTY_PROFILER_FUNCTION();
@@ -4823,19 +4847,39 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 		}
 		const auto& layout = program.bindings;
 		prepared.buffer_sources.resize(layout.BufferBindings());
+		prepared.plan_entries.assign(layout.BufferBindings(), nullptr);
 		if (layout.BufferBindings() == 0) {
 			continue;
 		}
+		// P1.2 (KYTY_PERF_PLAN_BINDINGS): a read-only binding with a plan entry whose record source still holds (the
+		// registry and the virtual ranges unchanged - BufferSourceHolds' checks; the helper checked the words on the same
+		// record) takes its source from the entry; KYTY_CHECK_PLAN_BUFFERS=2 compares it with today's source.
+		const bool plan_sources = BufferCache::PlanBindingsOn() || BufferCache::PlanBufferCheck();
 		for (uint32_t resource = 0; resource < program.info.buffers.size(); ++resource) {
 			const auto& metadata = program.info.buffers[resource];
 			if (metadata.descriptor_index == UINT32_MAX) continue;
 			auto& source = prepared.buffer_sources[metadata.descriptor_index];
+			PlanBuffer* plan_entry = nullptr;
+			if (plan_sources && !metadata.written) {
+				plan_entry = BufferCache::PlanStageEntry(&program, resource);
+				if (plan_entry != nullptr &&
+				    (plan_entry->source_epoch != DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_relaxed) ||
+				     plan_entry->ranges_generation != Libs::LibKernel::Memory::RangesGeneration())) {
+					plan_entry = nullptr;
+				}
+				if (plan_entry != nullptr && !BufferCache::PlanBufferCheck()) {
+					source = {plan_entry->vaddr, plan_entry->size, plan_entry->source_id};
+					prepared.plan_entries[metadata.descriptor_index] = plan_entry;
+					continue;
+				}
+			}
 			// The resolve thread's source when it still holds.
 			if (const auto* ahead = StageF::BufferSourceAhead(lookup_record, resource, snapshot.buffers[resource],
 			                                                  metadata.written);
 			    ahead != nullptr) {
 				source = {ahead->address, ahead->size, ahead->id};
 				prefetch_memo(source, metadata);
+				if (plan_entry != nullptr) PlanSourceCheck(*plan_entry, source);
 				continue;
 			}
 			const auto range = VSharpRange(m_context, program, resource, snapshot.buffers[resource], [&](auto&& read) {
@@ -4852,6 +4896,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			const auto [address, size] = *range;
 			source = {address, size, cache.FindBuffer(address, size)};
 			prefetch_memo(source, metadata);
+			if (plan_entry != nullptr) PlanSourceCheck(*plan_entry, source);
 		}
 	}
 }
@@ -5094,7 +5139,9 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			const bool  check      = BufferCache::PlanBufferCheck();
 			const auto& source     = prepared.buffer_sources[index];
 			PlanBuffer* plan_entry = !buffer.written && (check || BufferCache::PlanBindingsOn())
-			                             ? BufferCache::PlanStageEntry(&program, resource)
+			                             ? (index < prepared.plan_entries.size() && prepared.plan_entries[index] != nullptr
+			                                    ? prepared.plan_entries[index]
+			                                    : BufferCache::PlanStageEntry(&program, resource))
 			                             : nullptr;
 			const bool  usable = plan_entry != nullptr && plan_entry->ready && plan_entry->vaddr == source.address &&
 			                    plan_entry->size == source.size && source.address != 0 && source.size != 0;

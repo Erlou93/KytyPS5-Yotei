@@ -1062,6 +1062,9 @@ struct PlanBuffer {
 	bool        ready    = false;
 	uint64_t    bind_offset = 0, bind_range = 0;
 	uint32_t    memory_offset = 0, stride = 0;
+	// P1.2: the resolve record's source (its buffer id and the epochs BufferSourceHolds checks)
+	BufferId    source_id {};
+	uint64_t    source_epoch = 0, ranges_generation = 0;
 };
 
 } // namespace Libs::Graphics

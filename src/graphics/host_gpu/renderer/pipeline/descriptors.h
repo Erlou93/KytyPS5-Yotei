@@ -51,6 +51,8 @@ struct PreparedBindings {
 	// Keep the resolved guest range through cache preparation; only the host buffer ID may
 	// become stale and need resolving again when bindings are rebound.
 	std::vector<BufferSource>             buffer_sources;
+	// Project 15 way B P1.2: per buffer binding, the plan entry FindBuffers took its source from (RebindBuffers answers it)
+	std::vector<struct PlanBuffer*>       plan_entries;
 	std::vector<vk::DescriptorBufferInfo> buffers;
 	std::vector<TextureBinding>           images;
 	std::vector<vk::Sampler>              samplers;
