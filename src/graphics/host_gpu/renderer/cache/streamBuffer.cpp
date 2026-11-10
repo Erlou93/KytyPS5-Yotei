@@ -13,6 +13,11 @@
 #include "graphics/host_gpu/renderer/syncTimeline.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <bit>
 #include <chrono>
 #include <cstdio>
@@ -24,6 +29,65 @@
 namespace Libs::Graphics {
 
 namespace {
+
+// KYTY_PERF_ASYNC_FREE=1 (test switch, hitch study 10.11): a destroyed buffer's Vulkan buffer and memory are released on
+// a worker thread. vkFreeMemory of a dedicated allocation took 1-3.4 ms on the execution thread; frames that freed 20-142
+// buffers after a scene change lasted 100-140 ms (KYTY_TRACE_SLOW_FRAMES: free 24-68 ms). The buffer is already retired
+// (its last GPU use done) and the command recorder drained before the hand-off; the VMA allocator is internally
+// synchronized. FlushBufferFrees (allocator teardown) waits for the queue.
+class BufferFreer {
+public:
+	static BufferFreer& Get() {
+		static BufferFreer freer;
+		return freer;
+	}
+	static bool On() {
+		static const bool on = [] {
+			const char* value = std::getenv("KYTY_PERF_ASYNC_FREE");
+			const bool  set   = value != nullptr && value[0] == '1';
+			if (set) std::fprintf(stderr, "PERF_ASYNC_FREE on (buffers released on a worker thread)\n");
+			return set;
+		}();
+		return on;
+	}
+	void Push(std::function<void()> job) {
+		{
+			std::lock_guard lock(m_mutex);
+			if (!m_thread.joinable()) m_thread = std::thread([this] { Run(); });
+			m_jobs.push_back(std::move(job));
+			m_pending++;
+		}
+		m_cv.notify_one();
+	}
+	void Flush() {
+		std::unique_lock lock(m_mutex);
+		m_done_cv.wait(lock, [this] { return m_pending == 0; });
+	}
+
+private:
+	void Run() {
+		for (;;) {
+			std::function<void()> job;
+			{
+				std::unique_lock lock(m_mutex);
+				m_cv.wait(lock, [this] { return !m_jobs.empty(); });
+				job = std::move(m_jobs.front());
+				m_jobs.pop_front();
+			}
+			job();
+			{
+				std::lock_guard lock(m_mutex);
+				if (--m_pending == 0) m_done_cv.notify_all();
+			}
+		}
+	}
+	std::mutex                        m_mutex;
+	std::condition_variable           m_cv;
+	std::condition_variable           m_done_cv;
+	std::deque<std::function<void()>> m_jobs;
+	size_t                            m_pending = 0;
+	std::thread                       m_thread;
+};
 
 constexpr size_t WATCHES_INITIAL_RESERVE = 0x4000;
 constexpr size_t WATCHES_RESERVE_CHUNK   = 0x1000;
@@ -283,6 +347,14 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, GuestDirec
 Buffer::~Buffer() {
 	if (m_direct_memory != nullptr) {
 		CommandRecorder::DrainBeforeDestroy(); // (as below)
+		if (BufferFreer::On()) {
+			BufferFreer::Get().Push([device = m_graphics->device, buffer = m_buffer, memory = m_direct_memory,
+			                         owns = m_owns_direct_memory] {
+				device.destroyBuffer(buffer, nullptr);
+				if (owns) device.freeMemory(memory, nullptr);
+			});
+			return;
+		}
 		m_graphics->device.destroyBuffer(m_buffer, nullptr);
 		if (m_owns_direct_memory) m_graphics->device.freeMemory(m_direct_memory, nullptr);
 		return;
@@ -291,8 +363,18 @@ Buffer::~Buffer() {
 		// A command in the ring may still name this buffer (VMA does not go through the
 		// dispatcher's destroy functions).
 		CommandRecorder::DrainBeforeDestroy();
+		if (BufferFreer::On()) {
+			BufferFreer::Get().Push([allocator = m_graphics->allocator, buffer = m_buffer, allocation = m_allocation] {
+				vmaDestroyBuffer(allocator, buffer, allocation);
+			});
+			return;
+		}
 		vmaDestroyBuffer(m_graphics->allocator, m_buffer, m_allocation);
 	}
+}
+
+void FlushBufferFrees() {
+	if (BufferFreer::On()) BufferFreer::Get().Flush();
 }
 
 vk::DeviceAddress Buffer::BufferDeviceAddress() const noexcept {
