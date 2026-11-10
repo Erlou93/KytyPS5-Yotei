@@ -47,10 +47,13 @@ enum Part : uint32_t {
 	FindView,    // RebindImages: FindTextureReplay (the views)
 	DccClear,    // RebindImages: ApplyDccFastClear
 	TableReady,  // RebindImages: TableTexturesReady
+	FtFast,      // FindTextureReplay: the read section and the ready check (lock wait included)
+	FtFull,      // FindTextureReplay: FindTexture (the slow path)
+	FtTail,      // FindTextureReplay: the exclusive lock and the alias scan after it
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready", "ft_fast", "ft_full", "ft_tail"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {

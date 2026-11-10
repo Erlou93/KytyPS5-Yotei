@@ -32,6 +32,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "kernel/memory.h"
 
+#include <optional>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -3569,6 +3570,7 @@ vk::ImageView TextureCache::FindTextureReplay(ImageId id, const ImageDesc& desc)
 	}
 	vk::ImageView fast_view = nullptr;
 	{
+		const Common::SlowFrame::Scope slow_ft_fast(Common::SlowFrame::FtFast); // KYTY_TRACE_SLOW_FRAMES
 		const TcReadSection lock {m_lock}; // the LRU touch and the view (lock-free readers check neither)
 		auto*               image = m_slot_images.try_get(id);
 		const bool          ready = image != nullptr && !image->info.data.Empty() && TextureReplayReady(*image);
@@ -3581,7 +3583,11 @@ vk::ImageView TextureCache::FindTextureReplay(ImageId id, const ImageDesc& desc)
 		}
 	}
 	t_peek_slow++; // KYTY_CHECK_PEEK=2 (S2b): the full FindTexture
+	std::optional<Common::SlowFrame::Scope> slow_ft_full;
+	slow_ft_full.emplace(Common::SlowFrame::FtFull); // KYTY_TRACE_SLOW_FRAMES
 	const auto view = FindTexture(id, desc);
+	slow_ft_full.reset();
+	const Common::SlowFrame::Scope slow_ft_tail(Common::SlowFrame::FtTail); // KYTY_TRACE_SLOW_FRAMES
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
 	// Remember whether SyncExtentAliases has a source at this address (none: it stays a no-op while the epoch holds).
