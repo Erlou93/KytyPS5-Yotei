@@ -2850,6 +2850,22 @@ void ApplyNullFormattedShare(const ResourcePlan& program, const std::vector<uint
 	ApplyNullShareTo(program, kinds, shared.live, specialization, &shared);
 }
 
+void PeekNullFormattedShare(const ResourcePlan& program, const std::vector<uint8_t>& kinds,
+                            ResourceSpecialization& specialization) {
+	if (program.null_formatted_live == nullptr || kinds.empty()) return;
+	auto&            shared = *program.null_formatted_live;
+	std::scoped_lock lock(shared.mutex);
+	const auto&      live = shared.live;
+	for (size_t i = 0; i < kinds.size() && i < specialization.buffers.size(); i++) {
+		if (kinds[i] != 1u || i >= live.size() || live[i][0] == 0u) continue; // (a missing live entry is {0, 0})
+		auto& buffer              = specialization.buffers[i];
+		buffer.packed_stride      = (buffer.packed_stride & ~0x3fffu) | (1u << 31u) | 1u;
+		buffer.zero_stride_oob    = false;
+		buffer.descriptor_format  = static_cast<Prospero::BufferFormat>(live[i][0]);
+		buffer.descriptor_swizzle = live[i][1];
+	}
+}
+
 bool MaterializeResourcesAhead(const ResourcePlan& program, const SrtRuntime& runtime,
                                ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
                                ReadLog& log, AheadRefusal* refusal) {

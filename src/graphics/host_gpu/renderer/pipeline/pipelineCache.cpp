@@ -105,7 +105,7 @@ struct ResolveStats {
 } g_resolve_stats;
 // Project 15 S2d (KYTY_CHECK_PEEK=2, diagnostic): PeekAdopt's prediction against what Adopt did (execution thread).
 struct PeekAdoptStats {
-	uint64_t calls = 0, keep = 0, refind = 0, not_adoptable = 0, reads_changed = 0, bad = 0, injected = 0, detected = 0;
+	uint64_t calls = 0, keep = 0, refind = 0, compile = 0, not_adoptable = 0, reads_changed = 0, bad = 0, injected = 0, detected = 0;
 	uint64_t refind_failed = 0, refind_kept = 0;
 	std::array<uint64_t, 13> reasons {}, member_reasons {}; // PeekAdopt's reason (member: chunk-member draws)
 };
@@ -570,6 +570,16 @@ struct PipelineCache::ProgramCache {
 				if (!matches(permutations[index])) continue;
 				ahead_permutation.value.store(index, std::memory_order_relaxed);
 				return &permutations[index];
+			}
+			return nullptr;
+		}
+		// Project 15 S2d: FindPermutation<false>'s answer without its hint write (programs_mutex held shared).
+		[[nodiscard]] const Permutation* PeekPermutation(uint32_t push_data_cursor,
+		                                                 const ShaderRecompiler::IR::ResourceSpecialization& specialization) const {
+			for (const auto& candidate: permutations) {
+				if (candidate.program.bindings.PushStartMatches(push_data_cursor) && candidate.specialization == specialization) {
+					return &candidate;
+				}
 			}
 			return nullptr;
 		}
@@ -1227,20 +1237,38 @@ struct PipelineCache::ProgramCache {
 	// cursor through them as Adopt walks it), so the commit's only write is the null share. False: Adopt looks a
 	// permutation up again (in order). The share's own write (ApplyNullFormattedShare) is not read here: it changes the
 	// specialization, and Adopt looks up again exactly when a stage shares, which the kinds say without it.
-	// reason (diagnostic): 0 keep, 1 + stage * 3 + {0 no permutation found ahead, 1 null share, 2 push start differs}.
-	[[nodiscard]] static bool PeekAdopt(const ResolvedStages& results, uint32_t* reason = nullptr) {
+	// The permutation Adopt takes for each stage, found ahead (S2d after n3-s2d-refind.md): the resolve's when Adopt keeps
+	// it, else the one FindPermutation<false> finds for the specialization after the null share (read under the share
+	// lock, nothing written) and the push cursor. False: a stage needs a compile (Adopt returns false). flags
+	// (diagnostic, per stage 3 bits): no permutation ahead, a null share, the push start differs.
+	struct AdoptPeek {
+		std::array<const Permutation*, 4> permutations {};
+		uint32_t                          kept = 0, found = 0, flags = 0;
+	};
+	[[nodiscard]] bool PeekAdopt(const ResolvedStages& results, AdoptPeek& out) {
+		out             = {};
 		uint32_t cursor = results.push_start;
 		for (uint32_t i = 0; i < results.count; i++) {
 			const auto& r           = results.stages[i];
+			const auto& entry       = *static_cast<const SourceEntry*>(r.entry);
 			const auto* permutation = static_cast<const Permutation*>(r.permutation);
 			const bool  shared      = std::ranges::find(r.null_share_kinds, uint8_t {1}) != r.null_share_kinds.end();
-			if (permutation == nullptr || shared || !permutation->program.bindings.PushStartMatches(cursor)) {
-				if (reason != nullptr) *reason = 1u + std::min(i, 3u) * 3u + (permutation == nullptr ? 0u : shared ? 1u : 2u);
-				return false;
+			const bool  push_same   = permutation != nullptr && permutation->program.bindings.PushStartMatches(cursor);
+			out.flags |= ((permutation == nullptr ? 1u : 0u) | (shared ? 2u : 0u) | (permutation != nullptr && !push_same ? 4u : 0u))
+			             << (3u * std::min(i, 3u));
+			if (permutation == nullptr || shared || !push_same) {
+				auto specialization = r.specialization;
+				if (shared) ShaderRecompiler::IR::PeekNullFormattedShare(*r.plan, r.null_share_kinds, specialization);
+				std::shared_lock lock(programs_mutex);
+				permutation = entry.PeekPermutation(cursor, specialization);
+				if (permutation == nullptr) return false;
+				out.found++;
+			} else {
+				out.kept++;
 			}
+			out.permutations[std::min(i, 3u)] = permutation;
 			permutation->program.bindings.AdvancePushData(cursor);
 		}
-		if (reason != nullptr) *reason = 0;
 		return true;
 	}
 
@@ -2226,41 +2254,51 @@ bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 		g_resolve_stats.not_adopted.fetch_add(1, std::memory_order_relaxed);
 		return false;
 	}
-	uint32_t reason = 0;
-	bool     keep   = ProgramCache::PeekAdopt(results, &reason);
+	ProgramCache::AdoptPeek peek;
+	++t_translator;
+	const bool predicted = m_program_cache->PeekAdopt(results, peek);
+	--t_translator;
 	if (!ResolvedReadsHold(results)) {
 		st.reads_changed++;
 		g_resolve_stats.not_adopted.fetch_add(1, std::memory_order_relaxed);
 		return false;
 	}
-	(keep ? st.keep : st.refind)++;
-	st.reasons[reason]++;
-	if (t_peek_member == 1) st.member_reasons[reason]++;
-	const bool fault = keep && PeekAdoptFaultEvery() != 0 && st.keep % PeekAdoptFaultEvery() == 0;
-	if (fault) {
-		keep = false;
-		st.injected++;
+	(predicted ? (peek.found == 0 ? st.keep : st.refind) : st.compile)++;
+	for (uint32_t i = 0; i < std::min(results.count, 4u); i++) {
+		for (uint32_t bit = 0; bit < 3u; bit++) {
+			if ((peek.flags >> (3u * i + bit) & 1u) == 0) continue;
+			st.reasons[1u + 3u * i + bit]++;
+			if (t_peek_member == 1) st.member_reasons[1u + 3u * i + bit]++;
+		}
 	}
+	st.reasons[0] += peek.flags == 0 ? 1u : 0u;
+	if (t_peek_member == 1) st.member_reasons[0] += peek.flags == 0 ? 1u : 0u;
+	const bool     fault    = predicted && PeekAdoptFaultEvery() != 0 && (st.keep + st.refind) % PeekAdoptFaultEvery() == 0;
 	const uint32_t refinds0 = t_adopt_refinds;
 	const bool     adopted  = m_program_cache->Adopt(results);
-	const bool     looked   = t_adopt_refinds != refinds0;
-	if (!adopted) st.refind_failed++;
-	if (keep != !looked) {
-		if (fault) {
-			st.detected++;
-		} else if (keep) {
-			st.bad++; // predicted a keep, Adopt looked up again
+	if (adopted != predicted) {
+		st.bad++; // a compile predicted where Adopt found one, or the other way
+	} else if (adopted) {
+		bool same = true;
+		for (uint32_t i = 0; i < std::min(results.count, 4u); i++) {
+			const auto* expected = peek.permutations[i];
+			if (fault && i == 0) {
+				expected = nullptr;
+				st.injected++;
+			}
+			same = same && expected != nullptr && results.stages[i].out_stage->program == &expected->program;
 		}
-		if (!keep && !fault) st.refind_kept++; // PeekAdopt said "in order", Adopt looked nothing up
+		if (!same) (fault ? st.detected : st.bad)++;
 	}
+	if (t_adopt_refinds == refinds0 && peek.found != 0) st.refind_kept++; // (the peek looked up, Adopt did not)
 	(adopted ? g_resolve_stats.adopted : g_resolve_stats.not_adopted).fetch_add(1, std::memory_order_relaxed);
 	if ((st.calls & ((1u << 18u) - 1u)) == 0) {
 		std::fprintf(stderr,
-		             "PERF peek_adopt calls=%llu keep=%llu refind=%llu not_adoptable=%llu reads_changed=%llu refind_failed=%llu bad=%llu "
+		             "PERF peek_adopt calls=%llu keep=%llu predicted=%llu not_adoptable=%llu reads_changed=%llu compile=%llu bad=%llu "
 		             "fault[injected|detected]=%llu|%llu\n",
 		             static_cast<unsigned long long>(st.calls), static_cast<unsigned long long>(st.keep),
 		             static_cast<unsigned long long>(st.refind), static_cast<unsigned long long>(st.not_adoptable),
-		             static_cast<unsigned long long>(st.reads_changed), static_cast<unsigned long long>(st.refind_failed),
+		             static_cast<unsigned long long>(st.reads_changed), static_cast<unsigned long long>(st.compile),
 		             static_cast<unsigned long long>(st.bad), static_cast<unsigned long long>(st.injected),
 		             static_cast<unsigned long long>(st.detected));
 		const auto join = [](const auto& a) {
@@ -2269,7 +2307,7 @@ bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 			return out;
 		};
 		std::fprintf(stderr,
-		             "PERF peek_adopt_reasons[keep|s0:none,share,push|s1:..|s2:..|s3:..]=%s member=%s refind_kept=%llu\n",
+		             "PERF peek_adopt_flags[none_set|s0:none,share,push|s1:..|s2:..|s3:..]=%s member=%s found_kept=%llu\n",
 		             join(st.reasons).c_str(), join(st.member_reasons).c_str(), static_cast<unsigned long long>(st.refind_kept));
 	}
 	return adopted;

@@ -162,6 +162,10 @@ bool AheadReadMemory(void* userdata, uint64_t address, std::span<uint32_t> value
 // applies and updates the plan's shared last live specializations in draw order (GPU thread).
 void ApplyNullFormattedShare(const ResourcePlan& program, const std::vector<uint8_t>& kinds,
                              ResourceSpecialization& specialization);
+// Project 15 S2d: what ApplyNullFormattedShare does to `specialization` (the null buffers take the shared format),
+// without its writes (the live formats and the journal stay as they are). Under the plan's share lock.
+void PeekNullFormattedShare(const ResourcePlan& program, const std::vector<uint8_t>& kinds,
+                            ResourceSpecialization& specialization);
 // The null share journal: `journal` is
 // the precompile journal's last live {format, swizzle} of each buffer binding of the program ({0, 0}: none); its
 // formatted bindings' values are kept (=1 and =2) and, =1, taken as the bindings' last live values. `journal_multi`:
