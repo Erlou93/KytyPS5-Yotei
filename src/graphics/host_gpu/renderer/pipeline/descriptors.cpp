@@ -5272,8 +5272,11 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				ClearImageBinding(*old_image, images[i].image_id);
 			}
 			t_peek_slow++; // KYTY_CHECK_PEEK=2 (S2b): the full image search
-			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
-			                           ImageCompareFuncs(program, snapshot, i));
+			{
+				const Common::SlowFrame::Scope slow_resolve(Common::SlowFrame::ResolveTex); // KYTY_TRACE_SLOW_FRAMES
+				images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
+				                           ImageCompareFuncs(program, snapshot, i));
+			}
 			if (i < prepared.image_source.size()) prepared.image_source[i] = 0u;
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
@@ -5281,6 +5284,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		auto& binding = images[i];
 		binding.mip_views.clear();
 		const auto& resource = program.info.images[i];
+		std::optional<Common::SlowFrame::Scope> slow_view;
+		slow_view.emplace(Common::SlowFrame::FindView); // KYTY_TRACE_SLOW_FRAMES
 		if (resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::Dynamic) {
 			EXIT_IF(resource.mip_count == 0u ||
 			        resource.mip_count != binding.desc.view_info.level_count);
@@ -5297,12 +5302,14 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		} else {
 			binding.image_view = texture_cache.FindTextureReplay(binding.image_id, binding.desc);
 		}
+		slow_view.reset();
 		auto&      image   = texture_cache.GetImage(binding.image_id);
 		const bool storage = binding.desc.type == TextureCache::BindingType::Storage;
 		image.usage.storage |= storage;
 		image.usage.texture |= !storage;
 		// KYTY_WORKAROUND_DCC_FAST_CLEAR: after the view's contents are final for this use.
 		if (TextureCache::DccFastClearEnabled()) {
+			const Common::SlowFrame::Scope slow_dcc(Common::SlowFrame::DccClear); // KYTY_TRACE_SLOW_FRAMES
 			texture_cache.ApplyDccFastClear(m_context.GetCommandScheduler().Current(), binding.image_id, binding.desc);
 		}
 	};
@@ -5312,6 +5319,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	auto* table_hit = static_cast<TableSet*>(prepared.table_hit);
 	bool  table_ok  = false;
 	if (table_hit != nullptr) {
+		const Common::SlowFrame::Scope slow_table(Common::SlowFrame::TableReady); // KYTY_TRACE_SLOW_FRAMES
 		table_ok = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == prepared.table_epoch &&
 		           texture_cache.TableTexturesReady(table_hit->member_ids);
 		(table_ok ? TableStats().rebind_hits : TableStats().rebind_fail)++;

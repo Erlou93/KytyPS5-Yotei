@@ -43,10 +43,14 @@ enum Part : uint32_t {
 	UploadImage, // TextureCache::UploadImage (guest bytes to the image)
 	FindImage,   // TextureCache::FindImage
 	RefreshImage, // TextureCache::RefreshImage
+	ResolveTex,  // RebindImages: ResolveTexture (the full image search)
+	FindView,    // RebindImages: FindTextureReplay (the views)
+	DccClear,    // RebindImages: ApplyDccFastClear
+	TableReady,  // RebindImages: TableTexturesReady
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {
