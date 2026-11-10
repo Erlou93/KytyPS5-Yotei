@@ -3823,15 +3823,21 @@ void OneByteReport() {
 }
 // One check: the answer (id, description) against today's full resolve, run with the stencil-tail flag cleared.
 template <typename Resolve>
-void OneByteCheck(ImageId id, const TextureCache::ImageDesc& desc, Resolve&& resolve, bool set) {
+void OneByteCheck(ImageId id, const TextureCache::ImageDesc& desc, Resolve&& resolve, bool set, bool fault = false) {
 	auto& s = g_one_byte;
-	(set ? s.set_checked : s.checked)++;
+	if (fault) {
+		s.injected++; // a real reader passed through the check as if the replay had answered it
+	} else {
+		(set ? s.set_checked : s.checked)++;
+	}
 	t_stencil_tail   = false;
 	const auto full  = resolve();
 	(void)TextureCache::TakeLastFindImagePlain();
 	const bool same  = full.image_id == id && full.desc.type == desc.type && full.desc.view_info == desc.view_info &&
 	                  full.desc.info.data.address == desc.info.data.address && full.desc.info.data.size == desc.info.data.size;
-	if (!same || t_stencil_tail) {
+	if (fault) {
+		if (!same || t_stencil_tail) s.detected++;
+	} else if (!same || t_stencil_tail) {
 		s.bad++;
 		if (s.logged++ < 20u) {
 			std::fprintf(stderr, "CHECK_ONE_BYTE bad addr=%llx same=%d tail=%d set=%d\n",
@@ -3883,8 +3889,9 @@ static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const
 		auto& s = g_one_byte;
 		s.readers++;
 		if (OneByteFaultEvery() != 0 && s.readers % OneByteFaultEvery() == 0) {
-			s.injected++; // the reader passed through the check as if the replay had answered: the tail flag must catch it
-			s.detected++;
+			// The reader passed through the check as if the replay had answered it: the full resolve's tail must catch it.
+			OneByteCheck(binding.image_id, binding.desc, resolve, false, true);
+			t_stencil_tail = true; // (this resolve's own tail ran; the flag stays as it was for the code below)
 		}
 	}
 	memo.why           = binding.desc.type != TextureCache::BindingType::Texture ? 1u
