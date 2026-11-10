@@ -3187,6 +3187,7 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 							d.klass      = BufferPeek::Direct;
 							d.id         = range.id;
 							d.offset     = vaddr - range.start; // (the direct buffer starts at the range's start)
+							if (const auto* direct = m_slot_buffers.try_get(range.id); direct != nullptr) d.handle = direct->Handle(); // (P1)
 							d.direct_gen = gen0;
 						} else {
 							d.klass = BufferPeek::Upload; // the range grows or activates: in order
@@ -3213,6 +3214,7 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 					p.klass      = BufferPeek::Direct;
 					p.id         = range.id;
 					p.offset     = m_slot_buffers[range.id].Offset(vaddr);
+					p.handle     = m_slot_buffers[range.id].Handle(); // (P1)
 					p.direct_gen = g_direct_generation.load(std::memory_order_acquire);
 				} else {
 					p.klass = BufferPeek::Upload; // the range grows or activates: in order
@@ -3256,6 +3258,7 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 		p.klass  = BufferPeek::Ready;
 		p.id     = id;
 		p.offset = m_slot_buffers[id].Offset(vaddr);
+		p.handle = m_slot_buffers[id].Handle(); // (P1)
 	}();
 	--t_translator;
 	return p;
@@ -3315,6 +3318,41 @@ void PlanBufferReport() {
 	             static_cast<unsigned long long>(s.race_own_work));
 }
 } // namespace
+
+PlanBuffer* BufferCache::PlanStageEntry(const void* program, uint32_t resource) {
+	if (g_plan_buffers == nullptr) return nullptr;
+	auto&        entries = *g_plan_buffers;
+	const size_t n       = entries.size();
+	for (size_t k = 0; k < n; k++) {
+		const size_t i     = (g_plan_cursor + k) % n;
+		auto&        entry = entries[i];
+		if (!entry.used && entry.kind == 0 && entry.program == program && entry.resource == resource) {
+			g_plan_cursor = i + 1;
+			return &entry;
+		}
+	}
+	return nullptr;
+}
+
+bool BufferCache::PlanBindingsOn() {
+	static const uint32_t fixed = [] {
+		const char* env = std::getenv("KYTY_PERF_PLAN_BINDINGS");
+		return env != nullptr && env[0] == '1' ? 1u : 0u;
+	}();
+	return Common::LiveAb::Gate(Common::LiveAb::Switch::PlanBindings, fixed) != 0u;
+}
+
+bool BufferCache::PlanAnswerBinding(PlanBuffer& entry, uint64_t vaddr, uint64_t size) {
+	const ChunkLead::FloorTimer floor_answer(ChunkLead::FpPlanAnswer); // KYTY_TRACE_PEEK_CENSUS
+	const bool direct = entry.peek.klass == BufferPeek::Direct && DirectMode() == m_direct_mode_seen;
+	if (!(entry.peek.klass == BufferPeek::Ready || direct) || !PeekProofHolds(entry.peek, vaddr, size)) return false;
+	entry.used = true;
+	if (!direct) TouchBuffer(m_slot_buffers[entry.peek.id]);
+	g_ahead.buffers_answered++;
+	ChunkLead::t_floor_answers++;
+	if (ChunkLead::t_floor_bucket >= 0 && ChunkLead::B3On()) ChunkLead::NoteB3(entry.kind, 0);
+	return true;
+}
 
 void BufferCache::SetPlanBuffers(std::vector<PlanBuffer>* entries) {
 	g_plan_buffers = entries;

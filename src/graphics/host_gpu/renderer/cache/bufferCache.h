@@ -142,6 +142,7 @@ public:
 		bool     bda     = false; // ObtainBdaRange's peek: no image in the proof
 		bool     helper_direct = false; // way B W0: a helper's peek of a range overlapping a direct range (Upload, in order)
 		uint64_t direct_gen    = 0;     // W2.2: a Direct answer's generation of the direct ranges (g_direct_generation)
+		vk::Buffer handle {};           // P1: the buffer's handle (Ready, Direct)
 	};
 	// bda: ObtainBdaRange's peek (no direct ranges, no stream copy, no image copy).
 	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint,
@@ -169,6 +170,13 @@ public:
 	// its key is checked against it (the entry's proof, today's path quiet and with the same buffer and offset).
 	static void SetPlanBuffers(std::vector<PlanBuffer>* entries);
 	[[nodiscard]] static bool PlanBufferCheck();
+	// Project 15 way B P1: the running draw's plan entry of a stage's read-only buffer resource (the first unused one of that
+	// program and resource from the shared cursor; null without a plan); KYTY_PERF_PLAN_BINDINGS (live A/B test switch).
+	[[nodiscard]] static PlanBuffer* PlanStageEntry(const void* program, uint32_t resource);
+	[[nodiscard]] static bool        PlanBindingsOn();
+	// P1: the plan's answer for a binding (the same condition and work as ObtainBuffer's plan branch: the proof, Direct's
+	// mode, the touch of a Ready buffer); true when it answered.
+	[[nodiscard]] bool PlanAnswerBinding(PlanBuffer& entry, uint64_t vaddr, uint64_t size);
 	// Project 15 N4.3/N5: a draw with a plan is committed from it (its pipeline, table sets and buffer entries: an
 	// acquisition whose entry is Ready and whose proof holds only touches the buffer). Only path since 10.11 (checkpoint 2:
 	// +2.8% fps, the execution thread -1.6 ms/frame); the checks that compare against today's way turn it off.
@@ -1047,6 +1055,13 @@ struct PlanBuffer {
 	uint8_t                 kind     = 0;
 	uint32_t                distance = 0;
 	BufferCache::BufferPeek peek;
+	// P1 (kind 0): the stage's program and resource, and the binding computed on the helper (ready: the storage range's
+	// limits hold) - StorageBufferRange's aligned offset and range, the offset byte, the record stride
+	const void* program  = nullptr;
+	uint32_t    resource = UINT32_MAX;
+	bool        ready    = false;
+	uint64_t    bind_offset = 0, bind_range = 0;
+	uint32_t    memory_offset = 0, stride = 0;
 };
 
 } // namespace Libs::Graphics

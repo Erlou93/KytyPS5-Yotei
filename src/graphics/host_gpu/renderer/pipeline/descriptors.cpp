@@ -4250,6 +4250,26 @@ void RenderExecutor::PeekStageBuffers(const ShaderRecompiler::IR::CompiledShader
 		entry.kind       = 0;
 		entry.distance   = distance;
 		entry.peek       = cache.PeekBuffer(ahead->address, ahead->size, false, texel, ahead->id);
+		// P1: the binding RebindBuffers would compute (StorageBufferRange without its EXIT: a limit off - not ready, today's
+		// path meets it - and the record stride)
+		entry.program  = &program;
+		entry.resource = resource;
+		if ((entry.peek.klass == BufferCache::BufferPeek::Ready || entry.peek.klass == BufferCache::BufferPeek::Direct) && entry.peek.handle) {
+			const auto& graphics       = m_context.GetGraphics();
+			const auto  alignment      = graphics.StorageMinAlignment();
+			const auto  max_range      = graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange;
+			const auto  offset         = entry.peek.offset;
+			const auto  aligned_offset = Common::AlignDown(offset, alignment);
+			const auto  adjustment     = offset - aligned_offset;
+			if (entry.size <= max_range && adjustment < 256 && entry.size <= max_range - adjustment) {
+				const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
+				entry.ready           = true;
+				entry.bind_offset     = aligned_offset;
+				entry.bind_range      = entry.size + adjustment;
+				entry.memory_offset   = static_cast<uint32_t>(adjustment);
+				entry.stride          = descriptor.Type() == 0u ? descriptor.Stride() : 0u;
+			}
+		}
 	}
 }
 
@@ -4843,6 +4863,56 @@ static void CollectAppendBindings(const PreparedBindings& prepared, std::vector<
                                   std::vector<BufferCache::AppendBinding>*             bindings,
                                   std::vector<std::pair<uint64_t, uint64_t>>*           unqualified);
 
+// Project 15 way B P1.1 (KYTY_CHECK_PLAN_BUFFERS=2): the helper's binding against today's (handle, aligned offset, range,
+// offset byte, record stride), when the entry's proof still holds after today's path; every 997th comparison with a copy's
+// offset changed by 16 (detected = injected).
+static void PlanBindingCheck(const PlanBuffer& entry, const vk::DescriptorBufferInfo& today, uint32_t today_offset,
+                             const ShaderRecompiler::IR::ResourceSnapshot& snapshot, uint32_t resource, bool stride_word) {
+	struct Stats {
+		uint64_t compared = 0, bad = 0, race = 0, injected = 0, detected = 0;
+		uint32_t logged   = 0;
+		std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+	};
+	static Stats s; // execution thread
+	if (!BufferCache::PeekProofHolds(entry.peek, entry.vaddr, entry.size)) {
+		s.race++;
+	} else {
+		s.compared++;
+		auto copy = entry;
+		const bool fault = s.compared % 997u == 0u;
+		if (fault) {
+			copy.bind_offset += 16u;
+			s.injected++;
+		}
+		const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
+		const uint32_t stride = descriptor.Type() == 0u ? descriptor.Stride() : 0u;
+		const bool same = copy.peek.handle == today.buffer && copy.bind_offset == today.offset && copy.bind_range == today.range &&
+		                  copy.memory_offset == today_offset &&
+		                  (!stride_word || copy.stride == stride);
+		if (!same) {
+			if (fault) {
+				s.detected++;
+			} else {
+				s.bad++;
+				if (s.logged++ < 16u) {
+					std::fprintf(stderr, "CHECK_PLAN_BINDING bad addr=%llx size=%llx offset=%llu/%llu range=%llu/%llu byte=%u/%u\n",
+					             static_cast<unsigned long long>(entry.vaddr), static_cast<unsigned long long>(entry.size),
+					             static_cast<unsigned long long>(entry.bind_offset), static_cast<unsigned long long>(today.offset),
+					             static_cast<unsigned long long>(entry.bind_range), static_cast<unsigned long long>(today.range),
+					             entry.memory_offset, today_offset);
+				}
+			}
+		}
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5)) return;
+	s.window = now;
+	std::fprintf(stderr, "PERF plan_binding_check compared=%llu bad=%llu race=%llu fault[injected|detected]=%llu|%llu\n",
+	             static_cast<unsigned long long>(s.compared), static_cast<unsigned long long>(s.bad),
+	             static_cast<unsigned long long>(s.race), static_cast<unsigned long long>(s.injected),
+	             static_cast<unsigned long long>(s.detected));
+}
+
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
@@ -5019,7 +5089,26 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			const RingCensus::BindingScope census_scope(&census_binding);
 			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
 		} else {
+			// Project 15 way B P1.1: a read-only binding with a ready plan entry of the same source, whose proof holds, takes
+			// the helper's binding (KYTY_PERF_PLAN_BINDINGS; with KYTY_CHECK_PLAN_BUFFERS=2 today's binding is compared).
+			const bool  check      = BufferCache::PlanBufferCheck();
+			const auto& source     = prepared.buffer_sources[index];
+			PlanBuffer* plan_entry = !buffer.written && (check || BufferCache::PlanBindingsOn())
+			                             ? BufferCache::PlanStageEntry(&program, resource)
+			                             : nullptr;
+			const bool  usable = plan_entry != nullptr && plan_entry->ready && plan_entry->vaddr == source.address &&
+			                    plan_entry->size == source.size && source.address != 0 && source.size != 0;
+			if (usable && !check && m_context.GetBufferCache().PlanAnswerBinding(*plan_entry, source.address, source.size)) {
+				prepared.buffers[index] = vk::DescriptorBufferInfo {plan_entry->peek.handle, plan_entry->bind_offset, plan_entry->bind_range};
+				pack_memory_offset(index, plan_entry->memory_offset);
+				if (layout.memory_stride_dword != ShaderRecompiler::IR::PushData::NoStart) {
+					prepared.shader_data[layout.memory_stride_dword + index] = plan_entry->stride;
+				}
+				continue;
+			}
 			prepared.buffers[index] = NativeStorageBuffer(m_context, prepared.buffer_sources[index], buffer, buffer_offset);
+			if (check && usable) PlanBindingCheck(*plan_entry, prepared.buffers[index], buffer_offset, snapshot, resource,
+			                                           layout.memory_stride_dword != ShaderRecompiler::IR::PushData::NoStart);
 		}
 		pack_memory_offset(index, buffer_offset);
 		if (layout.memory_stride_dword != ShaderRecompiler::IR::PushData::NoStart) {

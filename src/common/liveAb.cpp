@@ -51,6 +51,9 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
+    // Project 15 way B P1 (test switch): a read-only buffer binding with a ready plan entry whose proof holds takes the
+    // binding the helper computed (handle, aligned offset, range, offset byte, record stride) instead of RebindBuffers'.
+    {Switch::PlanBindings, "KYTY_PERF_PLAN_BINDINGS", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 
