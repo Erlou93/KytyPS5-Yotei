@@ -3223,7 +3223,7 @@ void PlanBufferReport() {
 	auto&    s = g_plan_buffer_stats;
 	uint64_t n = 0;
 	for (const auto c: s.compared) n += c;
-	if ((n & ((1u << 20u) - 1u)) != 0) return;
+	if ((n & ((1u << 18u) - 1u)) != 0) return;
 	const auto join = [](const auto& a) {
 		std::string out;
 		for (size_t i = 0; i < a.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);
