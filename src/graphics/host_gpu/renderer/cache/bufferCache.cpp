@@ -3361,7 +3361,8 @@ std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_
 		offset += 16u;
 		s.injected++;
 	}
-	const bool same = entry.peek.id && result.first == &m_slot_buffers[entry.peek.id] && result.second == offset && quiet;
+	// (W2.2 review: try_get - today's path may have deleted the entry's buffer, e.g. a direct range ended by a mode switch)
+	const bool same = entry.peek.id && result.first == m_slot_buffers.try_get(entry.peek.id) && result.second == offset && quiet;
 	if (!same) {
 		if (fault) {
 			s.detected++;
@@ -3415,7 +3416,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 				               : k == BufferPeek::Upload      ? 3
 				               : k == BufferPeek::Stream      ? 4
 				               : k == BufferPeek::Image       ? 5
-				               : k != BufferPeek::Ready       ? 6
+				               : k != BufferPeek::Ready && k != BufferPeek::Direct ? 6 // (W2.2: a Direct entry's failed proof goes below)
 				                                              : 6 + static_cast<int>(std::min<uint32_t>(PeekProofFail(entry->peek, vaddr, size), 3u));
 			}
 			ChunkLead::NoteB3(entry != nullptr ? entry->kind : 6u, reason);
