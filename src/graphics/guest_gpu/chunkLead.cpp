@@ -474,9 +474,9 @@ void NoteFloor(int pass) {
 		const auto  us = [&](uint32_t i) { return n != 0 ? static_cast<double>(t[i]) / rate / 1e3 / static_cast<double>(n) : 0.0; };
 		std::fprintf(stderr,
 		             "PERF commit_floor pass=\"%s\" draws/frame=%.0f us/draw total=%.2f execute=%.2f commit=%.2f targets=%.2f adopt=%.2f "
-		             "bindless=%.2f bda=%.2f pipeline=%.2f\n",
+		             "bindless=%.2f bda=%.2f pipeline=%.2f build=%.2f\n",
 		             names[static_cast<size_t>(p)].c_str(), static_cast<double>(n) / frames, us(FpTotal), us(FpExecute), us(FpCommit),
-		             us(FpTargets), us(FpAdopt), us(FpBindless), us(FpBda), us(FpPipeline));
+		             us(FpTargets), us(FpAdopt), us(FpBindless), us(FpBda), us(FpPipeline), us(FpBuild));
 	}
 	s.ticks        = {};
 	s.draws        = {};

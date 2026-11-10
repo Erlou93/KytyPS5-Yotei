@@ -2429,6 +2429,13 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKey(
 	                                   topology, primitive_restart_enable, programs, false);
 }
 
+PipelineCache::Pipeline* PipelineCache::TakePlannedPipeline(Pipeline* planned) {
+	PipelineHousekeeping();
+	if (planned == nullptr || planned->pipeline == nullptr) return nullptr;
+	planned->last_used = static_cast<uint32_t>(DebugPresentCount().load());
+	return planned;
+}
+
 std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> PipelineCache::FindGraphicsPipeline(
     const GraphicsPipelineKey& key) const {
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {

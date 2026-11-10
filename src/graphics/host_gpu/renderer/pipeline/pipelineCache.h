@@ -328,6 +328,9 @@ public:
 	// entries are never removed); the other classes go in order (today's GetGraphicsPipeline[Async]).
 	enum class PipelineFind : uint8_t { Found, Evicted, PendingDone, Pending, Missing, Count };
 	[[nodiscard]] std::pair<Pipeline*, PipelineFind> FindGraphicsPipeline(const GraphicsPipelineKey& key) const;
+	// N4.3: a plan's pipeline taken as GetGraphicsPipeline[Async] takes a found one (housekeeping, last_used); null when its
+	// objects were given back (today's lookup recreates them).
+	[[nodiscard]] Pipeline* TakePlannedPipeline(Pipeline* planned);
 	[[nodiscard]] size_t GraphicsPipelineCount() const { return m_graphics_pipelines.size() + m_table_pending.size(); }
 
 private:

@@ -3244,6 +3244,16 @@ void BufferCache::SetPlanBuffers(std::vector<PlanBuffer>* entries) {
 	g_plan_buffers = entries;
 }
 
+bool BufferCache::DrawPlansOn() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_PERF_DRAW_PLANS");
+		const bool  m   = env != nullptr && env[0] == '1';
+		if (m) std::fprintf(stderr, "PERF_DRAW_PLANS=1: draws with a plan are committed from it\n");
+		return m;
+	}();
+	return on;
+}
+
 bool BufferCache::PlanBufferCheck() {
 	static const bool on = [] {
 		const char* env = std::getenv("KYTY_CHECK_PLAN_BUFFERS");
@@ -3307,6 +3317,18 @@ std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
                                                        BufferId id, bool image_source) {
+	if (DrawPlansOn() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
+		// N4.3: the plan's answer - what today's path does for a clean, registered range with no image at its start: the touch.
+		auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false);
+		if (entry != nullptr && entry->peek.klass == BufferPeek::Ready && PeekProofHolds(entry->peek, vaddr, size)) {
+			entry->used  = true;
+			auto& buffer = m_slot_buffers[entry->peek.id];
+			TouchBuffer(buffer);
+			g_ahead.buffers_answered++;
+			return {&buffer, entry->peek.offset};
+		}
+		g_ahead.buffers_today++;
+	}
 	if (PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
 		if (auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false); entry != nullptr) {
 			return PlanChecked(*entry, vaddr, size,

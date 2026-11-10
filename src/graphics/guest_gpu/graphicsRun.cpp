@@ -994,7 +994,8 @@ void GuestGpu::ExecutionThread() {
 			const char* oracle = std::getenv("KYTY_CHECK_CHUNKS");
 			const char* plan   = std::getenv("KYTY_CHECK_PLAN_BUFFERS");
 			return (env != nullptr && env[0] == '2') || (oracle != nullptr && oracle[0] == '2') || // N4.2a: the plans too
-			       (plan != nullptr && plan[0] == '2');                                             // N4.2b
+			       (plan != nullptr && plan[0] == '2') ||                                           // N4.2b
+			       BufferCache::DrawPlansOn();                                                       // N4.3
 		}();
 		if (plan_census || peek_ahead) {
 			struct PlanCensus {
@@ -1062,8 +1063,18 @@ void GuestGpu::ExecutionThread() {
 							}
 						};
 						g_ahead.opened++;
-						peek_one(*operation, 0);
-						for (uint32_t i = 1; i < k; i++) peek_one(*m_resolved.PeekAt(i - 1u), i);
+						{
+							// KYTY_TRACE_PEEK_CENSUS: the plans' build, counted to the opening draw (a member)
+							const bool floor_was  = ChunkLead::t_floor_on;
+							ChunkLead::t_floor_on = ChunkLead::PeekCensusOn();
+							struct FloorRestore {
+								bool was;
+								~FloorRestore() { ChunkLead::t_floor_on = was; }
+							} const floor_restore {floor_was};
+							const ChunkLead::FloorTimer build_timer(ChunkLead::FpBuild);
+							peek_one(*operation, 0);
+							for (uint32_t i = 1; i < k; i++) peek_one(*m_resolved.PeekAt(i - 1u), i);
+						}
 						if ((g_ahead.opened & ((1u << 15u) - 1u)) == 0) {
 							const auto& a    = g_ahead;
 							const auto  join = [](const auto& v) {
@@ -1093,11 +1104,14 @@ void GuestGpu::ExecutionThread() {
 							             static_cast<unsigned long long>(a.i_injected), static_cast<unsigned long long>(a.i_detected));
 							std::fprintf(stderr,
 							             "PERF plan_oracle plan_draws=%llu no_plan=%llu rejected=%llu pipeline_bad=%llu set_hint=%llu "
-							             "set_hint_missed=%llu images_moved_any=%s images_stale_any=%s\n",
+							             "set_hint_missed=%llu images_moved_any=%s images_stale_any=%s used_draws=%llu used_pipeline=%llu "
+							             "buffers[answered|today]=%llu|%llu\n",
 							             static_cast<unsigned long long>(a.plan_draws), static_cast<unsigned long long>(a.no_plan),
 							             static_cast<unsigned long long>(a.rejected), static_cast<unsigned long long>(a.pipeline_bad),
 							             static_cast<unsigned long long>(a.set_hint), static_cast<unsigned long long>(a.set_hint_missed),
-							             join(a.i_moved_any).c_str(), join(a.i_stale_any).c_str());
+							             join(a.i_moved_any).c_str(), join(a.i_stale_any).c_str(), static_cast<unsigned long long>(a.used_draws),
+							             static_cast<unsigned long long>(a.used_pipeline), static_cast<unsigned long long>(a.buffers_answered),
+							             static_cast<unsigned long long>(a.buffers_today));
 						}
 					}
 					const uint32_t bucket = k == 1u ? 0u : k < 16u ? 1u : k < 64u ? 2u : k < 128u ? 3u : 4u;

@@ -2565,7 +2565,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	};
 	// A draw of today's programs whose pipeline is not created yet is not issued (StageWritesMemory, above).
 	PipelineCache::Pipeline* async_pipeline = nullptr;
-	if (DrawWritesMemory(state)) {
+	// N4.3 (KYTY_PERF_DRAW_PLANS=1): a plan with programs adopted as predicted takes its pipeline.
+	const bool use_plan = BufferCache::DrawPlansOn() && PlanPresent() && PlanProgramsHold();
+	if (use_plan) {
+		g_ahead.used_draws++;
+		async_pipeline = m_context.GetPipelineCache().TakePlannedPipeline(PlanPipeline());
+		if (async_pipeline != nullptr) g_ahead.used_pipeline++;
+	}
+	if (async_pipeline != nullptr) {
+		// (taken from the plan)
+	} else if (DrawWritesMemory(state)) {
 		NoteAsyncDraw(false);
 	} else {
 		bool failed    = false; // (a worker could not create it: today's creation on this thread)
@@ -2667,8 +2676,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		~PlanBuffersScope() {
 			if (on) BufferCache::SetPlanBuffers(nullptr);
 		}
-	} const plan_buffers_scope {BufferCache::PlanBufferCheck()};
+	} const plan_buffers_scope {BufferCache::PlanBufferCheck() || use_plan};
 	if (plan_buffers_scope.on) PlanBuffersBegin();
+	m_plan_set_version = 0;
 	// The binding preparation.
 	{
 		const uint32_t long_us = LongPrepThresholdUs(); // KYTY_TRACE_LONG_PREP
@@ -2679,13 +2689,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		{
 			for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+				m_plan_set_version = use_plan ? PlanSetVersion(state.vertex_info[i].stage.program) : 0u; // N4.3
 				PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
+				m_plan_set_version = 0;
 				plan.descriptor_stages[plan.stage_count++] = &bindings.vertex[i];
 			}
 			if (long_us != 0) marks[1] = std::chrono::steady_clock::now();
 			if (state.ps_active) {
 				if (!bindings.pixel) bindings.pixel.emplace();
+				m_plan_set_version = use_plan ? PlanSetVersion(state.ps_input_info.stage.program) : 0u; // N4.3
 				PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
+				m_plan_set_version = 0;
 				plan.descriptor_stages[plan.stage_count++] = &*bindings.pixel;
 			}
 			if (long_us != 0) marks[2] = std::chrono::steady_clock::now();

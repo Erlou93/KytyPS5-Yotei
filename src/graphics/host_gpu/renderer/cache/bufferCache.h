@@ -157,6 +157,9 @@ public:
 	// its key is checked against it (the entry's proof, today's path quiet and with the same buffer and offset).
 	static void SetPlanBuffers(std::vector<PlanBuffer>* entries);
 	[[nodiscard]] static bool PlanBufferCheck();
+	// N4.3: KYTY_PERF_DRAW_PLANS=1 (test switch): a draw with a plan is committed from it (its pipeline, table sets and
+	// buffer entries: an acquisition whose entry is Ready and whose proof holds only touches the buffer).
+	[[nodiscard]] static bool DrawPlansOn();
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferPath(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
 	                                                            BufferId id, bool image_source);
 	// KYTY_CHECK_PEEK=2: ObtainBufferPath's work that a Ready peek promised away (uploads, stream copies, image syncs).
