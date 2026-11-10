@@ -138,8 +138,6 @@ private:
 	// Project 15 N2.2: the resolve helper (KYTY_PERF_RESOLVE_HELPERS=1 or KYTY_CHECK_RESOLVE=2) and the execution
 	// thread's claim of an operation's resolution before it executes (waits for a running one, steals a pending one).
 	void              ResolveHelperThread(uint32_t index);
-	// Project 15 N5.2: KYTY_PERF_RESOLVE_HELPERS=2 (test switch): two resolve helpers, the tasks dealt in turns of 8.
-	[[nodiscard]] static uint32_t ResolveHelpers();
 	// busy(context, true) before a wait for the helper, (context, false) after it: the caller's work scopes.
 	void              ClaimResolved(GpuOperation& operation, void (*busy)(void* context, bool waiting), void* busy_context);
 	// Execution thread: runs the queued commands, then lets the blocked queues try again.
