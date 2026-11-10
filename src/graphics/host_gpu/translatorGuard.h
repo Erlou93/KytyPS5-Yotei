@@ -44,6 +44,11 @@ struct AheadStats {
 	uint64_t k_compared = 0, k_bad = 0, k_unchecked = 0, k_find_diff = 0, k_injected = 0, k_detected = 0;
 	uint64_t i_stages = 0, i_compared = 0, i_bad = 0, i_moved = 0, i_stale = 0, i_lost = 0, i_injected = 0, i_detected = 0;
 	std::array<uint64_t, 4> p_by_distance {}, i_moved_by_distance {}, i_compared_by_distance {};
+	// n4-2-doprecyzowanie.md 2: the image registry moved / today's path took a slow path for an answered slot, whether or
+	// not the answer differed
+	std::array<uint64_t, 4> i_moved_any {}, i_stale_any {};
+	// N4.2a (KYTY_CHECK_CHUNKS=2): the oracle's first preparation from the plan
+	uint64_t plan_draws = 0, no_plan = 0, rejected = 0, pipeline_bad = 0, set_hint = 0, set_hint_missed = 0;
 };
 inline AheadStats g_ahead;
 inline uint32_t   AheadBucket(uint32_t distance) {

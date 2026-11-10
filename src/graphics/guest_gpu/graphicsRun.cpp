@@ -990,8 +990,9 @@ void GuestGpu::ExecutionThread() {
 		static const bool plan_census = std::getenv("KYTY_TRACE_CHUNK_PLAN") != nullptr;
 		// KYTY_CHECK_PEEK=2 (project 15 N4.1): the opening also peeks every draw of the chunk ahead (PeekAhead).
 		static const bool peek_ahead = [] {
-			const char* env = std::getenv("KYTY_CHECK_PEEK");
-			return env != nullptr && env[0] == '2';
+			const char* env    = std::getenv("KYTY_CHECK_PEEK");
+			const char* oracle = std::getenv("KYTY_CHECK_CHUNKS");
+			return (env != nullptr && env[0] == '2') || (oracle != nullptr && oracle[0] == '2'); // N4.2a: the plans too
 		}();
 		if (plan_census || peek_ahead) {
 			struct PlanCensus {
@@ -1087,6 +1088,13 @@ void GuestGpu::ExecutionThread() {
 							             static_cast<unsigned long long>(a.i_stale), static_cast<unsigned long long>(a.i_lost),
 							             join(a.i_compared_by_distance).c_str(), join(a.i_moved_by_distance).c_str(),
 							             static_cast<unsigned long long>(a.i_injected), static_cast<unsigned long long>(a.i_detected));
+							std::fprintf(stderr,
+							             "PERF plan_oracle plan_draws=%llu no_plan=%llu rejected=%llu pipeline_bad=%llu set_hint=%llu "
+							             "set_hint_missed=%llu images_moved_any=%s images_stale_any=%s\n",
+							             static_cast<unsigned long long>(a.plan_draws), static_cast<unsigned long long>(a.no_plan),
+							             static_cast<unsigned long long>(a.rejected), static_cast<unsigned long long>(a.pipeline_bad),
+							             static_cast<unsigned long long>(a.set_hint), static_cast<unsigned long long>(a.set_hint_missed),
+							             join(a.i_moved_any).c_str(), join(a.i_stale_any).c_str());
 						}
 					}
 					const uint32_t bucket = k == 1u ? 0u : k < 16u ? 1u : k < 64u ? 2u : k < 128u ? 3u : 4u;

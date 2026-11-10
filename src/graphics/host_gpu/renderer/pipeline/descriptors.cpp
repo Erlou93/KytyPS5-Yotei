@@ -4372,6 +4372,7 @@ bool RenderExecutor::PeekStageImages(const ShaderRecompiler::IR::CompiledShaderI
 		st.slots[klass]++;
 	}
 	peek.samplers_answered = set != nullptr || program.info.samplers.empty();
+	peek.set_version       = set != nullptr ? set->version : 0u;
 	if (set != nullptr) peek.samplers = set->samplers;
 	cache.UnlockPeekRead();
 	--t_translator;
@@ -4549,7 +4550,18 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 		TableStats().stages++;
 		table_list = &TableSetListCached(&program);
 		auto&        list  = *table_list;
-		const size_t found = TableSetFindHashed(program, snapshot, m_soft_texture_resolve, list);
+		// N4.2a: a plan names its set by version (unique per store; equal words while it lives), found without the hash.
+		size_t found = list.size();
+		if (m_plan_set_version != 0) {
+			for (size_t k = 0; k < list.size(); k++) {
+				if (list[k]->version == m_plan_set_version) {
+					found = k;
+					break;
+				}
+			}
+			(found < list.size() ? g_ahead.set_hint : g_ahead.set_hint_missed)++;
+		}
+		if (found == list.size()) found = TableSetFindHashed(program, snapshot, m_soft_texture_resolve, list);
 		if (found < list.size()) {
 			if (found != 0u) std::swap(list[0], list[found]); // the last found first (sets stay where they are)
 			table_set = list[0].get();
@@ -5219,6 +5231,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 						view = PeekImages::Shifted(view);
 						a.i_injected++;
 					}
+					if (moved) a.i_moved_any[bucket]++;
+					if (peek.stale[i] != 0u) a.i_stale_any[bucket]++;
 					const bool same = images[i].image_id == ah.ids[i] && images[i].image_view == view && images[i].mip_views == ah.mips[i];
 					if (same) continue;
 					if (fault) {

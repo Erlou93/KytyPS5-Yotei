@@ -31,6 +31,7 @@ struct PeekStageImagesResult {
 	bool                                    pending = false, samplers_answered = false;
 	std::vector<uint8_t>                    stale; // today's path took a slow path for the slot
 	uint64_t                                epoch = 0; // the image registry epoch at the peek
+	uint64_t                                set_version = 0; // the table set that answered (0: none)
 	std::vector<uint8_t>                    klass;
 	std::vector<ImageId>                    ids;
 	std::vector<vk::ImageView>              views;

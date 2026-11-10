@@ -478,6 +478,12 @@ private:
 	// ahead key against today's (renderDraw.cpp, after ResolvedDraw).
 	bool TakeAheadImages(const void* program, PeekStageImagesResult& out, uint32_t& distance);
 	void CheckAheadKey(const PipelineCache::GraphicsPipelineKey& key_today);
+	// N4.2a: the running draw's plan (PeekAhead): whether there is one, the set version it names for a stage's program, and
+	// whether today's adoption took the predicted programs; the pipeline it found (null: none).
+	[[nodiscard]] bool                     PlanPresent() const;
+	[[nodiscard]] uint64_t                 PlanSetVersion(const void* program) const;
+	[[nodiscard]] bool                     PlanProgramsHold() const;
+	[[nodiscard]] PipelineCache::Pipeline* PlanPipeline() const;
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
 	[[nodiscard]] bool CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                   const DrawEmitInfo& emit, DrawRenderState& state);
@@ -515,6 +521,7 @@ private:
 	// The same for a direct dispatch: `input_info` and `program` as GetComputeProgram would leave them (false: it runs).
 	[[nodiscard]] bool TakeResolvedDispatch(ShaderComputeInputInfo& input_info, ShaderProgram& program);
 	ResolvedDraw* m_resolved_draw  = nullptr; // the operation's
+	uint64_t      m_plan_set_version = 0;      // N4.2a: the table set a plan names for the stage being prepared
 	bool          m_state_resolved = false;   // the draw being prepared adopted its state
 	std::unique_ptr<ResolvedDrawRing, void (*)(ResolvedDrawRing*)> m_resolved_ring {nullptr, nullptr};
 	DrawSlot* m_draw_slot    = nullptr; // allocated on first use

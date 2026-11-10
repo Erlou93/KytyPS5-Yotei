@@ -2617,12 +2617,30 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// before its preparation below; the two preparations' prints must be equal (the commit uses the second).
 	const bool chunk_check = ChunkCensus::CheckOn() && ChunkCensus::t_member && !mesh_active;
 	if (chunk_check) {
+		// N4.2a: with a plan (PeekAhead, programs predicted right), the first preparation takes the plan's table sets and
+		// pipeline; without one, or with programs adopted otherwise (the plan rejected), today's.
+		auto&      a        = g_ahead;
+		const bool has_plan = PlanPresent();
+		const bool use_plan = has_plan && PlanProgramsHold();
+		if (!has_plan) {
+			a.no_plan++;
+		} else if (!use_plan) {
+			a.rejected++;
+		} else {
+			a.plan_draws++;
+			if (auto* planned = PlanPipeline(); planned != nullptr && planned != &pipeline) a.pipeline_bad++;
+		}
+		const auto prepare_first = [&](const ShaderStageRuntime& stage, PreparedBindings& out) {
+			m_plan_set_version = use_plan ? PlanSetVersion(stage.program) : 0u;
+			PrepareBindings(stage, out);
+			m_plan_set_version = 0;
+		};
 		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-			PrepareBindings(state.vertex_info[i].stage, ChunkScratchBindings(i));
+			prepare_first(state.vertex_info[i].stage, ChunkScratchBindings(i));
 			plan.descriptor_stages[plan.stage_count++] = &ChunkScratchBindings(i);
 		}
 		if (state.ps_active) {
-			PrepareBindings(state.ps_input_info.stage, ChunkScratchBindings(3));
+			prepare_first(state.ps_input_info.stage, ChunkScratchBindings(3));
 			plan.descriptor_stages[plan.stage_count++] = &ChunkScratchBindings(3);
 		}
 		PrepareDrawBindings(plan, buffer, std::span {state.color_info, state.color_count}, nullptr);
@@ -3440,7 +3458,7 @@ struct RenderExecutor::ResolvedDraw {
 	uint32_t               fault = 0;       // KYTY_CHECK_RESOLVE_FAULT: the error put into this (helper's) result
 	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): what the chunk's opening peeked for this draw ahead (PeekAhead).
 	struct Ahead {
-		bool                                                             key_valid = false, front = false;
+		bool                                                             key_valid = false, front = false, planned = false;
 		uint32_t                                                         distance  = 0;
 		PipelineCache::GraphicsPipelineKey                               key {};
 		std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> find {nullptr, PipelineCache::PipelineFind::Count};
@@ -3474,6 +3492,7 @@ RenderExecutor::ResolvedDraw& RenderExecutor::NextResolvedDraw() {
 	ring.next     = (ring.next + 1) % ResolvedDrawRing::Size;
 	draw.consumed = false;
 	draw.ahead.key_valid = false; // N4.1
+	draw.ahead.planned   = false;
 	draw.ahead.images.clear();
 	draw.empty    = false;
 	draw.check    = nullptr;
@@ -3747,6 +3766,33 @@ void RenderExecutor::CheckAheadKey(const PipelineCache::GraphicsPipelineKey& key
 	if (ah.find != m_context.GetPipelineCache().FindGraphicsPipeline(key_today)) a.k_find_diff++;
 }
 
+bool RenderExecutor::PlanPresent() const {
+	return m_resolved_draw != nullptr && m_resolved_draw->ahead.planned;
+}
+
+uint64_t RenderExecutor::PlanSetVersion(const void* program) const {
+	if (!PlanPresent()) return 0;
+	for (const auto& [ahead_program, ahead]: m_resolved_draw->ahead.images) {
+		if (ahead_program == program) return ahead.set_version;
+	}
+	return 0;
+}
+
+bool RenderExecutor::PlanProgramsHold() const {
+	if (!PlanPresent()) return false;
+	const auto& stages = *m_resolved_draw->stages;
+	for (uint32_t i = 0; i < PipelineCache::StageCount(stages); i++) {
+		if (PipelineCache::AheadProgram(stages, i) != PipelineCache::AdoptedProgram(stages, i)) return false;
+	}
+	return true;
+}
+
+PipelineCache::Pipeline* RenderExecutor::PlanPipeline() const {
+	if (!PlanPresent()) return nullptr;
+	const auto& find = m_resolved_draw->ahead.find;
+	return find.second == PipelineCache::PipelineFind::Found ? find.first : nullptr;
+}
+
 bool RenderExecutor::TakeAheadImages(const void* program, PeekStageImagesResult& out, uint32_t& distance) {
 	if (m_resolved_draw == nullptr) return false;
 	for (auto& [ahead_program, ahead]: m_resolved_draw->ahead.images) {
@@ -3772,6 +3818,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 	}
 	slot->ahead.key_valid = false;
 	slot->ahead.front     = false;
+	slot->ahead.planned   = false;
 	slot->ahead.distance  = distance;
 	slot->ahead.images.clear();
 	// The gates DrawIndex / DrawAuto pass before the targets are described (their order).
@@ -3812,6 +3859,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		a.compile++;
 		return;
 	}
+	slot->ahead.planned = true;
 	PipelineCache::AheadSaved saved;
 	PipelineCache::InstallAhead(*slot->stages, saved);
 	auto& state = slot->state;
