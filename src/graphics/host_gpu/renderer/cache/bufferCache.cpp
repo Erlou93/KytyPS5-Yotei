@@ -300,15 +300,11 @@ void BufferCache::MapTimeWorker() {
 		}
 		if ((piece & MapTimeGranuleItem) != 0) { // one granule (MapTimeRequestGranule)
 			const size_t   granule = piece & ~MapTimeGranuleItem;
-			// KYTY_PERF_GRANULE_SPAN=<n> (test switch, hitch study 10.11): the aligned group of n granules around it in one
-			// import (each import holds the driver ~50 ms whatever its size; the execution thread's vkCreateImageView /
-			// vkAllocateMemory wait behind it: 45-80 ms hitches, one per granule import after the start).
-			static const size_t span = [] {
-				const char* value = std::getenv("KYTY_PERF_GRANULE_SPAN");
-				const auto  n     = value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t {1};
-				if (n > 1) std::fprintf(stderr, "PERF_GRANULE_SPAN %zu granules per import\n", n);
-				return std::max<size_t>(1, n);
-			}();
+			// The aligned group of 16 granules around it in one host-memory import (32 MiB; hitch study 10.11): each import holds
+			// the driver ~50 ms whatever its size and the execution thread's vkCreateImageView / vkAllocateMemory wait behind
+			// it; one granule per import after the start gave 45-80 ms hitches. ABBA on the walk replay: granule imports 35-37 ->
+			// 12-13, slow image views 7 -> 1-2, frames > 100 ms 6-11 -> 2-4, late pool pages 0 (zero=), fps the same.
+			constexpr size_t span = 16;
 			if (span > 1) {
 				const size_t   first = granule / span * span;
 				size_t         count = 0;
