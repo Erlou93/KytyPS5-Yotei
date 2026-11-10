@@ -1475,6 +1475,43 @@ void GuestGpu::ResolveHelperThread(uint32_t index) {
 // with KYTY_CHECK_RESOLVE=2 the helper's result is compared with the reference first; then the resolution is claimed - a
 // running one waited for (serving the other threads' commands meanwhile), a pending one stolen (the operation then
 // selects itself, as without a resolution).
+// Project 15 N6 (KYTY_TRACE_HELPER_WAITS=1, diagnostic): the execution thread's long waits for a helper (>= 0.5 ms) and its
+// steals, by pass and operation kind, with what the helpers had queued and whether the slot had begun. Execution thread.
+namespace {
+struct HelperWaitKey {
+	uint16_t pass = 0;
+	uint8_t  kind = 0;
+	bool operator<(const HelperWaitKey& o) const { return pass != o.pass ? pass < o.pass : kind < o.kind; }
+};
+struct HelperWaitStat {
+	uint64_t waits = 0, steals = 0, running = 0, queued = 0;
+	double   wait_ms = 0;
+};
+bool HelperWaitsOn() {
+	static const bool on = std::getenv("KYTY_TRACE_HELPER_WAITS") != nullptr;
+	return on;
+}
+std::map<HelperWaitKey, HelperWaitStat> g_helper_waits;
+uint64_t                                g_helper_wait_events = 0;
+void HelperWaitsReport() {
+	if ((++g_helper_wait_events & 511u) != 0) return;
+	std::vector<std::pair<HelperWaitKey, HelperWaitStat>> rows(g_helper_waits.begin(), g_helper_waits.end());
+	std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second.wait_ms > b.second.wait_ms; });
+	const uint32_t frame = DebugPresentCount().load(std::memory_order_relaxed);
+	std::string    text;
+	for (size_t i = 0; i < rows.size() && i < 8; i++) {
+		const auto& [k, s] = rows[i];
+		char buf[256];
+		std::snprintf(buf, sizeof(buf), " | \"%s\" kind=%u waits=%llu ms=%.1f steals=%llu queued=%.1f",
+		              PassCensus::PassName(k.pass).c_str(), k.kind, static_cast<unsigned long long>(s.waits), s.wait_ms,
+		              static_cast<unsigned long long>(s.steals),
+		              s.waits != 0 ? static_cast<double>(s.queued) / s.waits : 0.0);
+		text += buf;
+	}
+	std::fprintf(stderr, "PERF helper_waits frame=%u%s\n", frame, text.c_str());
+}
+} // namespace
+
 void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context, bool waiting), void* busy_context) {
 	auto* const slot = operation.resolved;
 	m_tasks_claimed.fetch_add(1, std::memory_order_relaxed); // N5.3: the helpers' lead
@@ -1502,6 +1539,13 @@ void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context
 		busy(busy_context, false);
 		const auto all = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
 		const auto ns  = all > commands_ns ? all - commands_ns : 0u; // the wait for the helper alone
+		if (HelperWaitsOn() && ns >= 500000u) { // N6: a long wait
+			auto& s = g_helper_waits[{operation.pass_id, static_cast<uint8_t>(operation.kind)}];
+			s.waits++;
+			s.wait_ms += static_cast<double>(ns) / 1e6;
+			s.queued += m_tasks.SizeApprox() + m_tasks2.SizeApprox();
+			HelperWaitsReport();
+		}
 		hs.waits.fetch_add(1, std::memory_order_relaxed);
 		hs.wait_ns.fetch_add(ns, std::memory_order_relaxed);
 		hs.wait_cmd_ns.fetch_add(commands_ns, std::memory_order_relaxed);
@@ -1552,6 +1596,10 @@ void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context
 		case RenderExecutor::ResolvedClaim::Stolen:
 			hs.pending.fetch_add(1, std::memory_order_relaxed);
 			hs.stolen.fetch_add(1, std::memory_order_relaxed);
+			if (HelperWaitsOn()) { // N6: a steal
+				g_helper_waits[{operation.pass_id, static_cast<uint8_t>(operation.kind)}].steals++;
+				HelperWaitsReport();
+			}
 			operation.resolved = nullptr; // the helper frees the slot when it takes the task
 			break;
 		default: break;
