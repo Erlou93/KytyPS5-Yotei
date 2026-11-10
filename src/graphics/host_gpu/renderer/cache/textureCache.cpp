@@ -1794,6 +1794,8 @@ void Resolve(TextureCache& cache, ImageId cached_id, ImageId merged_id) {
 
 } // namespace BcAlias
 
+static thread_local bool g_overlap_alias = false; // T1b: ResolveOverlap met a block alias (FindImage resets it)
+
 TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& requested,
                                                          BindingType binding, ImageId cached_id,
                                                          ImageId merged_id) {
@@ -1818,7 +1820,9 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		}
 		return {cached_id, mip, requested.SliceOf(owner->info, mip)};
 	}
-	if (BcAlias::Matches(requested, owner->info) && !owner->IsCpuDirty()) {
+	const bool alias = BcAlias::Matches(requested, owner->info);
+	if (alias) g_overlap_alias = true; // (T1b: an alias whatever its state - the result may depend on "dirty")
+	if (alias && !owner->IsCpuDirty()) {
 		BcAlias::Resolve(*this, cached_id, merged_id);
 		return {merged_id};
 	}
@@ -3136,6 +3140,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 
 	ImageId result {};
 	bool    alias_any = false, freed = false; // (T1a)
+	g_overlap_alias   = false;
 	{
 		const ChunkLead::FloorTimer floor_locked(ChunkLead::FpFindLocked); // KYTY_TRACE_PEEK_CENSUS (T1a)
 		std::scoped_lock lock {m_lock};
@@ -3242,13 +3247,14 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		if (t1a) {
 			// T1a: repeatable for a target memo (the same image again from the same registry and the same description)
 			const bool target = desc.type == BindingType::RenderTarget || desc.type == BindingType::DepthTarget;
-			const int  why    = !target                         ? 1
-			                    : !plain_source                 ? 2
-			                    : block_alias || alias_any      ? 3
-			                    : freed                         ? 4
-			                    : inserted_new                  ? 5
-			                    : view_mip >= 0 || view_layer >= 0 ? 6
-			                                                    : -1;
+			// (T1b, 10.11: a result ResolveOverlap gave without changing anything - the request fits in an existing image,
+			// no alias, no view moved - is repeatable too: with the registry unchanged it gives the same image again)
+			const int  why    = !target                                          ? 1
+			                    : block_alias || alias_any || g_overlap_alias    ? 3
+			                    : freed                                          ? 4
+			                    : inserted_new                                   ? 5
+			                    : view_mip >= 0 || view_layer >= 0               ? 6
+			                                                                     : -1;
 			if (why >= 0) NoteNonRepeat(why);
 			// T1b diagnostic (KYTY_TRACE_PEEK_CENSUS): the first non-repeatable target searches in the walk, with the
 			// candidates and the first SameBacking field that differs (1 address, 2 size, 3 extent, 4 levels/layers,
