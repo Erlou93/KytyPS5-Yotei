@@ -57,6 +57,8 @@ inline AheadStats g_ahead;
 inline uint32_t   AheadBucket(uint32_t distance) {
     return distance == 0u ? 0u : distance < 16u ? 1u : distance < 64u ? 2u : 3u;
 }
+// N5.0: the plan's builder without the data only the checks use (no slot-by-slot image peek, no record-keyed ranges).
+inline thread_local bool t_peek_slim = false;
 // The operations the execution thread began (S2a's lag check measures its age in them).
 inline thread_local uint64_t t_op_index = 0;
 

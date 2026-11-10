@@ -3212,10 +3212,18 @@ struct PlanBufferStats {
 };
 PlanBufferStats              g_plan_buffer_stats; // GPU thread
 std::vector<PlanBuffer>*     g_plan_buffers = nullptr;
+size_t g_plan_cursor = 0; // the entry after the last one found (entries are made in the acquisitions' order)
 PlanBuffer* PlanBufferFind(uint64_t vaddr, uint64_t size, bool texel, bool bda) {
 	if (g_plan_buffers == nullptr) return nullptr;
-	for (auto& entry: *g_plan_buffers) {
-		if (!entry.used && entry.vaddr == vaddr && entry.size == size && entry.texel == texel && entry.bda == bda) return &entry;
+	auto&        entries = *g_plan_buffers;
+	const size_t n       = entries.size();
+	for (size_t k = 0; k < n; k++) {
+		const size_t i     = (g_plan_cursor + k) % n;
+		auto&        entry = entries[i];
+		if (!entry.used && entry.vaddr == vaddr && entry.size == size && entry.texel == texel && entry.bda == bda) {
+			g_plan_cursor = i + 1;
+			return &entry;
+		}
 	}
 	return nullptr;
 }
@@ -3242,6 +3250,7 @@ void PlanBufferReport() {
 
 void BufferCache::SetPlanBuffers(std::vector<PlanBuffer>* entries) {
 	g_plan_buffers = entries;
+	g_plan_cursor  = 0;
 }
 
 bool BufferCache::DrawPlansOn() {

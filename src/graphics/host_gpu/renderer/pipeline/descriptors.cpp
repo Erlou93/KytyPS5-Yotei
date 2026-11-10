@@ -4210,7 +4210,7 @@ void RenderExecutor::PeekStageBuffers(const ShaderRecompiler::IR::CompiledShader
                                       const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const StageF::ResolveRecord* record,
                                       uint32_t distance, std::vector<PlanBuffer>& out) {
 	auto& cache = m_context.GetBufferCache();
-	for (uint32_t index = 0; index < snapshot.indirect_ranges.size(); index++) {
+	for (uint32_t index = 0; !t_peek_slim && index < snapshot.indirect_ranges.size(); index++) {
 		const auto& range = snapshot.indirect_ranges[index];
 		if (range.written) continue;
 		const auto* ahead = StageF::RangeSourceAhead(record, index, range, false);
@@ -4279,6 +4279,14 @@ bool RenderExecutor::PeekStageImages(const ShaderRecompiler::IR::CompiledShaderI
 				}
 			}
 		}
+	}
+	if (t_peek_slim && !count) {
+		// N5.0, the slim builder: the plan needs the set's identity only (the commit proves pages and readiness).
+		peek.set_version       = set != nullptr ? set->version : 0u;
+		peek.samplers_answered = set != nullptr || program.info.samplers.empty();
+		cache.UnlockPeekRead();
+		--t_translator;
+		return set != nullptr;
 	}
 	bool all = true;
 	for (uint32_t i = 0; i < slot_count; i++) {

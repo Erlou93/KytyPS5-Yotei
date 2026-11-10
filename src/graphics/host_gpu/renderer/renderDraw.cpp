@@ -2450,6 +2450,8 @@ void RenderExecutor::PrepareDrawBindings(DrawPlan& plan, CommandBuffer& buffer, 
 	}
 }
 
+static bool PlanNoSetHint(); // N5.0 (below)
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -2689,7 +2691,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		{
 			for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-				m_plan_set_version = use_plan ? PlanSetVersion(state.vertex_info[i].stage.program) : 0u; // N4.3
+				m_plan_set_version = use_plan && !PlanNoSetHint() ? PlanSetVersion(state.vertex_info[i].stage.program) : 0u; // N4.3
 				PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
 				m_plan_set_version = 0;
 				plan.descriptor_stages[plan.stage_count++] = &bindings.vertex[i];
@@ -2697,7 +2699,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			if (long_us != 0) marks[1] = std::chrono::steady_clock::now();
 			if (state.ps_active) {
 				if (!bindings.pixel) bindings.pixel.emplace();
-				m_plan_set_version = use_plan ? PlanSetVersion(state.ps_input_info.stage.program) : 0u; // N4.3
+				m_plan_set_version = use_plan && !PlanNoSetHint() ? PlanSetVersion(state.ps_input_info.stage.program) : 0u; // N4.3
 				PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
 				m_plan_set_version = 0;
 				plan.descriptor_stages[plan.stage_count++] = &*bindings.pixel;
@@ -3523,6 +3525,7 @@ RenderExecutor::ResolvedDraw& RenderExecutor::NextResolvedDraw() {
 	ring.next     = (ring.next + 1) % ResolvedDrawRing::Size;
 	draw.consumed = false;
 	draw.ahead.key_valid = false; // N4.1
+	draw.ahead.find      = {nullptr, PipelineCache::PipelineFind::Count}; // (n4-3-przeglad.md 2.1)
 	draw.ahead.planned   = false;
 	draw.ahead.images.clear();
 	draw.ahead.buffers.clear();
@@ -3800,6 +3803,15 @@ void RenderExecutor::CheckAheadKey(const PipelineCache::GraphicsPipelineKey& key
 	if (ah.find != m_context.GetPipelineCache().FindGraphicsPipeline(key_today)) a.k_find_diff++;
 }
 
+// KYTY_DIAG_PLAN_NO_SET_HINT=1 (N5.0 measurement only): the plans without the table-set hint.
+static bool PlanNoSetHint() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_DIAG_PLAN_NO_SET_HINT");
+		return env != nullptr && env[0] == '1';
+	}();
+	return on;
+}
+
 void RenderExecutor::PlanBuffersBegin() {
 	BufferCache::SetPlanBuffers(PlanPresent() && PlanProgramsHold() ? &m_resolved_draw->ahead.buffers : nullptr);
 }
@@ -3855,6 +3867,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		return;
 	}
 	slot->ahead.key_valid = false;
+	slot->ahead.find      = {nullptr, PipelineCache::PipelineFind::Count}; // a mesh draw's plan has no pipeline
 	slot->ahead.front     = false;
 	slot->ahead.planned   = false;
 	slot->ahead.distance  = distance;
@@ -3892,6 +3905,9 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		return;
 	}
 	auto& pc = m_context.GetPipelineCache();
+	// N5.0: without the checks that read them, the builder skips the check-only data.
+	static const bool slim = std::getenv("KYTY_CHECK_PEEK") == nullptr && std::getenv("KYTY_CHECK_CHUNKS") == nullptr;
+	t_peek_slim            = slim;
 	++t_translator;
 	if (!pc.PeekAdoptAhead(*slot->stages, distance)) {
 		--t_translator;
