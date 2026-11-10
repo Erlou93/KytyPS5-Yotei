@@ -1953,6 +1953,13 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 				for (auto& info: state.color_info) info = {};
 			}
 		}
+		if (hit && t1b != 0) {
+			// T1b: the targets touched as their searches would (the access tick and the LRU, ReplayImage): an image the memo
+			// keeps finding must not look unused to the collector or to the overlap resolution
+			auto& cache = m_context.GetTextureCache();
+			for (uint32_t i = 0; i < state.color_count; i++) (void)cache.ReplayImage(state.color_info[i].image_id);
+			if (state.depth_info.image_id) (void)cache.ReplayImage(state.depth_info.image_id);
+		}
 		if (hit) {
 			for (uint32_t i = 0; i < memo.color_count; i++) BindRenderTarget(state.color_info[i].image_id);
 			if (state.depth_info.image_id) BindRenderTarget(state.depth_info.image_id);
