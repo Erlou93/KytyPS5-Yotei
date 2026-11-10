@@ -227,7 +227,7 @@ Buffer* BufferCache::FallbackChunk(size_t chunk, bool want, uint64_t vaddr) {
 	return m_fallback_chunks[chunk].get();
 }
 
-// The BDA map-time import (AGENTS 19): a map of the pool (game thread). The pool's backing is imported in MapTimeImportBytes pieces: the
+// The BDA map-time import (AGENTS 19): a map of the pool (game thread). The pool's backing is imported in MapTimeImportBytes() pieces: the
 // first map touching a piece asks the worker to import it whole (the game maps most of the pool at start, when an import
 // costs ~0.6 ms per 2 MiB; later, while the GPU thread submits, the driver serializes imports with it: 8.11 run mt_m2,
 // 2 MiB imports on a worker took ~95 ms each and the frame rate fell to ~15 fps). Pieces stay for the session: the game
@@ -245,7 +245,7 @@ void BufferCache::MapTimeMap(uint64_t vaddr, uint64_t size) {
 			uint64_t offset = 0;
 			if (!LibKernel::Memory::GuestBackingOffset(page, CACHING_PAGESIZE, &offset) || offset >= total) continue;
 			m_maptime.granule_vaddr[static_cast<size_t>(offset / FallbackChunkBytes)] = page - offset % FallbackChunkBytes;
-			const size_t piece = static_cast<size_t>(offset / MapTimeImportBytes);
+			const size_t piece = static_cast<size_t>(offset / MapTimeImportBytes());
 			if (m_maptime.requested[piece] == 0) {
 				m_maptime.requested[piece] = 1;
 				m_maptime.queue.push_back(piece);
@@ -258,7 +258,7 @@ void BufferCache::MapTimeMap(uint64_t vaddr, uint64_t size) {
 
 void BufferCache::MapTimeSize(uint64_t total) {
 	if (!m_maptime.requested.empty()) return;
-	m_maptime.requested.resize(static_cast<size_t>((total + MapTimeImportBytes - 1) / MapTimeImportBytes), 0);
+	m_maptime.requested.resize(static_cast<size_t>((total + MapTimeImportBytes() - 1) / MapTimeImportBytes()), 0);
 	m_maptime.granule_vaddr.resize(static_cast<size_t>((total + FallbackChunkBytes - 1) / FallbackChunkBytes), 0);
 	m_maptime.granule_requested.resize(m_maptime.granule_vaddr.size(), 0);
 }
@@ -276,7 +276,7 @@ void BufferCache::MapTimeRequestGranule(size_t granule, uint64_t vaddr) {
 		    static_cast<size_t>(offset / FallbackChunkBytes) == granule) {
 			m_maptime.granule_vaddr[granule] = (vaddr & ~(CACHING_PAGESIZE - 1)) - offset % FallbackChunkBytes;
 		}
-		const size_t piece = static_cast<size_t>(static_cast<uint64_t>(granule) * FallbackChunkBytes / MapTimeImportBytes);
+		const size_t piece = static_cast<size_t>(static_cast<uint64_t>(granule) * FallbackChunkBytes / MapTimeImportBytes());
 		if (m_maptime.requested[piece] == 1 || m_maptime.granule_requested[granule] != 0) return; // on its way
 		m_maptime.granule_requested[granule] = 1;
 		m_maptime.queue.push_back(granule | MapTimeGranuleItem);
@@ -285,6 +285,17 @@ void BufferCache::MapTimeRequestGranule(size_t granule, uint64_t vaddr) {
 }
 
 // The worker: one import per piece, then a 2 MiB view buffer per granule of it (the fallback's granule).
+uint64_t BufferCache::MapTimeImportBytes() {
+	static const uint64_t bytes = [] {
+		const char* value = std::getenv("KYTY_PERF_MAPTIME_PIECE_MB");
+		const auto  mib   = value != nullptr ? std::strtoull(value, nullptr, 10) : 256ull;
+		const auto  piece = std::max<uint64_t>(2, mib) << 20u;
+		if (value != nullptr) std::fprintf(stderr, "PERF_MAPTIME_PIECE %llu MiB\n", static_cast<unsigned long long>(piece >> 20u));
+		return piece;
+	}();
+	return bytes;
+}
+
 void BufferCache::MapTimeWorker() {
 	KYTY_PROFILER_THREAD("BdaMapTime");
 	const uint64_t base  = LibKernel::Memory::GuestBackingBase();
@@ -320,8 +331,8 @@ void BufferCache::MapTimeWorker() {
 			m_maptime.ready.emplace_back(granule, std::move(import));
 			continue;
 		}
-		const uint64_t start  = static_cast<uint64_t>(piece) * MapTimeImportBytes;
-		const uint64_t bytes  = std::min(MapTimeImportBytes, total - start) & ~uint64_t {0xfff};
+		const uint64_t start  = static_cast<uint64_t>(piece) * MapTimeImportBytes();
+		const uint64_t bytes  = std::min(MapTimeImportBytes(), total - start) & ~uint64_t {0xfff};
 		const auto     t0     = std::chrono::steady_clock::now();
 		const auto     memory = bytes == 0 ? vk::DeviceMemory {} : Buffer::ImportGuestMemory(m_graphics, base + start, bytes);
 		std::vector<std::pair<size_t, std::unique_ptr<Buffer>>> views;
@@ -390,7 +401,7 @@ void BufferCache::WantFallback(uint64_t page) {
 		// bda_maptime zero=, must stay 0; the entries follow when the worker's import is installed).
 		NoteBdaMapTimeZero();
 		std::scoped_lock lock(m_maptime.mutex);
-		if (!m_maptime.requested.empty() && m_maptime.requested[static_cast<size_t>(offset / MapTimeImportBytes)] == 1) return;
+		if (!m_maptime.requested.empty() && m_maptime.requested[static_cast<size_t>(offset / MapTimeImportBytes())] == 1) return;
 	}
 	if (FallbackChunk(static_cast<size_t>(offset / FallbackChunkBytes), true, page) == nullptr) return;
 	// The guest range that maps the granule where `page` maps it (WriteFallbackRange checks each page's own granule;

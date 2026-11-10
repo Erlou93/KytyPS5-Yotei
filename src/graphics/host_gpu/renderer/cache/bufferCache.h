@@ -431,7 +431,9 @@ public:
 	}
 	static constexpr uint64_t BdaMapTimePoolStart = 0x8000000000ull;
 	static constexpr uint64_t BdaMapTimePoolSize  = uint64_t {16} << 30u; // the allocator holds ~3.9 GiB on a base PS5
-	static constexpr uint64_t MapTimeImportBytes  = uint64_t {256} << 20u; // one import per piece of the pool's backing
+	// One import per piece of the pool's backing: 256 MiB, or KYTY_PERF_MAPTIME_PIECE_MB (test switch, hitch study 10.11: a
+	// 256 MiB import holds the driver for tens of ms, and the execution thread's vkCreateImageView / vkAllocateMemory wait).
+	static uint64_t MapTimeImportBytes();
 	static constexpr size_t   MapTimeGranuleItem  = size_t {1} << 62u;     // a worker queue item: one granule, not a piece
 	void NoteBdaMapTimeZero() { m_maptime.zero.fetch_add(1, std::memory_order_relaxed); }
 
