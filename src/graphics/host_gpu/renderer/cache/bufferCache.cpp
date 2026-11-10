@@ -2873,16 +2873,8 @@ struct ObtainMemoEntry {
 	uint32_t regions = 0;      // 1 or 2; 0: empty
 	BufferId id {};
 };
-// Way B shortcut A: room for 65536 slots; KYTY_PERF_MEMO_BIG (live A/B) chooses 65536 or today's 8192.
-constexpr size_t kObtainMemoSlots = 65536;
+constexpr size_t kObtainMemoSlots = 8192;
 ObtainMemoEntry  g_obtain_memo[kObtainMemoSlots]; // GPU thread
-size_t           MemoMask() {
-    static const uint32_t fixed = [] {
-        const char* env = std::getenv("KYTY_PERF_MEMO_BIG");
-        return env != nullptr && env[0] == '1' ? 1u : 0u;
-    }();
-    return Common::LiveAb::Gate(Common::LiveAb::Switch::MemoBig, fixed) != 0u ? 65535u : 8191u;
-}
 struct ObtainMemoStats {
 	uint64_t hits = 0, misses = 0, stores = 0;
 	uint64_t miss[5] {}; // empty slot, other range, buffer epoch, CPU-dirty region epoch, image page sum
@@ -2899,7 +2891,7 @@ namespace {
 size_t ObtainMemoIndex(uint64_t vaddr, uint64_t size) {
 	uint64_t h = vaddr * 0x9E3779B97F4A7C15ull ^ (size + (size << 17u));
 	h ^= h >> 29u;
-	return static_cast<size_t>(h & MemoMask());
+	return static_cast<size_t>(h & (kObtainMemoSlots - 1u));
 }
 
 // The tracker regions of the range (at most 2 are kept) and their epochs now; false when the range spans more.
@@ -2983,7 +2975,7 @@ struct WriteMemoEntry {
 	uint32_t regions = 0; // 1 or 2; 0: empty
 	BufferId id {};
 };
-constexpr size_t kWriteMemoSlots = 65536; // (way B shortcut A: MemoMask)
+constexpr size_t kWriteMemoSlots = 8192;
 WriteMemoEntry   g_write_memo[kWriteMemoSlots]; // GPU thread
 struct {
 	uint64_t hits = 0, retick_hits = 0, misses = 0, stores = 0;
@@ -2995,7 +2987,7 @@ struct {
 WriteMemoEntry& WriteMemoSlot(uint64_t vaddr, uint64_t size) {
 	uint64_t h = vaddr * 0x9E3779B97F4A7C15ull ^ (size + (size << 21u));
 	h ^= h >> 31u;
-	return g_write_memo[h & MemoMask()];
+	return g_write_memo[h & (kWriteMemoSlots - 1u)];
 }
 
 // The tracker regions of the range (at most 2) and both epochs of each now; false when the range spans more.
