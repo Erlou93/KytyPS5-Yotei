@@ -3044,6 +3044,7 @@ namespace {
 struct PeekStats {
 	std::array<uint64_t, BufferCache::BufferPeek::Count> classes {}, member {}, bda {};
 	uint64_t image_granule_only = 0, bda_compared = 0, compared = 0, bad = 0, race = 0, lag_compared = 0, lag_bad = 0, lag_race = 0, injected = 0, detected = 0;
+	std::array<uint64_t, 4> image_split {}; // Image peeks: [plain found, plain not found, formatted found, formatted not found]
 	std::array<uint64_t, 4> lag_age {};  // calls since the kept peek: <16, <128, <1024, >=1024
 	std::array<uint64_t, 5> lag_fail {}; // PeekProofFail of a kept entry that no longer holds
 	uint32_t logged = 0;
@@ -3099,9 +3100,11 @@ void PeekReport() {
 	             join(&st.lag_fail[1], 4).c_str(), static_cast<unsigned long long>(st.injected), static_cast<unsigned long long>(st.detected),
 	             join(t_translator_writes, 6).c_str());
 	std::fprintf(stderr,
-	             "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu image_granule_only=%llu\n",
+	             "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu image_granule_only=%llu "
+	             "image[plain_found|plain_none|formatted_found|formatted_none]=%s\n",
 	             classes(st.member).c_str(), join(t_peek_marker_hist, 4).c_str(), classes(st.bda).c_str(),
-	             static_cast<unsigned long long>(st.bda_compared), static_cast<unsigned long long>(st.image_granule_only));
+	             static_cast<unsigned long long>(st.bda_compared), static_cast<unsigned long long>(st.image_granule_only),
+	             join(st.image_split, 4).c_str());
 }
 } // namespace
 
@@ -3113,13 +3116,14 @@ uint32_t BufferCache::PeekProofFail(const BufferPeek& peek, uint64_t vaddr, uint
 	for (uint32_t i = 0; i < peek.regions; i++) {
 		if (table[peek.region + i].load(std::memory_order_acquire) != peek.epochs[i]) return 2;
 	}
-	return DrawRepeat::ImagePageEpochSum(vaddr, size) == peek.image_sum ? 0 : 3;
+	return peek.bda || DrawRepeat::ImagePageEpochSum(vaddr, size) == peek.image_sum ? 0 : 3; // the BDA path touches no image
 }
 
 BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint,
                                                 bool bda) {
 	++t_translator;
 	BufferPeek p;
+	p.bda = bda;
 	[&] {
 		if (vaddr == 0 || size == 0 || !GuestRange {vaddr, size}.Valid()) {
 			p.klass = BufferPeek::Null;
@@ -3128,8 +3132,8 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 		// Every proof field is read before the check it covers (n3-s2a-przeglad.md 1.1): the registry epoch before the
 		// lookup, the region epochs before the dirty bits, the image page sum before the image-start count.
 		p.buffer_epoch = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
-		const uint32_t direct_mode = bda ? 0u : DirectMode();
-		if (!bda && direct_mode != m_direct_mode_seen) {
+		const uint32_t direct_mode = DirectMode();
+		if (direct_mode != m_direct_mode_seen) {
 			p.klass = BufferPeek::Upload; // today's path ends or starts the direct ranges: in order
 			return;
 		}
@@ -3198,6 +3202,11 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source);
 	}
 	const auto peek = PeekBuffer(vaddr, size, is_written, is_texel_buffer, id);
+	if (peek.klass == BufferPeek::Image) {
+		// Diagnostic, outside the peek: a real image at the address or a collision of the exact-start table.
+		const bool found = static_cast<bool>(m_texture_cache.FindImageFromRange(vaddr, size, true));
+		g_peek_stats.image_split[(is_texel_buffer ? 2u : 0u) + (found ? 0u : 1u)]++;
+	}
 	return PeekChecked(peek, vaddr, size, is_written, false,
 	                   [&] { return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source); });
 }

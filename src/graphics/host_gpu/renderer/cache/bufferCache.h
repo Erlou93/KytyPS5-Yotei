@@ -127,6 +127,7 @@ public:
 		uint64_t buffer_epoch = 0, image_sum = 0, region = 0;
 		uint32_t epochs[2] {};
 		uint32_t regions = 0;
+		bool     bda     = false; // ObtainBdaRange's peek: no image in the proof
 	};
 	// bda: ObtainBdaRange's peek (no direct ranges, no stream copy, no image copy).
 	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint,
