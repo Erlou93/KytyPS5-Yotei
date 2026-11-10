@@ -3280,8 +3280,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 					              static_cast<int>(c.pixel_format), c.bytes_per_block, static_cast<uint32_t>(c.tile_mode), first_diff(c));
 					text += buf;
 				}
-				std::fprintf(stderr, "T1B_NOTSAME frame=%u bucket=%d type=%u addr=0x%llx size=0x%llx %ux%u fmt=%d bpb=%u tile=%u candidates=%zu result=%u%s
-",
+				std::fprintf(stderr, "T1B_NOTSAME frame=%u bucket=%d type=%u addr=0x%llx size=0x%llx %ux%u fmt=%d bpb=%u tile=%u candidates=%zu result=%u%s\n",
 				             DebugPresentCount().load(), ChunkLead::t_floor_bucket, static_cast<uint32_t>(desc.type),
 				             static_cast<unsigned long long>(desc.info.data.address), static_cast<unsigned long long>(desc.info.data.size),
 				             desc.info.extent.width, desc.info.extent.height, static_cast<int>(desc.info.pixel_format),
