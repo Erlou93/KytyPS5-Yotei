@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_BUFFERCACHE_H_
 
 #include "common/abi.h"
+#include "common/spscQueue.h"
 #include "common/common.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
@@ -112,6 +113,15 @@ public:
 	// when it would create one), writing nothing; the buffer registry epoch it saw is DrawRepeat::g_buffer_registry_epoch,
 	// read under the same lock. GPU thread: the registry's page table and slots change only under this lock.
 	[[nodiscard]] bool     TryLockLookup() noexcept { return m_lookup_lock.try_lock(); }
+	// Project 15 way B W2.1: a helper's plan peek tries the lookup lock 4 times, 64 pauses apart (as the resolve's source
+	// build does): a single try lost every entry of the stage while the other helper held it (~8% of the acquisitions).
+	[[nodiscard]] bool     TryLockLookupSpin() noexcept {
+        for (uint32_t attempt = 0; attempt < 4u; attempt++) {
+            if (m_lookup_lock.try_lock()) return true;
+            for (uint32_t spin = 0; spin < 64u; spin++) Common::SpinPause();
+        }
+        return false;
+	}
 	void                   UnlockLookup() noexcept { m_lookup_lock.unlock(); }
 	[[nodiscard]] BufferId LookupBuffer(uint64_t vaddr, uint64_t size) const;
 	// Project 15 S2a (N3, the read-only translator; design: the analysis session's n3-projekt.md section 4.1): what

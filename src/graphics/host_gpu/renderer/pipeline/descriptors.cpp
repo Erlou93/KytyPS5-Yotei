@@ -4213,7 +4213,7 @@ void RenderExecutor::PeekStageBuffers(const ShaderRecompiler::IR::CompiledShader
 	auto& cache = m_context.GetBufferCache();
 	// N5.1: off the execution thread the registry is read under the lookup lock, tried (busy: no entries).
 	const bool helper = !GuestGpu::IsGpuThread();
-	if (helper && !cache.TryLockLookup()) {
+	if (helper && !cache.TryLockLookupSpin()) {
 		t_ahead_helper.lookup_busy++; // (a helper's own row, PERF helper_plan_outcome)
 		return;
 	}

@@ -4105,7 +4105,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 		auto& cache = m_context.GetBufferCache();
 		// N5.1: off the execution thread under the lookup lock, tried (busy: no entries).
 		const bool helper      = !GuestGpu::IsGpuThread();
-		const bool lookup_held = !helper || cache.TryLockLookup();
+		const bool lookup_held = !helper || cache.TryLockLookupSpin(); // (W2.1)
 		if (!lookup_held) a.lookup_busy++;
 		std::array<uint64_t, ShaderVertexInputInfo::RES_MAX>          sizes;
 		std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX> merged;
