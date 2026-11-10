@@ -152,12 +152,15 @@ void Run() {
 	const long long threshold = value != nullptr && std::atoll(value) > 0 ? std::atoll(value) : 500;
 	const DWORD     self      = GetCurrentThreadId();
 	SetThreadDescription(GetCurrentThread(), L"Kyty.StallWatch");
+	const char*     idle_value = std::getenv("KYTY_DIAG_STALL_WATCH_IDLE_MS");
+	const long long idle_ms    = idle_value != nullptr ? std::atoll(idle_value) : 0;
+	int64_t         idle_taken = 0;
 	uint32_t last_frame = DebugPresentCount().load(std::memory_order_relaxed);
 	auto     last_move  = std::chrono::steady_clock::now();
 	int      captures   = 0;
 	int      in_stall   = 0;
 	for (;;) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		std::this_thread::sleep_for(std::chrono::milliseconds(idle_ms > 0 ? 5 : 20));
 		const uint32_t frame = DebugPresentCount().load(std::memory_order_relaxed);
 		const auto     now   = std::chrono::steady_clock::now();
 		if (frame != last_frame) {
@@ -171,6 +174,18 @@ void Run() {
 			continue;
 		}
 		if (GameplayStartNs().load(std::memory_order_relaxed) == 0) continue;
+		if (idle_ms > 0) {
+			// the execution thread idle (KYTY_DIAG_STALL_WATCH_IDLE_MS): one capture per idle wait, at most 20
+			const int64_t since = g_exec_idle_since.load(std::memory_order_acquire);
+			const int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+			if (since != 0 && since != idle_taken && captures < 20 && (now_ns - since) / 1000000 >= idle_ms) {
+				idle_taken = since;
+				captures++;
+				const int threads = Capture(self);
+				Print(threads, frame, (now_ns - since) / 1000000, captures);
+			}
+			continue;
+		}
 		const auto ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - last_move).count());
 		if (captures >= 12) continue;
 		if ((in_stall == 0 && ms >= threshold) || (in_stall == 1 && ms >= threshold + 1000)) {

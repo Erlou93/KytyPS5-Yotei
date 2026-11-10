@@ -947,7 +947,10 @@ void GuestGpu::ExecutionThread() {
 			bool have_operations = false;
 			{
 				const Common::SlowFrame::Scope slow_idle(Common::SlowFrame::ExecIdle); // KYTY_TRACE_SLOW_FRAMES
+				StallWatch::g_exec_idle_since.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+				                                    std::memory_order_release); // KYTY_DIAG_STALL_WATCH_IDLE_MS
 				have_operations = WaitForOperations();
+				StallWatch::g_exec_idle_since.store(0, std::memory_order_release);
 			}
 			if (!have_operations) {
 				break;
