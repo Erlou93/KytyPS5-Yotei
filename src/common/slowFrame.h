@@ -39,10 +39,14 @@ enum Part : uint32_t {
 	Bindless,    // PrepareBindlessHeaps
 	Targets,     // AcquireRenderTargets
 	Bda,         // RenderContext::PrepareBda
+	UpdImage,    // TextureCache::UpdateImage (an image's contents brought up to date)
+	UploadImage, // TextureCache::UploadImage (guest bytes to the image)
+	FindImage,   // TextureCache::FindImage
+	RefreshImage, // TextureCache::RefreshImage
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {

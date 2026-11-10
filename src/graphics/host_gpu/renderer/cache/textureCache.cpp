@@ -2054,6 +2054,7 @@ bool TextureCache::CanDownload(const Image& image) const {
 }
 
 void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_offset) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::UploadImage); // KYTY_TRACE_SLOW_FRAMES
 	auto& destination = image.depth_id ? m_slot_images[image.depth_id] : image;
 	// KYTY_FIX_STENCIL_PLANE_WRITES: the guest bytes of a stencil plane the depth image does not hold go to that
 	// plane's saved copy, not over the plane the image holds.
@@ -2927,6 +2928,7 @@ void TextureCache::OnDccMetaWrite(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::RefreshImage(ImageId id) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::RefreshImage); // KYTY_TRACE_SLOW_FRAMES
 	auto& image = m_slot_images[id];
 	if (image.depth_id &&
 	    (m_slot_images[image.depth_id].info.metadata.stencil_compressed ||
@@ -3116,6 +3118,7 @@ ImageId TextureCache::ReplayImageLocked(ImageId id) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::FindImage); // KYTY_TRACE_SLOW_FRAMES
 	g_last_find_plain = false;
 	bool plain_source = false; // the image replay's hint: result from SameBacking
 	auto& command = m_scheduler.Current();
@@ -3317,6 +3320,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 }
 
 void TextureCache::UpdateImage(ImageId id) {
+	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::UpdImage); // KYTY_TRACE_SLOW_FRAMES
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
 	TouchImage(image);
