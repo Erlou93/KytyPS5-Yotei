@@ -1105,13 +1105,18 @@ void GuestGpu::ExecutionThread() {
 							std::fprintf(stderr,
 							             "PERF plan_oracle plan_draws=%llu no_plan=%llu rejected=%llu pipeline_bad=%llu set_hint=%llu "
 							             "set_hint_missed=%llu images_moved_any=%s images_stale_any=%s used_draws=%llu used_pipeline=%llu "
-							             "buffers[answered|today]=%llu|%llu\n",
+							             "buffers[answered|today]=%llu|%llu describe_failed=%llu lookup_busy=%llu helper_writes=%llu\n",
 							             static_cast<unsigned long long>(a.plan_draws), static_cast<unsigned long long>(a.no_plan),
 							             static_cast<unsigned long long>(a.rejected), static_cast<unsigned long long>(a.pipeline_bad),
 							             static_cast<unsigned long long>(a.set_hint), static_cast<unsigned long long>(a.set_hint_missed),
 							             join(a.i_moved_any).c_str(), join(a.i_stale_any).c_str(), static_cast<unsigned long long>(a.used_draws),
 							             static_cast<unsigned long long>(a.used_pipeline), static_cast<unsigned long long>(a.buffers_answered),
-							             static_cast<unsigned long long>(a.buffers_today));
+							             static_cast<unsigned long long>(a.buffers_today), static_cast<unsigned long long>(a.describe_failed),
+							             static_cast<unsigned long long>(a.lookup_busy), [] {
+								             uint64_t n = 0;
+								             for (const auto& w: g_helper_translator_writes) n += w.load(std::memory_order_relaxed);
+								             return static_cast<unsigned long long>(n);
+							             }());
 						}
 					}
 					const uint32_t bucket = k == 1u ? 0u : k < 16u ? 1u : k < 64u ? 2u : k < 128u ? 3u : 4u;
