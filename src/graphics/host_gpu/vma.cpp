@@ -1,3 +1,4 @@
+#include "graphics/guest_gpu/stallWatch.h" // KYTY_DIAG_STALL_WATCH_DRIVER_MS
 #include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/guest_gpu/chunkCensus.h"
@@ -107,6 +108,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device, const VkMemo
                                                    const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory) {
 	const Common::SlowFrame::Scope slow_frame_scope(Common::SlowFrame::MemAlloc); // KYTY_TRACE_SLOW_FRAMES
 	const auto     start  = std::chrono::steady_clock::now();
+	const StallWatch::DriverCallMark driver_mark(Common::SlowFrame::t_exec); // KYTY_DIAG_STALL_WATCH_DRIVER_MS
 	const VkResult result = g_real_allocate(device, info, callbacks, memory);
 	const uint64_t ns     = NanosSince(start);
 	auto&          c      = g_memory_calls;

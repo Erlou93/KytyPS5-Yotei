@@ -1,3 +1,4 @@
+#include "graphics/guest_gpu/stallWatch.h" // KYTY_DIAG_STALL_WATCH_DRIVER_MS
 #include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/image/imageView.h"
 
@@ -418,6 +419,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	vk::Result     result;
 	{
 		const Common::SlowFrame::Scope slow_view(Common::SlowFrame::CreateView); // KYTY_TRACE_SLOW_FRAMES
+		const StallWatch::DriverCallMark driver_mark(Common::SlowFrame::t_exec); // KYTY_DIAG_STALL_WATCH_DRIVER_MS
 		result = m_graphics.device.createImageView(&create, nullptr, &view);
 	}
 	if (Common::SlowFrame::Threshold() != 0u && Common::SlowFrame::NowNs() - slow_t0 >= 2'000'000u) {
