@@ -984,6 +984,17 @@ void GuestGpu::ExecutionThread() {
 			    },
 			    &scopes);
 		}
+		// KYTY_TRACE_PEEK_CENSUS (project 15 N3.0): the commit floor of the chunk-member draws.
+		int                                 floor_pass = -1;
+		std::optional<ChunkLead::FloorTimer> floor_total;
+		if (ChunkLead::PeekCensusOn()) {
+			const auto kind = operation->kind;
+			if (operation->processor == m_gfx_cp.get() && (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto)) {
+				floor_pass = ChunkLead::TargetPass(operation->pass_id);
+			}
+			ChunkLead::t_floor_on = floor_pass >= 0;
+			if (ChunkLead::t_floor_on) floor_total.emplace(ChunkLead::FpTotal);
+		}
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
 			const auto kind  = operation->kind;
@@ -1017,6 +1028,11 @@ void GuestGpu::ExecutionThread() {
 			}
 		} else {
 			operation->processor->Execute(*operation);
+		}
+		if (floor_total) {
+			floor_total.reset();
+			ChunkLead::NoteFloor(floor_pass);
+			ChunkLead::t_floor_on = false;
 		}
 		{
 			// KYTY_TEST_PAD_RECORD / KYTY_TEST_PAD_REPLAY: the gameplay-start anchor (debugSample.h GameplayStartNs).

@@ -437,6 +437,53 @@ void NoteResolve(uint16_t pass, bool dispatch, uint64_t ticks, bool resolved) {
 	s.window_frame = frame;
 }
 
+bool PeekCensusOn() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_TRACE_PEEK_CENSUS");
+		const bool  o     = value != nullptr && value[0] == '1';
+		if (o) std::fprintf(stderr, "TRACE_PEEK_CENSUS enabled (project 15 N3.0: the commit floor)\n");
+		return o;
+	}();
+	return on;
+}
+
+void NoteFloor(int pass) {
+	struct FloorState {
+		std::array<std::array<uint64_t, FpCount>, Passes> ticks {};
+		std::array<uint64_t, Passes>                      draws {};
+		Clock                                             clock;
+		std::chrono::steady_clock::time_point             window       = std::chrono::steady_clock::now();
+		uint32_t                                          window_frame = 0;
+	};
+	static FloorState s; // execution thread
+	if (pass >= 0 && pass < Passes) {
+		for (uint32_t i = 0; i < FpCount; i++) s.ticks[static_cast<size_t>(pass)][i] += t_floor[i];
+		s.draws[static_cast<size_t>(pass)]++;
+	}
+	std::fill(std::begin(t_floor), std::end(t_floor), uint64_t {0});
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5)) return;
+	s.clock.Refresh(Tsc(), now);
+	const double   rate   = s.clock.Rate();
+	const uint32_t frame  = DebugPresentCount().load(std::memory_order_relaxed);
+	const uint32_t frames = frame > s.window_frame ? frame - s.window_frame : 1u;
+	const auto&    names  = TargetList();
+	for (int p = 0; p < Passes && p < static_cast<int>(names.size()); p++) {
+		const auto& t = s.ticks[static_cast<size_t>(p)];
+		const auto  n = s.draws[static_cast<size_t>(p)];
+		const auto  us = [&](uint32_t i) { return n != 0 ? static_cast<double>(t[i]) / rate / 1e3 / static_cast<double>(n) : 0.0; };
+		std::fprintf(stderr,
+		             "PERF commit_floor pass=\"%s\" draws/frame=%.0f us/draw total=%.2f execute=%.2f commit=%.2f targets=%.2f adopt=%.2f "
+		             "bindless=%.2f bda=%.2f pipeline=%.2f\n",
+		             names[static_cast<size_t>(p)].c_str(), static_cast<double>(n) / frames, us(FpTotal), us(FpExecute), us(FpCommit),
+		             us(FpTargets), us(FpAdopt), us(FpBindless), us(FpBda), us(FpPipeline));
+	}
+	s.ticks        = {};
+	s.draws        = {};
+	s.window       = now;
+	s.window_frame = frame;
+}
+
 void NoteSnapshotTaken(bool compute, int kind) {
 	g_snap_taken[compute ? 1u : 0u][static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 }

@@ -1543,6 +1543,7 @@ void Report(TargetMemo& m) {
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
 	                                        DrawRenderState& state) {
+	const ChunkLead::FloorTimer floor_targets(ChunkLead::FpTargets); // KYTY_TRACE_PEEK_CENSUS (N3.0)
 	const auto& shader_regs       = buffer.GetRegisters().GetShaderRegisters();
 	const auto  color_output_mask = DrawColorOutputMask(buffer.GetRegisters());
 	state.ps_active = buffer.GetShaders().GetPs().ps_regs.data_addr != 0 &&
@@ -2356,6 +2357,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable,
                                          const DrawIndirectSource* indirect) {
+	const ChunkLead::FloorTimer floor_execute(ChunkLead::FpExecute); // KYTY_TRACE_PEEK_CENSUS (N3.0)
 	auto& ucfg = buffer.GetUserConfig();
 	// KYTY_DIAG_GPU_BURN_AT=draw (measurement only, map 6.11): the per-draw sensitivity - every draw's preparation.
 	if (GpuBurnSelected() == GpuBurnSite::Draw) GpuBurnAt(GpuBurnSite::Draw);
@@ -2427,6 +2429,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		NoteAsyncDraw(false);
 	} else {
 		bool failed    = false; // (a worker could not create it: today's creation on this thread)
+		const ChunkLead::FloorTimer floor_pipeline(ChunkLead::FpPipeline); // KYTY_TRACE_PEEK_CENSUS (N3.0)
 		async_pipeline = m_context.GetPipelineCache().GetGraphicsPipelineAsync(
 		    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 		    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable, state.programs, &failed);
@@ -2585,6 +2588,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 // The second half of a draw: records what its preparation left in the plan (renderDrawPlan.h). With the render mutex held.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
+	const ChunkLead::FloorTimer floor_commit(ChunkLead::FpCommit); // KYTY_TRACE_PEEK_CENSUS (N3.0)
 	const auto                submit_id                = plan.submit_id;
 	CommandBuffer&            buffer                   = *plan.buffer;
 	const DrawCallInfo&       draw                     = plan.draw;

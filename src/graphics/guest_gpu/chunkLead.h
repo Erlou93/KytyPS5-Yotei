@@ -45,6 +45,31 @@ void ResolveThreadStart(bool sampler, const char* name);
 // Resolve thread, before each operation: its materialization counters reset.
 void ResolveOperationStart();
 
+// Project 15 N3.0 (KYTY_TRACE_PEEK_CENSUS=1, measurement only; design: the analysis session's n3-projekt.md section 2.2):
+// the commit floor - per part, the tsc ticks of chunk-member draws (the three passes, the graphics queue): the whole
+// operation, ExecutePreparedDraw, CommitPreparedDraw, the render targets (PrepareDrawRenderState), the adoption's read
+// check, the bindless tables, PrepareBda, the pipeline lookup. Parts nest (the commit is inside ExecutePreparedDraw);
+// PERF commit_floor prints each part's mean per member draw. Execution thread.
+[[nodiscard]] bool PeekCensusOn();
+enum FloorPart : uint32_t { FpTotal, FpExecute, FpCommit, FpTargets, FpAdopt, FpBindless, FpBda, FpPipeline, FpCount };
+inline thread_local uint64_t t_floor[FpCount] {};
+inline thread_local bool     t_floor_on = false; // set per operation: the census is on and the operation a member draw
+class FloorTimer {
+public:
+	explicit FloorTimer(FloorPart part): m_part(part), m_t0(t_floor_on ? Tsc() : 0) {}
+	~FloorTimer() {
+		if (m_t0 != 0) t_floor[m_part] += Tsc() - m_t0;
+	}
+	FloorTimer(const FloorTimer&)            = delete;
+	FloorTimer& operator=(const FloorTimer&) = delete;
+
+private:
+	FloorPart m_part;
+	uint64_t  m_t0;
+};
+// After a member draw (pass 0..2): its parts summed per pass; PERF commit_floor every ~5 s.
+void NoteFloor(int pass);
+
 // Command processor thread: a snapshot slot taken / waited for (kind 0 context, 1 user config, 2 shaders).
 void NoteSnapshotTaken(bool compute, int kind);
 void NoteSnapshotWait(bool compute, int kind, uint64_t ns);

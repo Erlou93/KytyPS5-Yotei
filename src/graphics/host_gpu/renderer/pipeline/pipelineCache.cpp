@@ -232,6 +232,7 @@ bool ResolvedReadsHold(ResolvedStages& results) {
 	if (results.reads == Reads::Unchecked) {
 		const DispatchSubTimer reads_timer(DispatchSub::AdoptReads); // KYTY_TRACE_DISPATCH_CENSUS
 		const ShaderRecompiler::IR::SrtRuntime runtime {.read_specialization_memory = ReadShaderGuestMemory};
+		const ChunkLead::FloorTimer floor_adopt(ChunkLead::FpAdopt);   // KYTY_TRACE_PEEK_CENSUS (N3.0)
 		const uint64_t lead_t0 = ChunkLead::On() ? ChunkLead::Tsc() : 0; // KYTY_TRACE_CHUNK_LEAD (N2.0b): the check's cost
 		results.reads = ShaderRecompiler::IR::ReadsUnchangedFast(results.log, runtime) ? Reads::Hold : Reads::Changed;
 		if (lead_t0 != 0) ChunkLead::NoteAdopt(ChunkLead::Tsc() - lead_t0, results.log.entries.size(), results.log.bytes.size());

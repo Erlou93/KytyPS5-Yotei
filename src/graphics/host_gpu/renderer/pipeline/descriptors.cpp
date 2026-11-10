@@ -2395,6 +2395,7 @@ struct BindlessSplit {
 
 void RenderExecutor::PrepareBindlessHeaps(const ShaderStageRuntime& runtime,
                                           PreparedBindings& prepared) {
+	const ChunkLead::FloorTimer floor_bindless(ChunkLead::FpBindless); // KYTY_TRACE_PEEK_CENSUS (N3.0)
 	BindlessSplit      bsplit; // KYTY_TRACE_LONG_PREP
 	prepared.bindless_patches.clear();
 	prepared.bindless_images.clear();
