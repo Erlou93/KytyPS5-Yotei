@@ -1047,6 +1047,10 @@ static TextureDescribe DescribeTexture(const ShaderRecompiler::IR::ImageResource
 	// (Not for a resource whose shader picks the mip itself: its mip views are counted from the descriptor's levels.)
 	if (diag_skip_mips != 0u && !storage && !(!resource.r128 && descriptor.MetaCompress()) &&
 	    resource.mip_mode != ShaderRecompiler::IR::ImageMipMode::Dynamic &&
+	    // Only block-compressed (BC1-BC7) textures - the art; data textures (terrain maps, masks, tables) are read texel
+	    // by texel and broke the first try (the game then drew 974 instead of ~1800-3600 draws per frame).
+	    static_cast<int>(pixel_format) >= static_cast<int>(vk::Format::eBc1RgbUnormBlock) &&
+	    static_cast<int>(pixel_format) <= static_cast<int>(vk::Format::eBc7SrgbBlock) &&
 	    desc.info.resources.layers == 1u && !volume && view_levels > diag_skip_mips) {
 		view_base += diag_skip_mips;
 		view_levels -= diag_skip_mips;
