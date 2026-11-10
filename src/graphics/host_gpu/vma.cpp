@@ -67,8 +67,8 @@ bool VramBudgetEnabled() {
 // KYTY_VRAM_BUDGET_MB=<n>: the caches size their garbage-collection thresholds for at most n MiB.
 static uint64_t VramBudgetCap() {
 	static const uint64_t cap = [] {
-		const char* value = std::getenv("KYTY_VRAM_BUDGET_MB"); // default 11264 (user limit: 11 GB); =0 turns the cap off
-		const auto  mib   = value != nullptr ? std::strtoull(value, nullptr, 10) : 11264ull;
+		const char* value = std::getenv("KYTY_VRAM_BUDGET_MB"); // default 13312 (user limit: 13 GB, Rafał 10.11; was 11 GB); =0 turns the cap off
+		const auto  mib   = value != nullptr ? std::strtoull(value, nullptr, 10) : 13312ull;
 		if (mib != 0) std::fprintf(stderr, "VRAM_BUDGET cap=%lluMiB\n", static_cast<unsigned long long>(mib));
 		return mib << 20u;
 	}();
