@@ -23,10 +23,15 @@ enum Part : uint32_t {
 	MemFree,     // vkFreeMemory
 	ReadsCheck,  // ReadsUnchangedFast (an adopted program's logged reads)
 	Protect,     // PageManager page protection changes
+	ExecIdle,    // the execution thread waiting for an operation (WaitForOperations)
+	Claim,       // waiting for a helper's resolved operation (ClaimResolved)
+	Commands,    // the game's commands served between operations (RunCommands)
+	Draws,       // draw operations executed (calls only)
+	Dispatches,  // dispatch operations executed (calls only)
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {
@@ -71,6 +76,10 @@ private:
 	bool     m_on;
 	uint64_t m_start = 0;
 };
+
+inline void CountOne(Part part) {
+	if (t_exec && Threshold() != 0u) Current().calls[part].fetch_add(1, std::memory_order_relaxed);
+}
 
 // Called once per presented frame (the presentation thread): takes the frame's sums and prints a slow frame.
 inline void Report(uint32_t frame, double ms) {
