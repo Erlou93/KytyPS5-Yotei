@@ -3012,11 +3012,6 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 // The image replay's hint: set by FindImage (LastFindImagePlain).
 static thread_local bool g_last_find_plain = false;
 
-static thread_local uint64_t g_full_searches = 0; // a draw's target memo
-
-uint64_t TextureCache::FullSearches() {
-	return g_full_searches;
-}
 
 static thread_local uint64_t                g_nonrepeat = 0; // T1a
 static thread_local std::array<uint64_t, 7> g_nonrepeat_reason {};
@@ -3120,7 +3115,6 @@ ImageId TextureCache::ReplayImageLocked(ImageId id) {
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	g_last_find_plain = false;
-	g_full_searches++;
 	bool plain_source = false; // the image replay's hint: result from SameBacking
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {

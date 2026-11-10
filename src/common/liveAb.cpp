@@ -51,10 +51,6 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
-    // Project 15 way B T1b (test switch): the target memo keeps a search's result when every image search was repeatable
-    // (found by its backing, nothing freed, inserted, aliased or moved) instead of only when there was none; a hit
-    // materializes the targets' colour clears as the search would and rechecks its key.
-    {Switch::TargetMemo, "KYTY_PERF_TARGET_MEMO", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

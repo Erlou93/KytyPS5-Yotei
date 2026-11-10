@@ -161,7 +161,6 @@ public:
 	// no stencil plane or association, no metadata, not 1-byte texels).
 	[[nodiscard]] static bool TakeLastFindImagePlain();
 	// This thread's FindImage calls that went past the found-only answers (a full search; a draw's target memo).
-	[[nodiscard]] static uint64_t FullSearches();
 	// T1a (way B, KYTY_TRACE_PEEK_CENSUS, measurement): the searches that were not repeatable for a target memo, and the first
 	// reason each (0 null image, 1 not a target type, 2 not by SameBacking, 3 another candidate is a block alias, 4 freed or
 	// exact-format reset, 5 inserted, 6 the view moved to another mip or layer).

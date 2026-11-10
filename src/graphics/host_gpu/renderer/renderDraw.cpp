@@ -1629,7 +1629,6 @@ struct TargetMemo {
 	uint32_t                                                color_count = 0;
 	std::array<RenderColorInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};
 	RenderDepthInfo                                         depth {};
-	bool                                                    by_t1b = false; // kept under T1b's rule
 	uint64_t draws = 0, equal = 0, hits = 0, stored = 0;
 };
 TargetMemo g_targets;
@@ -1646,18 +1645,18 @@ void Report(TargetMemo& m) {
 	             static_cast<unsigned long long>(m.hits), static_cast<unsigned long long>(m.stored));
 }
 // T1b: the mode (KYTY_PERF_TARGET_MEMO live A/B test switch; KYTY_CHECK_TARGET_MEMO=2 the check), its counters.
+// T1b is the only path since 10.11 (Rafał: "zostaw włączone"; live A/B +1.17/-2.32/-1.12%, the target state 3.19 -> 2.05
+// ms/frame): 1, or 2 with KYTY_CHECK_TARGET_MEMO=2 (diagnostic).
 uint32_t TargetMemoMode() {
-	static const uint32_t fixed = [] {
+	static const uint32_t mode = [] {
 		const char* check = std::getenv("KYTY_CHECK_TARGET_MEMO");
 		if (check != nullptr && check[0] == '2') {
 			std::fprintf(stderr, "CHECK_TARGET_MEMO=2: every target memo hit is checked against the full search\n");
 			return 2u;
 		}
-		const char* env = std::getenv("KYTY_PERF_TARGET_MEMO");
-		return env != nullptr && env[0] == '1' ? 1u : 0u;
+		return 1u;
 	}();
-	if (fixed == 2u) return 2u;
-	return Common::LiveAb::Gate(Common::LiveAb::Switch::TargetMemo, fixed) != 0u ? 1u : 0u;
+	return mode;
 }
 struct T1bStats {
 	uint64_t abandoned = 0, compared = 0, bad = 0, injected = 0, detected = 0, not_repeatable = 0, moved = 0;
@@ -1905,9 +1904,8 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	auto&         memo = C1::g_targets;
 	C1::FillKey(target_key, buffer.GetRegisters(), mrt_mask, render_target_slice_offset,
 	            m_context.GetTextureCache().GcTick(), m_context.GetCommandScheduler().CurrentTick());
-	const uint32_t t1b          = C1::TargetMemoMode(); // T1b: 0 today's rule, 1 found-only searches kept, 2 also checked
-	// (a memo kept by T1b's rule is not today's: with T1b off - the live A/B's off phase - it is not used)
-	const bool     target_equal = memo.valid && (t1b != 0 || !memo.by_t1b) && C1::SameBytes(target_key, memo.key);
+	const uint32_t t1b          = C1::TargetMemoMode(); // T1b: 1 repeatable searches kept, 2 also checked
+	const bool     target_equal = memo.valid && C1::SameBytes(target_key, memo.key);
 	memo.draws++;
 	memo.equal += target_equal ? 1u : 0u;
 	if (ChunkLead::PeekCensusOn() && t1b != 0) C1::NoteMiss(ChunkLead::t_floor_bucket, target_equal, memo, target_key); // (T1b diag)
@@ -1991,7 +1989,6 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		const ChunkLead::FloorTimer floor_search(ChunkLead::FpTargetSearch); // KYTY_TRACE_PEEK_CENSUS (T1a)
 		const uint64_t nonrepeat0    = TextureCache::NonRepeatableSearches();
 		const auto     reasons0      = TextureCache::NonRepeatReasons();
-		const uint64_t full_searches = TextureCache::FullSearches();
 		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 			if ((mrt_mask & (1u << slot)) != 0) {
 				ResolveRenderColorTarget(buffer, state.color_info[state.color_count],
@@ -2007,7 +2004,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		ResolveRenderDepthTarget(buffer, state.depth_info);
 		// Kept when every search was found-only and nothing was registered meanwhile (the key's epoch still holds); with T1b,
 		// when every search was repeatable (TextureCache::NonRepeatableSearches).
-		const bool searches_kept = t1b != 0 ? TextureCache::NonRepeatableSearches() == nonrepeat0 : TextureCache::FullSearches() == full_searches;
+		const bool searches_kept = TextureCache::NonRepeatableSearches() == nonrepeat0;
 		if (C1::g_t1b.forced_pending) {
 			// (the forced abandon's full search: did its second materialization change the key's ticks, registry or meta?)
 			C1::g_t1b.forced_pending = false;
@@ -2034,7 +2031,6 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		}
 		if (memo.valid) {
 			memo.key         = target_key;
-			memo.by_t1b      = t1b != 0;
 			memo.color_count = state.color_count;
 			for (uint32_t i = 0; i < state.color_count; i++) memo.colors[i] = state.color_info[i];
 			memo.depth = state.depth_info;
