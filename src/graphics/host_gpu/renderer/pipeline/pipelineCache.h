@@ -245,6 +245,7 @@ public:
 	[[nodiscard]] static const ShaderRecompiler::IR::CompiledShaderInfo* AheadProgram(const ResolvedStages& results, uint32_t i);
 	[[nodiscard]] static const ShaderRecompiler::IR::ResourceSnapshot*   StageResources(const ResolvedStages& results, uint32_t i);
 	[[nodiscard]] static const ShaderRecompiler::IR::CompiledShaderInfo* AdoptedProgram(const ResolvedStages& results, uint32_t i);
+	[[nodiscard]] static const StageF::ResolveRecord*                    StageRecord(const ResolvedStages& results, uint32_t i);
 
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,

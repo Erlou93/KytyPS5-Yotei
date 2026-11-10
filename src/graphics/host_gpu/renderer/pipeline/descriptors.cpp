@@ -1432,28 +1432,30 @@ bool BufferSourceHolds(const ResolveRecord::BufferSource& source) {
 
 // The resolve thread's source of snapshot buffer `resource` (V# `value`, bound read-only unless `written`) when it still holds;
 // null (counted by reason) otherwise.
+// count false (project 15 N4.2b, the plan's builder): the same answer without the use counters.
 const ResolveRecord::BufferSource* BufferSourceAhead(const ResolveRecord* record, uint32_t resource,
-                                                     const ShaderRecompiler::IR::DescriptorValue& value, bool written) {
+                                                     const ShaderRecompiler::IR::DescriptorValue& value, bool written,
+                                                     bool count = true) {
 	if (record == nullptr) {
-		NoteBufferUse(BufferUse::NoRecord);
+		if (count) NoteBufferUse(BufferUse::NoRecord);
 		return nullptr;
 	}
 	if (resource >= record->buffer_count) {
-		NoteBufferUse(BufferUse::NotAhead);
+		if (count) NoteBufferUse(BufferUse::NotAhead);
 		return nullptr;
 	}
 	const auto& source = record->buffers[resource];
 	if (source.outcome != BufferOutcome::Found) {
-		NoteBufferMiss(source.outcome);
+		if (count) NoteBufferMiss(source.outcome);
 		return nullptr;
 	}
 	if (value.dword_count < source.words.size() ||
 	    !std::equal(source.words.begin(), source.words.end(), value.dwords.begin())) {
-		NoteBufferUse(BufferUse::Words);
+		if (count) NoteBufferUse(BufferUse::Words);
 		return nullptr;
 	}
 	if (source.sentinel && written) {
-		NoteBufferUse(BufferUse::Written);
+		if (count) NoteBufferUse(BufferUse::Written);
 		return nullptr;
 	}
 	return BufferSourceHolds(source) ? &source : nullptr;
@@ -1461,22 +1463,22 @@ const ResolveRecord::BufferSource* BufferSourceAhead(const ResolveRecord* record
 
 // The resolve thread's source of record-keyed range `index` when it still holds; null (counted by reason) otherwise.
 const ResolveRecord::BufferSource* RangeSourceAhead(const ResolveRecord* record, uint32_t index,
-                                                    const ShaderRecompiler::IR::IndirectRange& range) {
+                                                    const ShaderRecompiler::IR::IndirectRange& range, bool count = true) {
 	if (record == nullptr) {
-		NoteBufferUse(BufferUse::NoRecord);
+		if (count) NoteBufferUse(BufferUse::NoRecord);
 		return nullptr;
 	}
 	if (index >= record->range_count) {
-		NoteBufferUse(BufferUse::NotAhead);
+		if (count) NoteBufferUse(BufferUse::NotAhead);
 		return nullptr;
 	}
 	const auto& source = record->ranges[index];
 	if (source.outcome != BufferOutcome::Found) {
-		NoteBufferMiss(source.outcome);
+		if (count) NoteBufferMiss(source.outcome);
 		return nullptr;
 	}
 	if (source.address != range.address || source.range_size != range.size || source.written != range.written) {
-		NoteBufferUse(BufferUse::Words);
+		if (count) NoteBufferUse(BufferUse::Words);
 		return nullptr;
 	}
 	return BufferSourceHolds(source) ? &source : nullptr;
@@ -4201,6 +4203,41 @@ vk::ImageView Shifted(vk::ImageView view) {
 	return vk::ImageView(reinterpret_cast<VkImageView>(reinterpret_cast<uintptr_t>(static_cast<VkImageView>(view)) + 1u));
 }
 } // namespace PeekImages
+
+// Project 15 N4.2b: the plan entries of a stage's read buffer bindings and read record-keyed ranges, from the resolve's
+// record (no V# decoded: a binding whose source is not in the record has no entry) and PeekBuffer.
+void RenderExecutor::PeekStageBuffers(const ShaderRecompiler::IR::CompiledShaderInfo& program,
+                                      const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const StageF::ResolveRecord* record,
+                                      uint32_t distance, std::vector<PlanBuffer>& out) {
+	auto& cache = m_context.GetBufferCache();
+	for (uint32_t index = 0; index < snapshot.indirect_ranges.size(); index++) {
+		const auto& range = snapshot.indirect_ranges[index];
+		if (range.written) continue;
+		const auto* ahead = StageF::RangeSourceAhead(record, index, range, false);
+		if (ahead == nullptr || ahead->size == 0u) continue;
+		auto& entry    = out.emplace_back();
+		entry.vaddr    = range.address;
+		entry.size     = ahead->size;
+		entry.bda      = true;
+		entry.kind     = 1;
+		entry.distance = distance;
+		entry.peek     = cache.PeekBuffer(range.address, ahead->size, false, false, ahead->id, true);
+	}
+	for (uint32_t resource = 0; resource < program.info.buffers.size(); ++resource) {
+		const auto& metadata = program.info.buffers[resource];
+		if (metadata.descriptor_index == UINT32_MAX || metadata.written) continue;
+		const auto* ahead = StageF::BufferSourceAhead(record, resource, snapshot.buffers[resource], false, false);
+		if (ahead == nullptr || ahead->address == 0 || ahead->size == 0) continue;
+		const bool texel = metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled());
+		auto&      entry = out.emplace_back();
+		entry.vaddr      = ahead->address;
+		entry.size       = ahead->size;
+		entry.texel      = texel;
+		entry.kind       = 0;
+		entry.distance   = distance;
+		entry.peek       = cache.PeekBuffer(ahead->address, ahead->size, false, texel, ahead->id);
+	}
+}
 
 // Project 15 S2b: a stage's images and samplers without a write (no set moved, no replay slot inserted, no view created,
 // no touch), under the cache's read section and inside the translator section. N4.1 calls it for draws ahead too

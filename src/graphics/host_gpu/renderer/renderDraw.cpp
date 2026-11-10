@@ -1110,17 +1110,13 @@ struct VertexBufferRange {
 };
 
 // Fills `prepared` in place: it is three RES_MAX arrays, which a returned copy moved per draw.
-static void AcquireVertexBuffers(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info,
-                                 PreparedVertexBuffers& prepared) {
-	KYTY_PROFILER_BLOCK("Draw::AcquireVertexBuffers");
-	EXIT_IF(vs_input_info.buffers_num < 0 ||
-	        vs_input_info.buffers_num > ShaderVertexInputInfo::RES_MAX);
-
-	// Collect the non-empty guest vertex ranges. The arrays are not zeroed (~4.4 KB per draw): every entry read below is
-	// written earlier in this call (sizes[i] for each i < buffers_num, the ranges below their counts, all fields of each).
-	std::array<uint64_t, ShaderVertexInputInfo::RES_MAX>          sizes;
+// The non-empty guest vertex ranges of a draw, sorted and merged where they overlap or touch (AcquireVertexBuffers; the
+// plan's builder, project 15 N4.2b). An invalid range: EXIT, or (exit_on_bad false) UINT32_MAX.
+static uint32_t MergedVertexRanges(const ShaderVertexInputInfo& vs_input_info, std::array<uint64_t, ShaderVertexInputInfo::RES_MAX>& sizes,
+                                   std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX>& merged_ranges, bool exit_on_bad) {
+	// The arrays are not zeroed (~4.4 KB per draw): every entry read below is written earlier in this call (sizes[i] for
+	// each i < buffers_num, the ranges below their counts, all fields of each).
 	std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX> ranges;
-	std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX> merged_ranges;
 	uint32_t range_count = 0;
 	for (int i = 0; i < vs_input_info.buffers_num; i++) {
 		const auto& vertex = vs_input_info.buffers[i];
@@ -1130,6 +1126,7 @@ static void AcquireVertexBuffers(CommandBuffer& buffer, const ShaderVertexInputI
 			continue;
 		}
 		if (vertex.addr == 0 || size > UINT64_MAX - vertex.addr) {
+			if (!exit_on_bad) return UINT32_MAX;
 			EXIT("invalid vertex buffer range: addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 			     vertex.addr, size);
 		}
@@ -1153,6 +1150,17 @@ static void AcquireVertexBuffers(CommandBuffer& buffer, const ShaderVertexInputI
 		}
 		merged_ranges[merged_count++] = {range.base_address, range.requested_end, 0, nullptr, 0};
 	}
+	return merged_count;
+}
+
+static void AcquireVertexBuffers(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info,
+                                 PreparedVertexBuffers& prepared) {
+	KYTY_PROFILER_BLOCK("Draw::AcquireVertexBuffers");
+	EXIT_IF(vs_input_info.buffers_num < 0 ||
+	        vs_input_info.buffers_num > ShaderVertexInputInfo::RES_MAX);
+	std::array<uint64_t, ShaderVertexInputInfo::RES_MAX>          sizes;
+	std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX> merged_ranges;
+	const uint32_t merged_count = MergedVertexRanges(vs_input_info, sizes, merged_ranges, true);
 
 	auto& cache = buffer.GetContext().GetBufferCache();
 	for (uint32_t i = 0; i < merged_count; i++) {
@@ -2653,6 +2661,14 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		plan.indirect_count    = {};
 		m_context.GetBindlessTable().BeginPlan();
 	}
+	// N4.2b (KYTY_CHECK_PLAN_BUFFERS=2): the plan's buffer entries checked by the acquisitions below.
+	struct PlanBuffersScope {
+		bool on;
+		~PlanBuffersScope() {
+			if (on) BufferCache::SetPlanBuffers(nullptr);
+		}
+	} const plan_buffers_scope {BufferCache::PlanBufferCheck()};
+	if (plan_buffers_scope.on) PlanBuffersBegin();
 	// The binding preparation.
 	{
 		const uint32_t long_us = LongPrepThresholdUs(); // KYTY_TRACE_LONG_PREP
@@ -3463,6 +3479,7 @@ struct RenderExecutor::ResolvedDraw {
 		PipelineCache::GraphicsPipelineKey                               key {};
 		std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> find {nullptr, PipelineCache::PipelineFind::Count};
 		std::vector<std::pair<const void*, PeekStageImagesResult>>      images;
+		std::vector<PlanBuffer>                                          buffers; // N4.2b
 	} ahead;
 };
 
@@ -3494,6 +3511,7 @@ RenderExecutor::ResolvedDraw& RenderExecutor::NextResolvedDraw() {
 	draw.ahead.key_valid = false; // N4.1
 	draw.ahead.planned   = false;
 	draw.ahead.images.clear();
+	draw.ahead.buffers.clear();
 	draw.empty    = false;
 	draw.check    = nullptr;
 	draw.fault    = 0;
@@ -3541,6 +3559,7 @@ bool RenderExecutor::ResolveDispatchInto(ResolvedDraw& draw, const HW::Shader& s
 
 void RenderExecutor::UseResolvedDraw(ResolvedDraw* resolved) noexcept {
 	m_resolved_draw   = resolved;
+	m_slot_taken      = false;
 	t_resolved_stages = resolved != nullptr ? resolved->stages : nullptr;
 }
 
@@ -3552,6 +3571,7 @@ DrawRenderState* RenderExecutor::TakeResolvedState(const ShaderIndirectDrawInfo&
 		return nullptr;
 	}
 	m_state_resolved = true;
+	m_slot_taken     = true; // N4.2: the draw runs on the slot's state (its plan may be used)
 	return &resolved->state;
 }
 
@@ -3766,8 +3786,12 @@ void RenderExecutor::CheckAheadKey(const PipelineCache::GraphicsPipelineKey& key
 	if (ah.find != m_context.GetPipelineCache().FindGraphicsPipeline(key_today)) a.k_find_diff++;
 }
 
+void RenderExecutor::PlanBuffersBegin() {
+	BufferCache::SetPlanBuffers(PlanPresent() && PlanProgramsHold() ? &m_resolved_draw->ahead.buffers : nullptr);
+}
+
 bool RenderExecutor::PlanPresent() const {
-	return m_resolved_draw != nullptr && m_resolved_draw->ahead.planned;
+	return m_resolved_draw != nullptr && m_slot_taken && m_resolved_draw->ahead.planned; // n4-2b-wejscia.md 1
 }
 
 uint64_t RenderExecutor::PlanSetVersion(const void* program) const {
@@ -3807,7 +3831,7 @@ bool RenderExecutor::TakeAheadImages(const void* program, PeekStageImagesResult&
 
 void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders,
                                bool indexed, uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset,
-                               uint64_t indirect, uint32_t distance) {
+                               uint64_t indirect, uint32_t distance, uint64_t index_address) {
 	auto&          a      = g_ahead;
 	const uint32_t bucket = AheadBucket(distance);
 	a.planned++;
@@ -3821,6 +3845,7 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 	slot->ahead.planned   = false;
 	slot->ahead.distance  = distance;
 	slot->ahead.images.clear();
+	slot->ahead.buffers.clear();
 	// The gates DrawIndex / DrawAuto pass before the targets are described (their order).
 	if (slot->shaders != &shaders) {
 		a.gated[2]++;
@@ -3906,6 +3931,35 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 			PeekStageImagesResult images;
 			front = PeekStageImages(*program, *resources, false, images, false) && front;
 			slot->ahead.images.emplace_back(program, std::move(images));
+			// N4.2b: the stage's buffers
+			PeekStageBuffers(*program, *resources, PipelineCache::StageRecord(*slot->stages, i), distance, slot->ahead.buffers);
+		}
+		// N4.2b: the merged vertex ranges (clamped as AcquireVertexBuffers clamps them) and the 16/32-bit index buffer.
+		auto& cache = m_context.GetBufferCache();
+		std::array<uint64_t, ShaderVertexInputInfo::RES_MAX>          sizes;
+		std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX> merged;
+		const auto& vs_input = state.vertex_info[0];
+		const uint32_t merged_count =
+		    vs_input.buffers_num >= 0 && vs_input.buffers_num <= ShaderVertexInputInfo::RES_MAX ? MergedVertexRanges(vs_input, sizes, merged, false)
+		                                                                                         : UINT32_MAX;
+		for (uint32_t m = 0; merged_count != UINT32_MAX && m < merged_count; m++) {
+			uint64_t       generation = 0;
+			const uint64_t size = Libs::LibKernel::Memory::ClampRangeSizeAhead(merged[m].base_address, merged[m].RequestedSize(), &generation);
+			if (size == 0) continue;
+			auto& entry    = slot->ahead.buffers.emplace_back();
+			entry.vaddr    = merged[m].base_address;
+			entry.size     = size;
+			entry.kind     = 2;
+			entry.distance = distance;
+			entry.peek     = cache.PeekBuffer(entry.vaddr, size, false, false, {});
+		}
+		if (indexed && (element == 2u || element == 4u) && index_address != 0) {
+			auto& entry    = slot->ahead.buffers.emplace_back();
+			entry.vaddr    = index_address;
+			entry.size     = static_cast<uint64_t>(count) * element;
+			entry.kind     = 3;
+			entry.distance = distance;
+			entry.peek     = cache.PeekBuffer(entry.vaddr, entry.size, false, false, {});
 		}
 	}
 	PipelineCache::RestoreAhead(*slot->stages, saved);

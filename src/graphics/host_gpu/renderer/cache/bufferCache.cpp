@@ -3201,12 +3201,119 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 	return p;
 }
 
+// N4.2b (KYTY_CHECK_PLAN_BUFFERS=2): the plan's entry of an acquisition, checked like the lag check of S2a.
+namespace {
+struct PlanBufferStats {
+	std::array<uint64_t, 4>                lookups {}, compared {}, bad {}, race {}, not_ready {};
+	std::array<std::array<uint64_t, 4>, 4> fail {};        // [kind][PeekProofFail 1..3]
+	std::array<uint64_t, 4>                by_distance {}; // compared, by distance from the chunk's opening
+	uint64_t                               unplanned = 0, injected = 0, detected = 0;
+	uint32_t                               logged    = 0;
+};
+PlanBufferStats              g_plan_buffer_stats; // GPU thread
+std::vector<PlanBuffer>*     g_plan_buffers = nullptr;
+PlanBuffer* PlanBufferFind(uint64_t vaddr, uint64_t size, bool texel, bool bda) {
+	if (g_plan_buffers == nullptr) return nullptr;
+	for (auto& entry: *g_plan_buffers) {
+		if (!entry.used && entry.vaddr == vaddr && entry.size == size && entry.texel == texel && entry.bda == bda) return &entry;
+	}
+	return nullptr;
+}
+void PlanBufferReport() {
+	auto&    s = g_plan_buffer_stats;
+	uint64_t n = 0;
+	for (const auto c: s.compared) n += c;
+	if ((n & ((1u << 20u) - 1u)) != 0) return;
+	const auto join = [](const auto& a) {
+		std::string out;
+		for (size_t i = 0; i < a.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);
+		return out;
+	};
+	std::string fail;
+	for (size_t k = 0; k < 4; k++) fail += std::string(k == 0 ? "" : " ") + std::to_string(s.fail[k][1]) + "|" + std::to_string(s.fail[k][2]) + "|" + std::to_string(s.fail[k][3]);
+	std::fprintf(stderr,
+	             "PERF plan_buffers [buffer|range|vertex|index] lookups=%s compared=%s bad=%s race=%s not_ready=%s "
+	             "fail[registry|cpu|image]=%s by_distance=%s unplanned=%llu fault[injected|detected]=%llu|%llu\n",
+	             join(s.lookups).c_str(), join(s.compared).c_str(), join(s.bad).c_str(), join(s.race).c_str(),
+	             join(s.not_ready).c_str(), fail.c_str(), join(s.by_distance).c_str(), static_cast<unsigned long long>(s.unplanned),
+	             static_cast<unsigned long long>(s.injected), static_cast<unsigned long long>(s.detected));
+}
+} // namespace
+
+void BufferCache::SetPlanBuffers(std::vector<PlanBuffer>* entries) {
+	g_plan_buffers = entries;
+}
+
+bool BufferCache::PlanBufferCheck() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_CHECK_PLAN_BUFFERS");
+		const bool  m   = env != nullptr && env[0] == '2';
+		if (m) std::fprintf(stderr, "CHECK_PLAN_BUFFERS=2: every acquisition with a plan entry checked against it\n");
+		return m;
+	}();
+	return on;
+}
+
 // KYTY_CHECK_PEEK=2 (diagnostic): the peek first, then today's path; a Ready or Direct peek must name the same buffer and
 // offset, and today's path must have done nothing but touch and note (no upload, stream copy or image sync, the buffer
 // registry unchanged). The lag check: a Ready peek kept from an earlier call of the same range whose proof still holds
 // must be what today's path answers now. KYTY_CHECK_PEEK_FAULT=N: every N-th compared peek gets a wrong offset.
+template <typename Path>
+std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_t vaddr, uint64_t size, Path&& path) {
+	auto& s      = g_plan_buffer_stats;
+	entry.used   = true;
+	const auto k = entry.kind & 3u;
+	s.lookups[k]++;
+	if (entry.peek.klass != BufferPeek::Ready) {
+		s.not_ready[k]++;
+		return path();
+	}
+	if (const uint32_t fail = PeekProofFail(entry.peek, vaddr, size); fail != 0) {
+		s.fail[k][fail & 3u]++;
+		return path();
+	}
+	const uint64_t epoch0 = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
+	const uint64_t work0  = t_obtain_work;
+	const auto     result = path();
+	const bool     quiet  = t_obtain_work == work0 && DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire) == epoch0 &&
+	                   result.first != &Stream();
+	s.compared[k]++;
+	s.by_distance[entry.distance == 0u ? 0u : entry.distance < 16u ? 1u : entry.distance < 64u ? 2u : 3u]++;
+	uint64_t   offset = entry.peek.offset;
+	uint64_t   total  = 0;
+	for (const auto c: s.compared) total += c;
+	const bool fault = PeekFaultEvery() != 0 && total % PeekFaultEvery() == 0;
+	if (fault) {
+		offset += 16u;
+		s.injected++;
+	}
+	const bool same = entry.peek.id && result.first == &m_slot_buffers[entry.peek.id] && result.second == offset && quiet;
+	if (!same) {
+		if (fault) {
+			s.detected++;
+		} else if (!PeekProofHolds(entry.peek, vaddr, size)) {
+			s.race[k]++;
+		} else {
+			s.bad[k]++;
+			if (s.logged++ < 20u) {
+				std::fprintf(stderr, "CHECK_PLAN_BUFFER bad kind=%u addr=%llx size=%llx quiet=%d\n", k,
+				             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size), quiet ? 1 : 0);
+			}
+		}
+	}
+	PlanBufferReport();
+	return result;
+}
+
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
                                                        BufferId id, bool image_source) {
+	if (PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
+		if (auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false); entry != nullptr) {
+			return PlanChecked(*entry, vaddr, size,
+			                   [&] { return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source); });
+		}
+		g_plan_buffer_stats.unplanned++;
+	}
 	if (PeekCheckMode() == 0 || image_source || !GuestGpu::IsGpuThread()) {
 		return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source);
 	}
@@ -3338,7 +3445,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferPath(uint64_t vaddr, uint6
 		write_memo_keep               = WriteMemoEpochs(vaddr, size, write_memo_fresh);
 	}
 	// The obtain memo: a read of a kept range (the diagnostic and approximation paths below never use it).
-	const bool memo_on = !is_written && !is_texel_buffer && !image_source && PeekCheckMode() == 0; // =2: full path
+	const bool memo_on = !is_written && !is_texel_buffer && !image_source && PeekCheckMode() == 0 && // =2: full path
+	                     !PlanBufferCheck();
 	const ObtainMemoEntry* memo_hit = memo_on ? ObtainMemoFind(vaddr, size) : nullptr;
 	if (memo_on) {
 		auto& s = ObtainMemoStatsRef();
@@ -3475,6 +3583,12 @@ void BufferCache::NoteObtainedWriteRepeat(uint64_t vaddr, uint64_t size, bool sa
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRange(uint64_t vaddr, uint64_t size, bool is_written,
                                                          BufferId id) {
+	if (PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && GuestGpu::IsGpuThread() && GuestRange {vaddr, size}.Valid()) {
+		if (auto* entry = PlanBufferFind(vaddr, size, false, true); entry != nullptr) {
+			return PlanChecked(*entry, vaddr, size, [&] { return ObtainBdaRangePath(vaddr, size, is_written, id); });
+		}
+		g_plan_buffer_stats.unplanned++;
+	}
 	if (PeekCheckMode() == 0 || !GuestGpu::IsGpuThread() || !GuestRange {vaddr, size}.Valid()) {
 		return ObtainBdaRangePath(vaddr, size, is_written, id);
 	}

@@ -2308,6 +2308,10 @@ const ShaderRecompiler::IR::CompiledShaderInfo* PipelineCache::AheadProgram(cons
 	return i < 4u ? results.ahead_programs[i] : nullptr;
 }
 
+const StageF::ResolveRecord* PipelineCache::StageRecord(const ResolvedStages& results, uint32_t i) {
+	return i < 4u ? results.stages[i].record.get() : nullptr;
+}
+
 const ShaderRecompiler::IR::CompiledShaderInfo* PipelineCache::AdoptedProgram(const ResolvedStages& results, uint32_t i) {
 	return i < 4u && results.stages[i].out_stage != nullptr ? results.stages[i].out_stage->program : nullptr;
 }

@@ -347,7 +347,10 @@ public:
 	// Project 15 N4.1 (KYTY_CHECK_PEEK=2): the chunk's opening peeks a draw ahead in the queue (programs, targets,
 	// pipeline, stage images) into its slot, without a write; distance from the opening draw.
 	void PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders, bool indexed,
-	               uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset, uint64_t indirect, uint32_t distance);
+	               uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset, uint64_t indirect, uint32_t distance,
+	               uint64_t index_address = 0);
+	// N4.2b: hands the running draw's buffer plan entries to the buffer cache's check (null: none).
+	void PlanBuffersBegin();
 	// KYTY_DIAG_GPU_BURN_NS / KYTY_DIAG_GPU_BURN_AT (measurement only): GPU-thread spin at one of these places.
 	// InvalidateCaller: the guest thread whose write fault reads GPU-modified bytes back, not the GPU thread.
 	// Readback and Pm4 (measurement only): a GPU-thread guest read of GPU-written data, a PM4 packet of the GPU thread.
@@ -478,6 +481,9 @@ private:
 	// ahead key against today's (renderDraw.cpp, after ResolvedDraw).
 	bool TakeAheadImages(const void* program, PeekStageImagesResult& out, uint32_t& distance);
 	void CheckAheadKey(const PipelineCache::GraphicsPipelineKey& key_today);
+	// N4.2b: a stage's buffer plan entries (descriptors.cpp).
+	void PeekStageBuffers(const ShaderRecompiler::IR::CompiledShaderInfo& program, const ShaderRecompiler::IR::ResourceSnapshot& snapshot,
+	                      const StageF::ResolveRecord* record, uint32_t distance, std::vector<PlanBuffer>& out);
 	// N4.2a: the running draw's plan (PeekAhead): whether there is one, the set version it names for a stage's program, and
 	// whether today's adoption took the predicted programs; the pipeline it found (null: none).
 	[[nodiscard]] bool                     PlanPresent() const;
@@ -522,6 +528,7 @@ private:
 	[[nodiscard]] bool TakeResolvedDispatch(ShaderComputeInputInfo& input_info, ShaderProgram& program);
 	ResolvedDraw* m_resolved_draw  = nullptr; // the operation's
 	uint64_t      m_plan_set_version = 0;      // N4.2a: the table set a plan names for the stage being prepared
+	bool          m_slot_taken       = false;  // N4.2: TakeResolvedState took the running draw's slot (UseResolvedDraw clears it)
 	bool          m_state_resolved = false;   // the draw being prepared adopted its state
 	std::unique_ptr<ResolvedDrawRing, void (*)(ResolvedDrawRing*)> m_resolved_ring {nullptr, nullptr};
 	DrawSlot* m_draw_slot    = nullptr; // allocated on first use

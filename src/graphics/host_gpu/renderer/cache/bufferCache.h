@@ -60,6 +60,8 @@ struct BufferSyncStats {
 	uint64_t bytes   = 0;  // bytes copied
 };
 
+struct PlanBuffer;
+
 class BufferCache {
 public:
 	static constexpr uint32_t CACHING_PAGEBITS  = 14;
@@ -134,6 +136,8 @@ public:
 	                                    bool bda = false);
 	// KYTY_CHECK_PEEK=2: today's path after the peek, compared (bufferCache.cpp).
 	template <typename Path>
+	std::pair<Buffer*, uint64_t> PlanChecked(PlanBuffer& entry, uint64_t vaddr, uint64_t size, Path&& path);
+	template <typename Path>
 	std::pair<Buffer*, uint64_t> PeekChecked(const BufferPeek& peek, uint64_t vaddr, uint64_t size, bool is_written, bool bda, Path&& path);
 	// Whether a Ready or Direct peek's proof still holds (the obtain memo's check); PeekProofFail names the failed part
 	// (0 holds, 1 buffer registry, 2 CPU-dirty region epochs, 3 image pages, 4 not a proved class).
@@ -149,6 +153,10 @@ public:
 	                                                        BufferId id              = {},
 	                                                        bool     image_source    = false);
 	// ObtainBuffer's work (ObtainBuffer adds KYTY_CHECK_PEEK=2 around it).
+	// N4.2b (KYTY_CHECK_PLAN_BUFFERS=2, diagnostic): the running draw's plan entries; every acquisition with an entry of
+	// its key is checked against it (the entry's proof, today's path quiet and with the same buffer and offset).
+	static void SetPlanBuffers(std::vector<PlanBuffer>* entries);
+	[[nodiscard]] static bool PlanBufferCheck();
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferPath(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
 	                                                            BufferId id, bool image_source);
 	// KYTY_CHECK_PEEK=2: ObtainBufferPath's work that a Ready peek promised away (uploads, stream copies, image syncs).
@@ -1001,6 +1009,16 @@ private:
 	GranuleTickTable m_granule_ticks;
 	std::unordered_map<uint64_t, uint64_t> m_buffer_ready_tick;
 	uint64_t                   m_hot_clock = 0;
+};
+
+// Project 15 N4.2b: one buffer acquisition a draw's plan peeked ahead (PeekBuffer), keyed by the acquisition's arguments:
+// kind 0 a stage buffer, 1 a record-keyed range (BDA), 2 a merged vertex range, 3 the index buffer.
+struct PlanBuffer {
+	uint64_t                vaddr = 0, size = 0;
+	bool                    texel = false, bda = false, used = false;
+	uint8_t                 kind     = 0;
+	uint32_t                distance = 0;
+	BufferCache::BufferPeek peek;
 };
 
 } // namespace Libs::Graphics

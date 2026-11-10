@@ -992,7 +992,9 @@ void GuestGpu::ExecutionThread() {
 		static const bool peek_ahead = [] {
 			const char* env    = std::getenv("KYTY_CHECK_PEEK");
 			const char* oracle = std::getenv("KYTY_CHECK_CHUNKS");
-			return (env != nullptr && env[0] == '2') || (oracle != nullptr && oracle[0] == '2'); // N4.2a: the plans too
+			const char* plan   = std::getenv("KYTY_CHECK_PLAN_BUFFERS");
+			return (env != nullptr && env[0] == '2') || (oracle != nullptr && oracle[0] == '2') || // N4.2a: the plans too
+			       (plan != nullptr && plan[0] == '2');                                             // N4.2b
 		}();
 		if (plan_census || peek_ahead) {
 			struct PlanCensus {
@@ -1050,7 +1052,8 @@ void GuestGpu::ExecutionThread() {
 								const auto& args = op.draw_index;
 								executor.PeekAhead(op.resolved, *op.state.context, *op.state.user_config, *op.state.shaders, true,
 								                   args.index_count, 1u /* instances: set when executed (ResolveNumInstances); not in the key */, args.index_type_and_size,
-								                   args.render_target_slice_offset, args.indirect.address, distance);
+								                   args.render_target_slice_offset, args.indirect.address, distance,
+								                   reinterpret_cast<uint64_t>(args.index_addr));
 							} else {
 								const auto& args = op.draw_auto;
 								executor.PeekAhead(op.resolved, *op.state.context, *op.state.user_config, *op.state.shaders, false,
