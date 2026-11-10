@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/bufferCacheTrace.h"
+#include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/cache/ringCensus.h"
 
 #include "common/alignment.h"
@@ -3342,6 +3343,8 @@ std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
                                                        BufferId id, bool image_source) {
+	std::optional<ChunkLead::FloorTimer> floor_written; // KYTY_TRACE_PEEK_CENSUS (way B W0 D5w): a written range's acquisition
+	if (is_written) floor_written.emplace(ChunkLead::FpWritten);
 	if (!PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
 		// N4.3: the plan's answer - what today's path does for a clean, registered range with no image at its start: the touch.
 		auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false);

@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/refCapture.h"
 #include "graphics/host_gpu/renderer/renderComputeTrace.h"
+#include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/twinDispatch.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/gpuCheckpoints.h"
@@ -328,6 +329,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
 	CleanDraws::NoteBreak(async_compute ? CleanDraws::BreakAsync : CleanDraws::BreakDispatch); // KYTY_TRACE_CLEAN_DRAWS
 	DispatchCensusTimer         census_timer(buffer.GetShaders().GetCs().cs_regs.data_addr, async_compute); // KYTY_TRACE_DISPATCH_CENSUS
+	ChunkLead::FloorPhase       floor_phase(ChunkLead::FpD1); // KYTY_TRACE_PEEK_CENSUS (way B W0 D1-D7)
 	GpuBurnAt(GpuBurnSite::Dispatch); // KYTY_DIAG_GPU_BURN_AT=dispatch (measurement only)
 	// KYTY_DIAG_GPU_BURN_AT=dispatch_async / dispatch_gfx (measurement only): the asynchronous compute queues' dispatches
 	// or the graphics queue's (step 0c).
@@ -420,11 +422,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	census_timer.Mark(1);
+	floor_phase.Next(ChunkLead::FpD2);
 	ShaderProgram compute_program;
 	if (!TakeResolvedDispatch(input_info, compute_program)) {
 		compute_program = m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
 	}
 	census_timer.Mark(2);
+	floor_phase.Next(ChunkLead::FpD3);
 	// (Upstream also starts its image heap here, ImageHeap::BeginDraw; not in use, RenderContext::ImageHeapEnabled.)
 	// KYTY_DIAG_TWIN_DISPATCH: the other program of a selected dispatch, before anything of the dispatch is recorded.
 	TwinDispatch::Twin twin;
@@ -481,6 +485,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	if (ref_capture) RefCapture::Prefetch(cs_regs);
 	buffer.EndRendering();
 	census_timer.Mark(3);
+	floor_phase.Next(ChunkLead::FpD4);
 	std::optional<DispatchSubTimer> sub_timer(std::in_place, DispatchSub::Pipeline); // KYTY_TRACE_DISPATCH_CENSUS
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
@@ -500,6 +505,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			          prepared.shader_data.begin() + program.bindings.dispatch_thread_dword);
 		}
 		census_timer.Mark(4);
+		floor_phase.Next(ChunkLead::FpD5);
 		sub_timer.emplace(DispatchSub::FindBuffers);
 		FindBuffers(std::span {&prepared_stage, 1u});
 		sub_timer.emplace(DispatchSub::PrepareBda);
@@ -520,6 +526,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 	if (chunk_check) ChunkCheckSecond(std::span {&descriptor_stage, 1u}, nullptr, true);
 	census_timer.Mark(5);
+	floor_phase.Next(ChunkLead::FpD6);
 
 	auto              vk_buffer        = buffer.Handle();
 	sub_timer.emplace(DispatchSub::CommitBindings);
@@ -551,6 +558,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		NoteComputeHazardBarrier();
 	}
 	census_timer.Mark(6);
+	floor_phase.Next(ChunkLead::FpD7);
 	sub_timer.emplace(DispatchSub::TailPre); // KYTY_TRACE_DISPATCH_CENSUS: to the recording
 	bool writes_flip = false;
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {

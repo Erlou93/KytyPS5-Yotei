@@ -52,7 +52,15 @@ void ResolveOperationStart();
 // PERF commit_floor prints each part's mean per member draw. Execution thread.
 [[nodiscard]] bool     PeekCensusOn();
 [[nodiscard]] uint64_t Tsc();
-enum FloorPart : uint32_t { FpTotal, FpExecute, FpCommit, FpTargets, FpAdopt, FpBindless, FpBda, FpPipeline, FpBuild, FpCount };
+// Way B W0 (10.11): A2 FpTake (TakeResolvedState, contains FpAdopt), A5 FpStageBind (PrepareBindings, contains FpBindless and
+// FpUpload), A7 FpUpload, A8 FpDrawBind (PrepareDrawBindings, contains FpBda and FpImages), A10 FpImages, A12 FpAcquire,
+// A13 FpScanTransit; a dispatch's phases D1-D7 (FloorPhase) and D5w FpWritten (ObtainBuffer for a written range).
+enum FloorPart : uint32_t {
+	FpTotal, FpExecute, FpCommit, FpTargets, FpAdopt, FpBindless, FpBda, FpPipeline, FpBuild,
+	FpTake, FpStageBind, FpUpload, FpDrawBind, FpImages, FpAcquire, FpScanTransit,
+	FpD1, FpD2, FpD3, FpD4, FpD5, FpD6, FpD7, FpWritten,
+	FpCount
+};
 inline thread_local uint64_t t_floor[FpCount] {};
 inline thread_local bool     t_floor_on = false; // set per operation: the census is on and the operation a member draw
 class FloorTimer {
@@ -68,6 +76,32 @@ private:
 	FloorPart m_part;
 	uint64_t  m_t0;
 };
+// Way B W0: consecutive phases of one function; the time since the last mark goes to the part being left.
+class FloorPhase {
+public:
+	explicit FloorPhase(FloorPart first): m_part(first), m_last(t_floor_on ? Tsc() : 0) {}
+	void Next(FloorPart part) {
+		if (m_last == 0) return;
+		const uint64_t now = Tsc();
+		t_floor[m_part] += now - m_last;
+		m_last = now;
+		m_part = part;
+	}
+	~FloorPhase() {
+		if (m_last != 0) t_floor[m_part] += Tsc() - m_last;
+	}
+	FloorPhase(const FloorPhase&)            = delete;
+	FloorPhase& operator=(const FloorPhase&) = delete;
+
+private:
+	FloorPart m_part;
+	uint64_t  m_last;
+};
+// Way B W0 Table B: a draw's first unmet condition (0 none; 1 no plan, 2 pipeline not from it, 3 a buffer acquisition went
+// today's way, 4 an image set or slot was not ready, 5 an image barrier, 6 a render pass begun, 7 other in-order work -
+// buffer work or an image created, 8 a scalar-read overlap scan), per draw bucket, with the runs of draws meeting all.
+void NoteCover(int bucket, int reason);
+
 // After an operation (bucket 0..2 the three passes' draws, then the buckets below): its parts summed per bucket;
 // PERF commit_floor every ~5 s, and PERF commit_floor_frame (ms per frame of every bucket and part).
 // t_floor_wait: the card waits (ns, masterSemaphore) inside the operation, set before NoteFloor.

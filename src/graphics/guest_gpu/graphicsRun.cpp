@@ -41,6 +41,7 @@
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
 #include "graphics/guest_gpu/command_processor/passCensus.h"
+#include "graphics/host_gpu/renderer/drawCoverage.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "kernel/memory.h"
 #include "libs/agc.h"
@@ -1182,6 +1183,18 @@ void GuestGpu::ExecutionThread() {
 			ChunkLead::t_floor_wait = PassCensus::t_wait_ns;
 			floor_total.emplace(ChunkLead::FpTotal);
 		}
+		// Way B W0 Table B: the in-order work counters before a draw (the coverage of a helper's block)
+		struct CoverSnap {
+			uint64_t used, pipeline, today, set_missed, slow, work, images, barriers, begins, scans;
+		};
+		const auto cover_snap = [] {
+			return CoverSnap {g_ahead.used_draws,           g_ahead.used_pipeline,       g_ahead.buffers_today,
+			                  g_ahead.set_hint_missed,      t_peek_slow,                 BufferCache::t_obtain_work,
+			                  ChunkCensus::t_image_creates, DrawCoverage::t_barriers,    DrawCoverage::t_render_begins,
+			                  DrawCoverage::t_scans};
+		};
+		const bool      cover_on = floor_pass >= 0 && floor_pass <= ChunkLead::BucketOtherDraws;
+		const CoverSnap cover0   = cover_on ? cover_snap() : CoverSnap {};
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
 			const auto kind  = operation->kind;
@@ -1220,6 +1233,19 @@ void GuestGpu::ExecutionThread() {
 			floor_total.reset();
 			ChunkLead::t_floor_wait = PassCensus::t_wait_ns - ChunkLead::t_floor_wait; // the card waits inside the operation
 			if (ChunkLead::t_floor_wait != 0) ChunkLead::NoteCardWait(operation->pass_id, ChunkLead::t_floor_wait);
+			if (cover_on) {
+				const CoverSnap c1     = cover_snap();
+				const int       reason = c1.used == cover0.used                                         ? 1
+				                         : c1.pipeline == cover0.pipeline                               ? 2
+				                         : c1.today != cover0.today                                     ? 3
+				                         : c1.set_missed != cover0.set_missed || c1.slow != cover0.slow ? 4
+				                         : c1.barriers != cover0.barriers                               ? 5
+				                         : c1.begins != cover0.begins                                   ? 6
+				                         : c1.work != cover0.work || c1.images != cover0.images         ? 7
+				                         : c1.scans != cover0.scans                                     ? 8
+				                                                                                        : 0;
+				ChunkLead::NoteCover(floor_pass, reason);
+			}
 			ChunkLead::NoteFloor(floor_pass);
 			ChunkLead::t_floor_on = false;
 		}

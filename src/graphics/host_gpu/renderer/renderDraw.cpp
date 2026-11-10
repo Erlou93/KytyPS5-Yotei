@@ -2489,6 +2489,7 @@ void RenderExecutor::ChunkCheckSecond(std::span<PreparedBindings* const> stages,
 // registered buffers. PrepareBindings is not repeated (a table's image listing is taken once, ListTableImagesByEvents).
 void RenderExecutor::PrepareDrawBindings(DrawPlan& plan, CommandBuffer& buffer, std::span<RenderColorInfo> colors,
                                          std::chrono::steady_clock::time_point* buffers_mark) {
+	const ChunkLead::FloorTimer floor_draw_bind(ChunkLead::FpDrawBind); // KYTY_TRACE_PEEK_CENSUS (way B W0 A8)
 	const auto stages = std::span {plan.descriptor_stages.data(), plan.stage_count};
 	PrepareGraphicsBuffersHead(stages);
 	PrepareGraphicsImages(stages, colors);
@@ -2886,6 +2887,7 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 	std::optional<C0::CommitScope> c0_commit; // KYTY_TRACE_CLEAN_DRAWS: the draw's kind and its commit's time
 	if (CleanDraws::On()) c0_commit.emplace(C0::Commit(plan, stages, buffer.Handle()));
 	std::optional<DispatchSubTimer> commit_census(std::in_place, DispatchSub::CAcquire); // KYTY_TRACE_DRAW_CENSUS
+	std::optional<ChunkLead::FloorTimer> floor_acquire(std::in_place, ChunkLead::FpAcquire); // KYTY_TRACE_PEEK_CENSUS (W0 A12)
 	ApplyPlanFlags(); // the plan flags: the draw's image flags, before the targets read them
 	// S1.2: the render targets are acquired in order (GPU-written marks, tracking, layout transitions): part of the
 	// commit, before its recording.
@@ -2901,6 +2903,7 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 	RenderState rendering = AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info, feedback_aspects, stages);
 	if (owner_on) TextureCache::OwnerSetDrawRect(false, 0, 0, 0, 0);
 	commit_census.reset();
+	floor_acquire.reset();
 	// Resource preparation (ExecutePreparedDraw) may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest memory.
 	auto vk_buffer = buffer.Handle();
@@ -3673,6 +3676,7 @@ void RenderExecutor::UseResolvedDraw(ResolvedDraw* resolved) noexcept {
 }
 
 DrawRenderState* RenderExecutor::TakeResolvedState(const ShaderIndirectDrawInfo& indirect_draw) {
+	const ChunkLead::FloorTimer floor_take(ChunkLead::FpTake); // KYTY_TRACE_PEEK_CENSUS (way B W0 A2)
 	// N7.2: per draw, not per operation - a GPU indirect packet that took the slot and then went to the CPU expansion must
 	// not leave its plan to the expansion's draws (they fail to take the used slot).
 	m_slot_taken         = false;

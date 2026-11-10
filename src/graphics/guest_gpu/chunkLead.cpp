@@ -474,6 +474,36 @@ void NoteCardWait(uint16_t pass_id, uint64_t ns) {
 	g_exec_waits.card[pass_id] += ns;
 }
 
+namespace {
+struct CoverState {
+	std::array<std::array<uint64_t, 9>, Buckets> reasons {};
+	std::array<std::array<uint64_t, 4>, Buckets> runs {};
+	int                                          run_bucket = -1;
+	uint64_t                                     run        = 0;
+};
+CoverState g_cover; // execution thread
+void CloseRun() {
+	auto& s = g_cover;
+	if (s.run_bucket >= 0 && s.run != 0) {
+		s.runs[static_cast<size_t>(s.run_bucket)][s.run == 1 ? 0u : s.run < 16 ? 1u : s.run < 64 ? 2u : 3u]++;
+	}
+	s.run = 0;
+}
+} // namespace
+
+void NoteCover(int bucket, int reason) {
+	auto& s = g_cover;
+	if (bucket < 0 || bucket >= Buckets) return;
+	s.reasons[static_cast<size_t>(bucket)][static_cast<size_t>(reason)]++;
+	if (reason != 0 || bucket != s.run_bucket) CloseRun();
+	if (reason == 0) {
+		s.run_bucket = bucket;
+		s.run++;
+	} else {
+		s.run_bucket = -1;
+	}
+}
+
 void NoteFloor(int pass) {
 	struct FloorState {
 		std::array<std::array<uint64_t, FpCount>, Buckets> ticks {};
@@ -515,6 +545,29 @@ void NoteFloor(int pass) {
 		all_ops += static_cast<double>(n) / frames;
 		const double wait_ms = static_cast<double>(s.wait_ns[static_cast<size_t>(p)]) / 1e6 / frames;
 		all_wait += wait_ms;
+		if (n != 0) {
+			std::fprintf(stderr,
+			             "PERF w0_parts pass=\"%s\" us/op take=%.3f stage_bind=%.3f upload=%.3f draw_bind=%.3f images=%.3f acquire=%.3f "
+			             "scan_transit=%.3f d1=%.3f d2=%.3f d3=%.3f d4=%.3f d5=%.3f d6=%.3f d7=%.3f written=%.3f\n",
+			             name(p).c_str(), us(FpTake), us(FpStageBind), us(FpUpload), us(FpDrawBind), us(FpImages), us(FpAcquire),
+			             us(FpScanTransit), us(FpD1), us(FpD2), us(FpD3), us(FpD4), us(FpD5), us(FpD6), us(FpD7), us(FpWritten));
+		}
+		if (p <= BucketOtherDraws) {
+			const auto& r     = g_cover.reasons[static_cast<size_t>(p)];
+			const auto& runs  = g_cover.runs[static_cast<size_t>(p)];
+			uint64_t    draws = 0;
+			for (const auto v: r) draws += v;
+			if (draws != 0) {
+				const auto pc = [&](uint64_t v) { return 100.0 * static_cast<double>(v) / static_cast<double>(draws); };
+				std::fprintf(stderr,
+				             "PERF w0_cover pass=\"%s\" draws=%llu all_met=%.1f%% first_unmet%%[plan|pipeline|buffers|images|barrier|"
+				             "render_pass|in_order|scan]=%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f runs[1|2-15|16-63|64+]=%llu|%llu|%llu|%llu\n",
+				             name(p).c_str(), static_cast<unsigned long long>(draws), pc(r[0]), pc(r[1]), pc(r[2]), pc(r[3]), pc(r[4]),
+				             pc(r[5]), pc(r[6]), pc(r[7]), pc(r[8]), static_cast<unsigned long long>(runs[0]),
+				             static_cast<unsigned long long>(runs[1]), static_cast<unsigned long long>(runs[2]),
+				             static_cast<unsigned long long>(runs[3]));
+			}
+		}
 		std::fprintf(stderr,
 		             "PERF commit_floor pass=\"%s\" draws/frame=%.0f us/draw total=%.2f execute=%.2f commit=%.2f targets=%.2f adopt=%.2f "
 		             "bindless=%.2f bda=%.2f pipeline=%.2f build=%.2f ms/frame total=%.2f execute=%.2f commit=%.2f card_wait=%.2f\n",
@@ -550,6 +603,8 @@ void NoteFloor(int pass) {
 	s.ticks        = {};
 	s.draws        = {};
 	s.wait_ns      = {};
+	g_cover.reasons = {};
+	g_cover.runs    = {};
 	s.window       = now;
 	s.window_frame = frame;
 }

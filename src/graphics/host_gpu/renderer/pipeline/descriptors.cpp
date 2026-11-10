@@ -2,6 +2,7 @@
 #include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/host_gpu/renderer/drawCoverage.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorsTrace.h"
 #include "graphics/host_gpu/translatorGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -4387,6 +4388,7 @@ bool RenderExecutor::PeekStageImages(const ShaderRecompiler::IR::CompiledShaderI
 
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
+	const ChunkLead::FloorTimer floor_stage_bind(ChunkLead::FpStageBind); // KYTY_TRACE_PEEK_CENSUS (way B W0 A5)
 	if (!BindReplay::On() || !GuestGpu::IsGpuThread() || !runtime.resources->indirect_ranges.empty()) {
 		if (BindReplay::On()) BindReplay::GetStats().skipped++;
 		PrepareBindingsToday(runtime, prepared);
@@ -5042,6 +5044,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		}
 	};
 	sub_timer.emplace(DispatchSub::SrtUpload);
+	const ChunkLead::FloorTimer floor_upload(ChunkLead::FpUpload); // KYTY_TRACE_PEEK_CENSUS (way B W0 A7)
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0 || srt_uniform) {
 		if (DescriptorTrace::SrtDumpOn()) DescriptorTrace::SrtDump(program.shader_hash, snapshot.flattened_srt);
 		if (prepared.bindless_patches.empty() && m_gpu_word_patches.empty()) {
@@ -5286,6 +5289,7 @@ void RenderExecutor::PrepareGraphicsBuffersHead(std::span<PreparedBindings* cons
 }
 
 void RenderExecutor::PrepareGraphicsImages(std::span<PreparedBindings* const> stages, std::span<RenderColorInfo> colors) {
+	const ChunkLead::FloorTimer floor_images(ChunkLead::FpImages); // KYTY_TRACE_PEEK_CENSUS (way B W0 A10)
 	GraphicsPartMarks marks;
 	for (auto* stage: stages) {
 		RebindImages(*stage);
@@ -6005,12 +6009,15 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	// The record packets, with the recording thread's heap sets.
 	const bool packet = RecordPacketsCommit();
 	census_part.emplace(DispatchSub::BScan);
+	std::optional<ChunkLead::FloorTimer> floor_scan(std::in_place, ChunkLead::FpScanTransit); // KYTY_TRACE_PEEK_CENSUS (W0 A13)
 	// Nothing to scan unless a stage reads scalar resources (the scan skips the others anyway).
 	if (has_scalar_reads) {
+		DrawCoverage::t_scans++; // (way B W0 Table B)
 		KYTY_PROFILER_BLOCK("Commit::OverlapScan");
 		scan_scalar_reads(report_image_overlap, report_buffer_overlap);
 	}
 		census_part.emplace(DispatchSub::BDesc);
+	floor_scan.reset();
 	m_descriptor_images.resize(image_descriptor_count);
 	m_descriptor_writes.clear();
 	m_descriptor_writes.reserve(write_count);
@@ -6023,6 +6030,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		const auto  shader_stage  = NativeShaderStage(program.stage);
 		const auto  shader_stages = ShaderPipelineStages(shader_stage);
 		census_part.emplace(DispatchSub::BTransit);
+		floor_scan.emplace(ChunkLead::FpScanTransit); // KYTY_TRACE_PEEK_CENSUS (W0 A13)
 		if (descriptors.gds.buffer != nullptr) {
 			buffer.EndRendering();
 			const auto barrier = MakeGdsDependency(descriptors.gds.buffer);
@@ -6112,6 +6120,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			}
 			binding.layout = image.backing.state.layout;
 		}
+		floor_scan.reset();
 		census_part.emplace(DispatchSub::BDesc);
 
 		std::array<size_t, ShaderRecompiler::IR::ImageBindingCount> image_starts {};

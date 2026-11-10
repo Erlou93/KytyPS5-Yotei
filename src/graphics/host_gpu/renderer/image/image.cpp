@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/gpuCheckpoints.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/drawCoverage.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -271,6 +272,7 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	if (barriers.empty()) {
 		return;
 	}
+	DrawCoverage::t_barriers++; // KYTY_TRACE_PEEK_CENSUS (way B W0 Table B)
 	m_scheduler.EndRendering();
 	vk::DependencyInfo dependency {};
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
