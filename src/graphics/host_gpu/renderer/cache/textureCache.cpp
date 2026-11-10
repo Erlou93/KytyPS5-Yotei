@@ -3168,7 +3168,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			} else if (image.SafeToDownload() &&
 			           BcAlias::Matches(desc.info, image.info)) {
 				block_alias = true;
-			} else if (t1a && BcAlias::Matches(desc.info, image.info)) {
+			} else if ((desc.type == BindingType::RenderTarget || desc.type == BindingType::DepthTarget) &&
+			           BcAlias::Matches(desc.info, image.info)) { // (T1b review: target searches only; textures are reason 1)
 				alias_any = true; // (T1a: an alias whatever its state)
 			}
 		}

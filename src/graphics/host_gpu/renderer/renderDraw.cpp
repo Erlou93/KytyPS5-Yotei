@@ -1661,6 +1661,9 @@ uint32_t TargetMemoMode() {
 }
 struct T1bStats {
 	uint64_t abandoned = 0, compared = 0, bad = 0, injected = 0, detected = 0, not_repeatable = 0, moved = 0;
+	uint64_t hits_seen = 0, forced = 0, second_did = 0, missed = 0;
+	bool      forced_pending = false;
+	TargetKey forced_key {};
 	uint32_t logged    = 0;
 	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
@@ -1686,11 +1689,24 @@ void T1bCheck(const DrawRenderState& state, const std::array<RenderColorInfo, RE
               const RenderDepthInfo& depth, bool repeatable, bool registry_same) {
 	auto& s = g_t1b;
 	s.compared++;
-	const bool fault = s.compared % 997u == 0u;
-	if (fault) s.injected++;
-	bool same = count == state.color_count && SameDepthTarget(depth, state.depth_info);
-	for (uint32_t i = 0; same && i < count; i++) same = SameColorTarget(colors[i], state.color_info[i]);
-	if (fault && same && count != 0) same = false; // (the injected error: a wrong image)
+	// Every 997th comparison: a copy of the search's result gets a wrong image (the first colour target's, else the depth
+	// target's); counted only when there was one to change (review: the comparison itself must find it).
+	auto           colors_cmp = colors;
+	RenderDepthInfo depth_cmp = depth;
+	bool           fault      = false;
+	if (s.compared % 997u == 0u) {
+		if (count != 0) {
+			colors_cmp[0].image_id.index ^= 1u;
+			fault = true;
+		} else if (depth_cmp.image_id) {
+			depth_cmp.image_id.index ^= 1u;
+			fault = true;
+		}
+		if (fault) s.injected++;
+	}
+	bool same = count == state.color_count && SameDepthTarget(depth_cmp, state.depth_info);
+	for (uint32_t i = 0; same && i < count; i++) same = SameColorTarget(colors_cmp[i], state.color_info[i]);
+	if (fault && same) s.missed++;
 	if (!same) {
 		if (fault) {
 			s.detected++;
@@ -1708,11 +1724,12 @@ void T1bCheck(const DrawRenderState& state, const std::array<RenderColorInfo, RE
 	if (now - s.window < std::chrono::seconds(5)) return;
 	std::fprintf(stderr,
 	             "PERF check_target_memo compared=%llu bad=%llu not_repeatable=%llu registry_moved=%llu abandoned=%llu "
-	             "fault[injected|detected]=%llu|%llu\n",
+	             "fault[injected|detected|missed]=%llu|%llu|%llu forced_abandons=%llu second_materialization_changed=%llu\n",
 	             static_cast<unsigned long long>(s.compared), static_cast<unsigned long long>(s.bad),
 	             static_cast<unsigned long long>(s.not_repeatable), static_cast<unsigned long long>(s.moved),
 	             static_cast<unsigned long long>(s.abandoned), static_cast<unsigned long long>(s.injected),
-	             static_cast<unsigned long long>(s.detected));
+	             static_cast<unsigned long long>(s.detected), static_cast<unsigned long long>(s.missed),
+	             static_cast<unsigned long long>(s.forced), static_cast<unsigned long long>(s.second_did));
 	s.window = now;
 }
 
@@ -1849,16 +1866,30 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		if (t1b != 0) {
 			// T1b: the colour clears materialized as the search would (the same call), then the key rechecked: a
 			// materialization that cleared, submitted or registered ends the hit and the draw searches.
-			auto& cache = m_context.GetTextureCache();
-			for (uint32_t i = 0; i < state.color_count; i++) {
+			auto&      cache    = m_context.GetTextureCache();
+			const auto registry = [&] { return DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == target_key.registry; };
+			for (uint32_t i = 0; i < state.color_count && hit; i++) {
 				const auto kind = state.color_info[i].desc.info.metadata.kind;
 				if (kind == ImageMetadataKind::Dcc || kind == ImageMetadataKind::Cmask) {
+					// (review: the registry before each target's image is used - a materialization that registered ends it)
+					if (!registry()) {
+						hit = false;
+						break;
+					}
 					cache.MaterializeTargetClear(state.color_info[i].image_id, state.color_info[i].desc);
 				}
 			}
-			hit = cache.GcTick() == target_key.gc_tick && m_context.GetCommandScheduler().CurrentTick() == target_key.tick &&
-			      DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == target_key.registry &&
-			      CleanDraws::g_meta_ops.load(std::memory_order_relaxed) == target_key.meta_ops;
+			hit = hit && cache.GcTick() == target_key.gc_tick && m_context.GetCommandScheduler().CurrentTick() == target_key.tick &&
+			      registry() && CleanDraws::g_meta_ops.load(std::memory_order_relaxed) == target_key.meta_ops;
+			// KYTY_CHECK_TARGET_MEMO=2: every 101st hit abandoned on purpose (the abandon path exercised; the full search's
+			// second materialization must change nothing of the key)
+			const bool forced = hit && t1b == 2 && (++C1::g_t1b.hits_seen % 101u) == 0u;
+			if (forced) {
+				hit = false;
+				C1::g_t1b.forced++;
+				C1::g_t1b.forced_key = target_key;
+				C1::g_t1b.forced_pending = true;
+			}
 			if (!hit) {
 				memo.valid = false;
 				C1::g_t1b.abandoned++;
@@ -1915,6 +1946,16 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		// Kept when every search was found-only and nothing was registered meanwhile (the key's epoch still holds); with T1b,
 		// when every search was repeatable (TextureCache::NonRepeatableSearches).
 		const bool searches_kept = t1b != 0 ? TextureCache::NonRepeatableSearches() == nonrepeat0 : TextureCache::FullSearches() == full_searches;
+		if (C1::g_t1b.forced_pending) {
+			// (the forced abandon's full search: did its second materialization change the key's ticks, registry or meta?)
+			C1::g_t1b.forced_pending = false;
+			const auto& k            = C1::g_t1b.forced_key;
+			if (m_context.GetTextureCache().GcTick() != k.gc_tick || m_context.GetCommandScheduler().CurrentTick() != k.tick ||
+			    DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) != k.registry ||
+			    CleanDraws::g_meta_ops.load(std::memory_order_relaxed) != k.meta_ops) {
+				C1::g_t1b.second_did++;
+			}
+		}
 		memo.valid = searches_kept &&
 		             DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == target_key.registry &&
 		             CleanDraws::g_meta_ops.load(std::memory_order_relaxed) == target_key.meta_ops;
