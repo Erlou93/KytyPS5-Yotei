@@ -1048,12 +1048,12 @@ void GuestGpu::ExecutionThread() {
 							if (indexed) {
 								const auto& args = op.draw_index;
 								executor.PeekAhead(op.resolved, *op.state.context, *op.state.user_config, *op.state.shaders, true,
-								                   args.index_count, args.instance_count, args.index_type_and_size,
+								                   args.index_count, 1u /* instances: set when executed (ResolveNumInstances); not in the key */, args.index_type_and_size,
 								                   args.render_target_slice_offset, args.indirect.address, distance);
 							} else {
 								const auto& args = op.draw_auto;
 								executor.PeekAhead(op.resolved, *op.state.context, *op.state.user_config, *op.state.shaders, false,
-								                   args.vertex_count, args.instance_count, 0, args.render_target_slice_offset,
+								                   args.vertex_count, 1u, 0, args.render_target_slice_offset,
 								                   args.indirect.address, distance);
 							}
 						};
