@@ -108,11 +108,10 @@ static vk::StencilOpState ConvertStencilState(
 	        state.compareMask, state.writeMask, reference};
 }
 
-[[nodiscard]] static vk::Format ResolveHostDepthAttachmentFormat(const CommandBuffer&     buffer,
+[[nodiscard]] static vk::Format ResolveHostDepthAttachmentFormat(GraphicContext&          graphics,
                                                                  const DepthFormatPolicy& policy,
                                                                  bool     has_stencil,
                                                                  uint32_t samples) {
-	auto&      graphics         = buffer.GetGraphics();
 	const auto required_samples = vulkan_sample_count(samples);
 	const auto supports_query   = [&](vk::Format format) {
 		vk::ImageFormatProperties properties {};
@@ -156,7 +155,7 @@ static vk::StencilOpState ConvertStencilState(
 	return vk::Format::eUndefined;
 }
 
-static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
+static TextureCache::ImageDesc MakeDepthTargetDesc(GraphicContext&             graphics,
                                                   const HW::DepthRenderTarget& z,
                                                   bool write_buffer = false) {
 	const bool has_stencil = z.stencil_info.format != Prospero::StencilFormat::kInvalid;
@@ -223,7 +222,7 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 		DepthFatal("unsupported depth/stencil format pair");
 	}
 	const auto ideal_format = DepthAttachmentFormat(*policy, has_stencil);
-	const auto format = ResolveHostDepthAttachmentFormat(buffer, *policy, has_stencil, samples);
+	const auto format = ResolveHostDepthAttachmentFormat(graphics, *policy, has_stencil, samples);
 	if (format == vk::Format::eUndefined) {
 		DepthFatal("no host depth/stencil format supports required usage for %s",
 		           vk::to_string(ideal_format).c_str());
@@ -286,10 +285,11 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	return desc;
 }
 
+// Project 15 S2c: the depth target described from the registers alone (no image search): what ResolveRenderDepthTarget
+// fills in before FindImage. False: no depth attachment (r untouched, as today). The host format query keeps its
+// per-thread device-fact memo.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
-	KYTY_PROFILER_FUNCTION();
-	const auto& hw          = buffer.GetRegisters();
+bool RenderExecutor::DescribeRenderDepthTarget(GraphicContext& graphics, const HW::Context& hw, RenderDepthInfo& r) {
 	const auto& z           = hw.GetDepthRenderTarget();
 	const auto& rc          = hw.GetRenderControl();
 	const auto& dc          = hw.GetDepthControl();
@@ -301,7 +301,7 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	const bool stencil_active =
 	    has_stencil && (dc.stencil_enable || rc.stencil_clear_enable || rc.copy_stencil_to_color);
 	if (!depth_active && !stencil_active) {
-		return;
+		return false;
 	}
 	const bool attachment_unbound =
 	    z.z_info.format == Prospero::DepthFormat::kInvalid &&
@@ -325,7 +325,7 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 		if (!logged.exchange(true, std::memory_order_relaxed)) {
 			LOGF("DepthTarget: ignoring enabled depth/stencil state without a bound attachment\n");
 		}
-		return;
+		return false;
 	}
 	if (rc.copy_stencil_to_color ||
 	    dc.zfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
@@ -341,7 +341,7 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	     rc.depth_clear_enable || rc.stencil_clear_enable)) {
 		DepthFatal("unsupported depth-to-color copy state");
 	}
-	r.desc = MakeDepthTargetDesc(buffer, z);
+	r.desc = MakeDepthTargetDesc(graphics, z);
 	r.depth_clear_enable      = rc.depth_clear_enable;
 	r.depth_clear_value       = hw.GetDepthClearValue();
 	r.depth_test_enable       = dc.z_enable;
@@ -399,6 +399,12 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 			r.stencil_back = r.stencil_front;
 		}
 	}
+	return true;
+}
+
+void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
+	KYTY_PROFILER_FUNCTION();
+	if (!DescribeRenderDepthTarget(buffer.GetGraphics(), buffer.GetRegisters(), r)) return;
 	auto& cache = m_context.GetTextureCache();
 	r.image_id = cache.FindImage(r.desc);
 	BindRenderTarget(r.image_id);
@@ -423,8 +429,8 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 		return false;
 	}
 
-	auto  read_desc  = MakeDepthTargetDesc(buffer, z);
-	auto  write_desc = MakeDepthTargetDesc(buffer, z, true);
+	auto  read_desc  = MakeDepthTargetDesc(buffer.GetGraphics(), z);
+	auto  write_desc = MakeDepthTargetDesc(buffer.GetGraphics(), z, true);
 	auto& cache      = m_context.GetTextureCache();
 	const auto read_id = cache.FindImage(read_desc);
 	BindRenderTarget(read_id);

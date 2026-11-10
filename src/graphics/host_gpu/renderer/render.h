@@ -459,6 +459,11 @@ private:
 	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
 	                              bool ignore_target_mask = false, bool exact_format = false);
 	void ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& target);
+	// Project 15 S2c: the color target from the registers alone (colorRenderTarget.cpp); false: no color output.
+	[[nodiscard]] static bool DescribeRenderColorTarget(const HW::Context& hw, RenderColorInfo& r, uint32_t render_target_slice_offset,
+	                                                    uint32_t rt_slot, bool ignore_target_mask);
+	// Project 15 S2c: the depth target from the registers alone (depthRenderTarget.cpp); false: no attachment.
+	[[nodiscard]] static bool DescribeRenderDepthTarget(GraphicContext& graphics, const HW::Context& hw, RenderDepthInfo& r);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
 	[[nodiscard]] bool CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                   const DrawEmitInfo& emit, DrawRenderState& state);

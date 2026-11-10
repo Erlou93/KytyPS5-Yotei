@@ -62,41 +62,18 @@ struct TargetReplaySlot {
 };
 } // namespace
 
+// Project 15 S2c: the color target described from the registers alone (no image search, no write): what
+// ResolveRenderColorTarget fills in before FindImage. False: the slot has no color output (r stays empty).
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
-                                              uint32_t         render_target_slice_offset,
-                                              uint32_t rt_slot, bool ignore_target_mask,
-                                              bool exact_format) {
-	KYTY_PROFILER_FUNCTION();
-	const auto& hw = buffer.GetRegisters();
-
-	const auto& rt      = hw.GetRenderTarget(rt_slot);
-	auto        mask    = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
+bool RenderExecutor::DescribeRenderColorTarget(const HW::Context& hw, RenderColorInfo& r, uint32_t render_target_slice_offset,
+                                               uint32_t rt_slot, bool ignore_target_mask) {
+	const auto& rt   = hw.GetRenderTarget(rt_slot);
+	auto        mask = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
 	if (ignore_target_mask && rt.base.addr != 0 && mask == 0) {
 		mask = 0x0f;
 	}
-
 	r             = {};
 	r.target_slot = rt_slot;
-
-	// The target replay
-	const bool                           replay = rt_slot < 8u;
-	static thread_local TargetReplaySlot replay_slots[8];
-	if (replay && rt.base.addr != 0 && mask != 0) {
-		const auto& memo = replay_slots[rt_slot];
-		if (memo.valid && memo.mask == mask && memo.slice_offset == render_target_slice_offset &&
-		    memo.ignore_mask == ignore_target_mask && memo.exact_format == exact_format &&
-		    std::memcmp(&memo.rt, &rt, sizeof(rt)) == 0 &&
-		    memo.page_sum == DrawRepeat::ImagePageEpochSum(memo.r.desc.info.data.address, memo.r.desc.info.data.size)) {
-			if (const auto id = m_context.GetTextureCache().ReplayImage(memo.r.image_id)) {
-				r          = memo.r;
-				r.image_id = id;
-				BindRenderTarget(id);
-				return;
-			}
-		}
-	}
-
 	if (rt.base.addr == 0 || mask == 0) {
 		if (graphics_debug_dump_enabled()) {
 			static std::atomic_uint log_count = 0;
@@ -110,7 +87,7 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 			}
 		}
 
-		return;
+		return false;
 	}
 	const auto samples = render_sample_count(rt.attrib.num_fragments);
 	// Upstream 5f29374d5 approximates 4-coverage/2-fragment EQAA (PPSA24156) with 2x MSAA; not taken (an approximation,
@@ -304,14 +281,52 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	desc.view_info.base_layer  = view.base_layer;
 	desc.view_info.layer_count = view.layer_count;
 	desc.view_info.usage       = vk::ImageUsageFlagBits::eColorAttachment;
-	auto& texture_cache        = m_context.GetTextureCache();
 	r.guest_mip_level          = rt.view.current_mip_level;
 	r.guest_array_layer        = view.base_layer;
+	r.export_mapping           = target_format.export_mapping;
+	return true;
+}
+
+void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
+                                              uint32_t         render_target_slice_offset,
+                                              uint32_t rt_slot, bool ignore_target_mask,
+                                              bool exact_format) {
+	KYTY_PROFILER_FUNCTION();
+	const auto& hw = buffer.GetRegisters();
+
+	const auto& rt      = hw.GetRenderTarget(rt_slot);
+	auto        mask    = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
+	if (ignore_target_mask && rt.base.addr != 0 && mask == 0) {
+		mask = 0x0f;
+	}
+
+	r             = {};
+	r.target_slot = rt_slot;
+
+	// The target replay
+	const bool                           replay = rt_slot < 8u;
+	static thread_local TargetReplaySlot replay_slots[8];
+	if (replay && rt.base.addr != 0 && mask != 0) {
+		const auto& memo = replay_slots[rt_slot];
+		if (memo.valid && memo.mask == mask && memo.slice_offset == render_target_slice_offset &&
+		    memo.ignore_mask == ignore_target_mask && memo.exact_format == exact_format &&
+		    std::memcmp(&memo.rt, &rt, sizeof(rt)) == 0 &&
+		    memo.page_sum == DrawRepeat::ImagePageEpochSum(memo.r.desc.info.data.address, memo.r.desc.info.data.size)) {
+			if (const auto id = m_context.GetTextureCache().ReplayImage(memo.r.image_id)) {
+				r          = memo.r;
+				r.image_id = id;
+				BindRenderTarget(id);
+				return;
+			}
+		}
+	}
+
+	if (!DescribeRenderColorTarget(hw, r, render_target_slice_offset, rt_slot, ignore_target_mask)) return;
+	auto& texture_cache        = m_context.GetTextureCache();
 	const auto epoch           = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
 	(void)TextureCache::TakeLastFindImagePlain();
 	r.image_id                 = texture_cache.FindImage(r.desc, exact_format);
 	const bool plain           = TextureCache::TakeLastFindImagePlain();
-	r.export_mapping           = target_format.export_mapping;
 	BindRenderTarget(r.image_id);
 	if (!replay) return;
 	auto& memo = replay_slots[rt_slot];
