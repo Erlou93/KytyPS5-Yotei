@@ -85,6 +85,36 @@ namespace Libs::Graphics {
 
 namespace {
 
+// KYTY_PERF_BATCH2 (live A/B test switch, 11.11 night batch) and KYTY_CHECK_BATCH2=2 (today's result built beside the new
+// one and compared; PERF batch2_check compared= bad=).
+bool Batch2Check() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_CHECK_BATCH2");
+		return value != nullptr && value[0] == '2';
+	}();
+	return on;
+}
+bool Batch2On() {
+	static const uint32_t fixed = [] {
+		const char* value = std::getenv("KYTY_PERF_BATCH2");
+		return value != nullptr && value[0] == '1' ? 1u : 0u;
+	}();
+	return Batch2Check() || Common::LiveAb::Gate(Common::LiveAb::Switch::Batch2, fixed) != 0u;
+}
+void Batch2Note(bool bad) {
+	static std::atomic<uint64_t> compared {0};
+	static std::atomic<uint64_t> wrong {0};
+	if (bad) wrong.fetch_add(1, std::memory_order_relaxed);
+	const uint64_t n = compared.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (bad && wrong.load(std::memory_order_relaxed) <= 8u) {
+		std::fprintf(stderr, "CHECK_BATCH2 bad (compare %llu)\n", static_cast<unsigned long long>(n));
+	}
+	if ((n & 0xfffffu) == 0u) {
+		std::fprintf(stderr, "PERF batch2_check compared=%llu bad=%llu\n", static_cast<unsigned long long>(n),
+		             static_cast<unsigned long long>(wrong.load(std::memory_order_relaxed)));
+	}
+}
+
 using BindingKind = ShaderRecompiler::IR::DescriptorBindingKind;
 
 } // namespace
@@ -5218,7 +5248,56 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	};
 	sub_timer.emplace(DispatchSub::SrtUpload);
 	const ChunkLead::FloorTimer floor_upload(ChunkLead::FpUpload); // KYTY_TRACE_PEEK_CENSUS (way B W0 A7)
-	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0 || srt_uniform) {
+	// KYTY_PERF_BATCH2 (test switch, 11.11 night): the SRT and shader-data words written straight into the stream buffer
+	// (one mapping: words, zero padding, the bindless and GPU-word patches) instead of a patched copy, a padded copy and
+	// the stream copy. Same size, alignment and bytes; KYTY_CHECK_BATCH2=2 builds today's vector and compares the bytes.
+	const auto direct_upload = [&](std::span<const uint32_t> words, bool padded, bool patched) -> vk::DescriptorBufferInfo {
+		EXIT_IF(words.empty());
+		const size_t count  = padded ? (words.size() + 3u) & ~size_t {3} : words.size();
+		auto&        stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
+		const auto [data, offset] = stream.Map(count * sizeof(uint32_t), 256);
+		EXIT_IF(data == nullptr);
+		auto* out = reinterpret_cast<uint32_t*>(data);
+		std::memcpy(out, words.data(), words.size_bytes());
+		if (count > words.size()) std::memset(out + words.size(), 0, (count - words.size()) * sizeof(uint32_t));
+		if (patched) {
+			for (const auto& patch: prepared.bindless_patches) {
+				if (static_cast<size_t>(patch.offset) + 1u < words.size()) {
+					out[patch.offset]      = patch.region;
+					out[patch.offset + 1u] = patch.entries;
+				}
+			}
+			for (const auto& [index, value]: m_gpu_word_patches) out[index] = value;
+		}
+		if (Batch2Check()) {
+			std::vector<uint32_t> today(words.begin(), words.end());
+			if (patched) {
+				for (const auto& patch: prepared.bindless_patches) {
+					if (static_cast<size_t>(patch.offset) + 1u < today.size()) {
+						today[patch.offset]      = patch.region;
+						today[patch.offset + 1u] = patch.entries;
+					}
+				}
+				for (const auto& [index, value]: m_gpu_word_patches) today[index] = value;
+			}
+			today.resize(count, 0u);
+			Batch2Note(std::memcmp(today.data(), out, count * sizeof(uint32_t)) != 0);
+		}
+		stream.Commit();
+		return {stream.Handle(), offset, count * sizeof(uint32_t)};
+	};
+	if (Batch2On() && (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0 || srt_uniform)) {
+		if (DescriptorTrace::SrtDumpOn()) DescriptorTrace::SrtDump(program.shader_hash, snapshot.flattened_srt);
+		const bool patched = !prepared.bindless_patches.empty() || !m_gpu_word_patches.empty();
+		const auto view    = direct_upload(snapshot.flattened_srt, srt_uniform, patched);
+		if (srt_uniform) {
+			prepared.flattened_srt = {view.buffer, view.offset, snapshot.flattened_srt.size() * sizeof(uint32_t)};
+			prepared.flattened_srt_uniform = {view.buffer, view.offset,
+			                                  std::min<vk::DeviceSize>(view.range, ShaderRecompiler::IR::UniformBufferMaxBytes)};
+		} else {
+			prepared.flattened_srt = view;
+		}
+	} else if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0 || srt_uniform) {
 		if (DescriptorTrace::SrtDumpOn()) DescriptorTrace::SrtDump(program.shader_hash, snapshot.flattened_srt);
 		if (prepared.bindless_patches.empty() && m_gpu_word_patches.empty()) {
 			upload_srt(snapshot.flattened_srt);
@@ -5236,7 +5315,13 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	}
 	sub_timer.emplace(DispatchSub::DataUpload);
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] != 0) {
-		upload_uniform(prepared.shader_data, nullptr, &prepared.shader_data_buffer);
+		if (Batch2On()) {
+			const auto view            = direct_upload(prepared.shader_data, true, false);
+			prepared.shader_data_buffer = {view.buffer, view.offset,
+			                               std::min<vk::DeviceSize>(view.range, ShaderRecompiler::IR::UniformBufferMaxBytes)};
+		} else {
+			upload_uniform(prepared.shader_data, nullptr, &prepared.shader_data_buffer);
+		}
 	}
 }
 
