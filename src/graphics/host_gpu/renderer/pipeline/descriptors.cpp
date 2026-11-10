@@ -5036,6 +5036,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		auto&       cache = m_context.GetBufferCache();
 		m_gpu_word_addresses.clear();
 		m_gpu_word_values.clear();
+		const bool  quiet_words = BufferCache::Batch1On() && !BufferCache::PlanBufferCheck(); // (batch 1: the fast path)
 		for (const auto& word: words) {
 			EXIT_IF(word.slot >= flat.size() || word.hi >= flat.size());
 			const uint64_t address = (uint64_t {flat[word.hi]} << 32u) | flat[word.slot];
@@ -5047,9 +5048,14 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 				// given to the shader from device-local memory (walk 9.11: read from host memory in every invocation, the
 				// menu's GPU time went 14.6 -> 33.4 ms per frame).
 				uint32_t value = 0;
-				(void)cache.WaitDirectGpuWrites(address, sizeof(uint32_t), true);
-				LibKernel::Memory::ReadGuestPlain(&value, address, sizeof(uint32_t));
-				cache.ApplyDirectCpWrites(address, &value, sizeof(uint32_t));
+				if (quiet_words && cache.DirectWordQuiet(address)) {
+					// Batch 1: no listed GPU write may cover the word - today's wait would return at once with an empty overlay
+					LibKernel::Memory::ReadGuestPlain(&value, address, sizeof(uint32_t));
+				} else {
+					(void)cache.WaitDirectGpuWrites(address, sizeof(uint32_t), true);
+					LibKernel::Memory::ReadGuestPlain(&value, address, sizeof(uint32_t));
+					cache.ApplyDirectCpWrites(address, &value, sizeof(uint32_t));
+				}
 				m_gpu_word_values.emplace_back(index, value, address);
 				if (gw_key) gw_mix((uint64_t {index} << 32u) | value, address);
 				continue;

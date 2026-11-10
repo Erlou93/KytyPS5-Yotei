@@ -3339,7 +3339,15 @@ bool BufferCache::PlanBindingsOn() {
 		const char* env = std::getenv("KYTY_PERF_PLAN_BINDINGS");
 		return env != nullptr && env[0] == '1' ? 1u : 0u;
 	}();
-	return Common::LiveAb::Gate(Common::LiveAb::Switch::PlanBindings, fixed) != 0u;
+	return Common::LiveAb::Gate(Common::LiveAb::Switch::PlanBindings, fixed) != 0u || Batch1On();
+}
+
+bool BufferCache::Batch1On() {
+	static const uint32_t fixed = [] {
+		const char* env = std::getenv("KYTY_PERF_BATCH1");
+		return env != nullptr && env[0] == '1' ? 1u : 0u;
+	}();
+	return Common::LiveAb::Gate(Common::LiveAb::Switch::Batch1, fixed) != 0u;
 }
 
 bool BufferCache::PlanAnswerBinding(PlanBuffer& entry, uint64_t vaddr, uint64_t size) {

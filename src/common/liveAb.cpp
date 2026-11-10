@@ -54,6 +54,9 @@ constexpr SwitchInfo Switches[] = {
     // Project 15 way B P1 (test switch): a read-only buffer binding with a ready plan entry whose proof holds takes the
     // binding the helper computed (handle, aligned offset, range, offset byte, record stride) instead of RebindBuffers'.
     {Switch::PlanBindings, "KYTY_PERF_PLAN_BINDINGS", 1},
+    // Project 15 way B batch 1 (test switch, Rafał 10.11 "rób paczkę"): P1's plan bindings and sources, and the SRT words'
+    // fast path (a word in a direct range with no listed GPU write over it is read plainly: no wait, no overlay).
+    {Switch::Batch1, "KYTY_PERF_BATCH1", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

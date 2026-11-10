@@ -174,6 +174,11 @@ public:
 	// program and resource from the shared cursor; null without a plan); KYTY_PERF_PLAN_BINDINGS (live A/B test switch).
 	[[nodiscard]] static PlanBuffer* PlanStageEntry(const void* program, uint32_t resource);
 	[[nodiscard]] static bool        PlanBindingsOn();
+	// Batch 1 (KYTY_PERF_BATCH1, live A/B test switch): P1 and the SRT words' fast path together.
+	[[nodiscard]] static bool        Batch1On();
+	// Batch 1: a direct-range word no listed GPU write may cover (WaitDirectGpuWrites would return at once with no overlay):
+	// read plainly. False: today's wait and overlay.
+	[[nodiscard]] bool DirectWordQuiet(uint64_t vaddr) const { return m_direct_gpu_writes.empty() || !DirectWritesMayOverlap(vaddr, 4); }
 	// P1: the plan's answer for a binding (the same condition and work as ObtainBuffer's plan branch: the proof, Direct's
 	// mode, the touch of a Ready buffer); true when it answered.
 	[[nodiscard]] bool PlanAnswerBinding(PlanBuffer& entry, uint64_t vaddr, uint64_t size);
