@@ -111,11 +111,38 @@ public:
 	[[nodiscard]] bool     TryLockLookup() noexcept { return m_lookup_lock.try_lock(); }
 	void                   UnlockLookup() noexcept { m_lookup_lock.unlock(); }
 	[[nodiscard]] BufferId LookupBuffer(uint64_t vaddr, uint64_t size) const;
+	// Project 15 S2a (N3, the read-only translator; design: the analysis session's n3-projekt.md section 4.1): what
+	// ObtainBuffer would answer, writing nothing. Ready: a registered buffer holds the range, it is CPU-clean and no image
+	// is registered over it - ObtainBuffer has nothing to upload or sync and only touches (its writes' notes, for a
+	// written binding, are the commit's); the proof is the obtain memo's (buffer registry epoch, the 4 MiB regions'
+	// CPU-dirty epochs, the image page epochs). Direct: an active direct range holds it. Null: nothing to bind. The rest
+	// are marks "in order" (the commit obtains that binding itself): Stream (a small CPU-dirty read the stream ring would
+	// copy), Upload (CPU-dirty, or not proven clean), Create (no buffer holds the range), Texel (an image over it).
+	struct BufferPeek {
+		enum Class : uint8_t { Ready, Direct, Null, Stream, Upload, Create, Texel, Count };
+		Class    klass = Create;
+		BufferId id {};
+		uint64_t offset       = 0;
+		uint64_t buffer_epoch = 0, image_sum = 0, region = 0;
+		uint32_t epochs[2] {};
+		uint32_t regions = 0;
+	};
+	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint);
+	// Whether a Ready peek's proof still holds (the obtain memo's check).
+	[[nodiscard]] static bool PeekProofHolds(const BufferPeek& peek, uint64_t vaddr, uint64_t size);
+	// The translator guard (KYTY_CHECK_PEEK=2): writes noted inside a peek (expected 0; PERF peek counts them).
+	inline static thread_local int t_translator = 0;
+	static void                    TranslatorNote(int site);
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
 	                                                        bool     is_written,
 	                                                        bool     is_texel_buffer = false,
 	                                                        BufferId id              = {},
 	                                                        bool     image_source    = false);
+	// ObtainBuffer's work (ObtainBuffer adds KYTY_CHECK_PEEK=2 around it).
+	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferPath(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
+	                                                            BufferId id, bool image_source);
+	// KYTY_CHECK_PEEK=2: ObtainBufferPath's work that a Ready peek promised away (uploads, stream copies, image syncs).
+	inline static thread_local uint64_t t_obtain_work = 0;
 	// Asks the CPU to fetch the memo entry a later ObtainBuffer of this binding reads (the write memo's for a written one on
 	// the GPU thread, the obtain memo's for a read that is not texel), so their cache misses overlap instead of following
 	// each other. Changes no data.
@@ -809,7 +836,10 @@ private:
 	// The GPU thread's guard for one registry change.
 	class LookupWriteGuard {
 	public:
-		explicit LookupWriteGuard(BufferCache& cache): m_cache(cache) { m_cache.m_lookup_lock.lock(); }
+		explicit LookupWriteGuard(BufferCache& cache): m_cache(cache) {
+			if (t_translator != 0) TranslatorNote(0); // project 15 S2a: a registry change inside a peek
+			m_cache.m_lookup_lock.lock();
+		}
 		~LookupWriteGuard() { m_cache.m_lookup_lock.unlock(); }
 		LookupWriteGuard(const LookupWriteGuard&)            = delete;
 		LookupWriteGuard& operator=(const LookupWriteGuard&) = delete;

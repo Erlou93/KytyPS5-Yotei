@@ -592,6 +592,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 }
 
 void BufferCache::TouchBuffer(Buffer& buffer) {
+	if (t_translator != 0) TranslatorNote(1); // project 15 S2a: a touch inside a peek
 	if (!buffer.is_deleted) {
 		// m_gc_tick only rises (RunGarbageCollector) and an LRU item's tick never drops, so a buffer
 		// touched (or registered) at this tick already holds it: Touch would return at its first check,
@@ -2452,6 +2453,8 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
 	walk_timer.reset();
 	if (source) {
+		t_obtain_work++; // KYTY_CHECK_PEEK
+		if (t_translator != 0) TranslatorNote(2);
 		if (uploaded_bytes != nullptr) {
 			*uploaded_bytes = total_size;
 		}
@@ -2625,6 +2628,7 @@ void BufferCache::ClaimBatchedUpload(Buffer& buffer, uint64_t vaddr, uint64_t si
 		claimed += bytes;
 	};
 	const auto regions = m_memory_tracker.ClaimUploadRanges(vaddr, size, note_range, batch.regions);
+	if (claimed != 0) t_obtain_work++; // KYTY_CHECK_PEEK
 	if (uploaded_bytes != nullptr) {
 		*uploaded_bytes = claimed;
 	}
@@ -3034,9 +3038,185 @@ void BufferCache::PrefetchObtainMemo(uint64_t vaddr, uint64_t size, bool is_writ
 	}
 }
 
-std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,
-                                                       bool is_written, bool is_texel_buffer,
+// ---- Project 15 S2a: the read-only peek (n3-projekt.md section 4.1) ----------------------------------------------------
+namespace {
+struct PeekStats {
+	std::array<uint64_t, BufferCache::BufferPeek::Count> classes {};
+	uint64_t compared = 0, bad = 0, lag_compared = 0, lag_bad = 0, lag_far = 0, lag_stale = 0, injected = 0, detected = 0;
+	std::array<uint64_t, 8> translator {};
+	uint32_t logged = 0;
+};
+PeekStats g_peek_stats; // GPU thread
+struct PeekLagEntry {
+	uint64_t                vaddr = 0, size = 0, call = 0;
+	bool                    written = false;
+	BufferCache::BufferPeek peek;
+};
+std::array<PeekLagEntry, 4096> g_peek_lag {}; // GPU thread
+uint64_t                       g_peek_calls = 0;
+uint32_t PeekCheckMode() {
+	static const uint32_t mode = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK");
+		const uint32_t m = env != nullptr && env[0] == '2' ? 2u : 0u;
+		if (m != 0) std::fprintf(stderr, "CHECK_PEEK=2: every ObtainBuffer peeked first; Ready answers compared\n");
+		return m;
+	}();
+	return mode;
+}
+uint64_t PeekFaultEvery() {
+	static const uint64_t every = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK_FAULT");
+		return env != nullptr ? std::strtoull(env, nullptr, 10) : 0u;
+	}();
+	return every;
+}
+void PeekReport() {
+	auto& st = g_peek_stats;
+	if ((g_peek_calls & ((1u << 20u) - 1u)) != 0) return;
+	const char* const names[BufferCache::BufferPeek::Count] = {"ready", "direct", "null", "stream", "upload", "create", "texel"};
+	std::string       text;
+	for (uint32_t i = 0; i < BufferCache::BufferPeek::Count; i++) text += std::string(i == 0 ? "" : " ") + names[i] + "=" + std::to_string(st.classes[i]);
+	std::string tr;
+	for (uint32_t i = 0; i < st.translator.size(); i++) tr += std::string(i == 0 ? "" : "|") + std::to_string(st.translator[i]);
+	std::fprintf(stderr,
+	             "PERF peek calls=%llu classes[%s] compared=%llu bad=%llu lag_compared=%llu lag_bad=%llu lag_far=%llu lag_stale=%llu "
+	             "fault[injected|detected]=%llu|%llu translator_writes[registry|touch|upload|stream|note]=%s\n",
+	             static_cast<unsigned long long>(g_peek_calls), text.c_str(), static_cast<unsigned long long>(st.compared),
+	             static_cast<unsigned long long>(st.bad), static_cast<unsigned long long>(st.lag_compared),
+	             static_cast<unsigned long long>(st.lag_bad), static_cast<unsigned long long>(st.lag_far),
+	             static_cast<unsigned long long>(st.lag_stale), static_cast<unsigned long long>(st.injected),
+	             static_cast<unsigned long long>(st.detected), tr.c_str());
+}
+} // namespace
+
+void BufferCache::TranslatorNote(int site) {
+	g_peek_stats.translator[static_cast<size_t>(site) & 7u]++;
+}
+
+bool BufferCache::PeekProofHolds(const BufferPeek& peek, uint64_t vaddr, uint64_t size) {
+	if (peek.klass != BufferPeek::Ready) return false;
+	if (peek.buffer_epoch != DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire)) return false;
+	auto* table = g_cpu_dirty_region_epochs.load(std::memory_order_acquire);
+	for (uint32_t i = 0; i < peek.regions; i++) {
+		if (table[peek.region + i].load(std::memory_order_acquire) != peek.epochs[i]) return false;
+	}
+	return DrawRepeat::ImagePageEpochSum(vaddr, size) == peek.image_sum;
+}
+
+BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint) {
+	++t_translator;
+	BufferPeek p;
+	[&] {
+		if (vaddr == 0 || size == 0 || !GuestRange {vaddr, size}.Valid()) {
+			p.klass = BufferPeek::Null;
+			return;
+		}
+		if (DirectMode() != 0) {
+			const uint64_t end = vaddr + size;
+			for (const auto& range: m_direct_ranges) {
+				if (range.refused || end <= range.start || vaddr >= range.end) continue;
+				if (range.active && vaddr >= range.start && end <= range.end) {
+					p.klass  = BufferPeek::Direct;
+					p.id     = range.id;
+					p.offset = m_slot_buffers[range.id].Offset(vaddr);
+				} else {
+					p.klass = BufferPeek::Upload; // the range grows or activates: in order
+				}
+				return;
+			}
+		}
+		const bool clean = m_memory_tracker.PeekCpuClean(vaddr, size);
+		if (!is_written && size <= CACHING_PAGESIZE && !clean && !m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+			p.klass = BufferPeek::Stream;
+			return;
+		}
+		BufferId id = hint;
+		if (IsBufferInvalid(id) || !m_slot_buffers[id].IsInBounds(vaddr, size)) id = LookupBuffer(vaddr, size);
+		if (IsBufferInvalid(id)) {
+			p.klass = BufferPeek::Create;
+			return;
+		}
+		if (!clean) {
+			p.klass = BufferPeek::Upload;
+			return;
+		}
+		if (is_texel_buffer || m_texture_cache.IsRegionRegistered(vaddr, size)) {
+			p.klass = BufferPeek::Texel;
+			return;
+		}
+		if (!ObtainMemoRegions(vaddr, size, p.region, p.regions, p.epochs)) {
+			p.klass = BufferPeek::Upload; // more than two tracker regions: no proof
+			return;
+		}
+		p.buffer_epoch = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
+		p.image_sum    = DrawRepeat::ImagePageEpochSum(vaddr, size);
+		p.klass        = BufferPeek::Ready;
+		p.id           = id;
+		p.offset       = m_slot_buffers[id].Offset(vaddr);
+	}();
+	--t_translator;
+	return p;
+}
+
+// KYTY_CHECK_PEEK=2 (diagnostic): the peek first, then today's path; a Ready or Direct peek must name the same buffer and
+// offset, and today's path must have done nothing but touch and note (no upload, stream copy or image sync, the buffer
+// registry unchanged). The lag check: a Ready peek kept from an earlier call of the same range whose proof still holds
+// must be what today's path answers now. KYTY_CHECK_PEEK_FAULT=N: every N-th compared peek gets a wrong offset.
+std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
                                                        BufferId id, bool image_source) {
+	if (PeekCheckMode() == 0 || image_source || !GuestGpu::IsGpuThread()) {
+		return ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source);
+	}
+	auto&      st    = g_peek_stats;
+	const auto peek  = PeekBuffer(vaddr, size, is_written, is_texel_buffer, id);
+	st.classes[peek.klass]++;
+	g_peek_calls++;
+	auto&      lag      = g_peek_lag[(vaddr * 0x9E3779B97F4A7C15ull ^ size ^ (is_written ? 1u : 0u)) >> 52u & (g_peek_lag.size() - 1u)];
+	const bool lag_hit  = lag.vaddr == vaddr && lag.size == size && lag.written == is_written && lag.peek.klass == BufferPeek::Ready;
+	const bool lag_live = lag_hit && PeekProofHolds(lag.peek, vaddr, size);
+	if (lag_hit && !lag_live) st.lag_stale++;
+	const uint64_t epoch0 = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
+	const uint64_t work0  = t_obtain_work;
+	const auto     result = ObtainBufferPath(vaddr, size, is_written, is_texel_buffer, id, image_source);
+	const bool     quiet  = t_obtain_work == work0 && DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire) == epoch0 &&
+	                   result.first != &Stream();
+	const auto     same   = [&](const BufferPeek& p, uint64_t offset) {
+        return p.id && result.first == &m_slot_buffers[p.id] && result.second == offset && (p.klass == BufferPeek::Direct || quiet);
+	};
+	if (peek.klass == BufferPeek::Ready || peek.klass == BufferPeek::Direct) {
+		st.compared++;
+		uint64_t   offset = peek.offset;
+		const bool fault  = PeekFaultEvery() != 0 && st.compared % PeekFaultEvery() == 0;
+		if (fault) {
+			offset += 16u;
+			st.injected++;
+		}
+		if (!same(peek, offset)) {
+			if (fault) {
+				st.detected++;
+			} else {
+				st.bad++;
+				if (st.logged++ < 20u) {
+					std::fprintf(stderr, "CHECK_PEEK bad class=%u addr=%llx size=%llx written=%d quiet=%d stream=%d\n", peek.klass,
+					             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size), is_written ? 1 : 0,
+					             quiet ? 1 : 0, result.first == &Stream() ? 1 : 0);
+				}
+			}
+		}
+	}
+	if (lag_live) {
+		st.lag_compared++;
+		if (g_peek_calls - lag.call >= 1024u) st.lag_far++;
+		if (!same(lag.peek, lag.peek.offset)) st.lag_bad++;
+	}
+	if (peek.klass == BufferPeek::Ready) lag = {vaddr, size, g_peek_calls, is_written, peek};
+	PeekReport();
+	return result;
+}
+
+std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferPath(uint64_t vaddr, uint64_t size,
+                                                           bool is_written, bool is_texel_buffer,
+                                                           BufferId id, bool image_source) {
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid() || !GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: buffer request requires a recording command buffer\n");
@@ -3104,6 +3284,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			if (mapped != nullptr) {
 				LibKernel::Memory::ReadGuestPlain(mapped, vaddr, size);
 				Stream().Commit();
+				t_obtain_work++; // KYTY_CHECK_PEEK
+				if (t_translator != 0) TranslatorNote(3);
 				return {&Stream(), offset};
 			}
 		}
@@ -3130,6 +3312,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	bool image_sync = false;
 	if (!is_written && !is_texel_buffer && !image_source &&
 	    (image_sync = SyncBufferFromWrittenImage(buffer, vaddr, size, &image_over))) {
+		t_obtain_work++; // KYTY_CHECK_PEEK
 		static std::atomic_uint logged {0};
 		if (logged.fetch_add(1) < 32u) {
 			std::fprintf(stderr, "BUFFER_SYNC_FROM_IMAGE frame=%u addr=0x%llx size=0x%llx\n", DebugPresentCount().load(),
@@ -3164,6 +3347,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 }
 
 void BufferCache::NoteObtainedWrite(uint64_t vaddr, uint64_t size) {
+	if (t_translator != 0) TranslatorNote(4); // project 15 S2a: a write note inside a peek
 	if (!m_append_pools.empty() || !m_append_windows.empty()) AppendForeignWrite(vaddr, size); // D4b step 1 (append windows)
 	if (UploadClobberCheck()) { // D4 step K0
 		C0Note(vaddr, size, InDirectRange(vaddr, size) ? C0Event::DirectWrite : C0Event::ShaderWrite,

@@ -25,6 +25,46 @@ public:
 
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// Project 15 S2a (the read-only translator): the same questions creating no region. PeekCpuClean: every region of the
+	// range exists and holds no CPU-dirty page of it (a missing region is not proven clean); PeekGpuModified: a GPU-modified
+	// page of the range (a missing region has none).
+	[[nodiscard]] bool PeekCpuClean(uint64_t vaddr, uint64_t size) {
+		if (AllRegionsCpuClean(vaddr, size)) return true;
+		uint64_t remaining = size;
+		uint64_t index     = vaddr / TRACKER_REGION_SIZE;
+		uint64_t offset    = vaddr % TRACKER_REGION_SIZE;
+		while (remaining != 0) {
+			const auto bytes   = std::min(TRACKER_REGION_SIZE - offset, remaining);
+			auto*      manager = m_regions[index].load(std::memory_order_acquire);
+			if (manager == nullptr) return false;
+			if (manager->MaybeModified<DirtySource::Cpu>()) {
+				std::scoped_lock lock(manager->lock);
+				if (manager->IsModified<DirtySource::Cpu>(offset, bytes)) return false;
+			}
+			remaining -= bytes;
+			offset = 0;
+			index++;
+		}
+		return true;
+	}
+	[[nodiscard]] bool PeekGpuModified(uint64_t vaddr, uint64_t size) {
+		ValidateRange(vaddr, size);
+		uint64_t remaining = size;
+		uint64_t index     = vaddr / TRACKER_REGION_SIZE;
+		uint64_t offset    = vaddr % TRACKER_REGION_SIZE;
+		while (remaining != 0) {
+			const auto bytes   = std::min(TRACKER_REGION_SIZE - offset, remaining);
+			auto*      manager = m_regions[index].load(std::memory_order_acquire);
+			if (manager != nullptr && manager->MaybeModified<DirtySource::Gpu>()) {
+				std::scoped_lock lock(manager->lock);
+				if (manager->IsModified<DirtySource::Gpu>(offset, bytes)) return true;
+			}
+			remaining -= bytes;
+			offset = 0;
+			index++;
+		}
+		return false;
+	}
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
