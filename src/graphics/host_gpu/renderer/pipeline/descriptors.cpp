@@ -1044,7 +1044,9 @@ static TextureDescribe DescribeTexture(const ShaderRecompiler::IR::ImageResource
 		if (skip != 0u) std::fprintf(stderr, "DIAG_TEXTURE_SKIP_MIPS %u (sampled 2D textures viewed %u levels down)\n", skip, skip);
 		return skip;
 	}();
+	// (Not for a resource whose shader picks the mip itself: its mip views are counted from the descriptor's levels.)
 	if (diag_skip_mips != 0u && !storage && !(!resource.r128 && descriptor.MetaCompress()) &&
+	    resource.mip_mode != ShaderRecompiler::IR::ImageMipMode::Dynamic &&
 	    desc.info.resources.layers == 1u && !volume && view_levels > diag_skip_mips) {
 		view_base += diag_skip_mips;
 		view_levels -= diag_skip_mips;
