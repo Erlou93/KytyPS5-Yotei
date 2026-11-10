@@ -2567,8 +2567,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	};
 	// A draw of today's programs whose pipeline is not created yet is not issued (StageWritesMemory, above).
 	PipelineCache::Pipeline* async_pipeline = nullptr;
-	// N4.3 (KYTY_PERF_DRAW_PLANS=1): a plan with programs adopted as predicted takes its pipeline.
-	const bool use_plan = BufferCache::DrawPlansOn() && PlanPresent() && PlanProgramsHold();
+	// N4.3/N5: a plan with programs adopted as predicted is used (its pipeline, sets, buffer entries); not under the checks
+	// that compare it with today's way (the oracle, the buffer-entry check).
+	const bool use_plan = !ChunkCensus::CheckOn() && !BufferCache::PlanBufferCheck() && PlanPresent() && PlanProgramsHold();
 	if (use_plan) {
 		g_ahead.used_draws++;
 		async_pipeline = m_context.GetPipelineCache().TakePlannedPipeline(PlanPipeline());

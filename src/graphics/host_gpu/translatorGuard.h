@@ -52,7 +52,7 @@ struct AheadStats {
 	std::array<uint64_t, 4> i_moved_any {}, i_stale_any {};
 	// N4.2a (KYTY_CHECK_CHUNKS=2): the oracle's first preparation from the plan
 	uint64_t plan_draws = 0, no_plan = 0, rejected = 0, pipeline_bad = 0, set_hint = 0, set_hint_missed = 0;
-	// N4.3 (KYTY_PERF_DRAW_PLANS=1): draws committed from a plan; the pipeline taken from it; buffer acquisitions it
+	// N4.3/N5: draws committed from a plan; the pipeline taken from it; buffer acquisitions it
 	// answered (touch only) and the ones that went today's way (no entry, another class, the proof failed)
 	uint64_t used_draws = 0, used_pipeline = 0, buffers_answered = 0, buffers_today = 0;
 	uint64_t describe_failed = 0; // N5.1: the soft description or key failed (no plan)

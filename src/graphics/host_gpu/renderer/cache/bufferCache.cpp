@@ -3262,24 +3262,6 @@ void BufferCache::SetPlanBuffers(std::vector<PlanBuffer>* entries) {
 	g_plan_cursor  = 0;
 }
 
-static uint32_t DrawPlansFixed() {
-	static const uint32_t on = [] {
-		const char*    env = std::getenv("KYTY_PERF_DRAW_PLANS");
-		const uint32_t m   = env != nullptr && env[0] == '1' ? 1u : 0u;
-		if (m != 0) std::fprintf(stderr, "PERF_DRAW_PLANS=1: draws with a plan are committed from it\n");
-		return m;
-	}();
-	return on;
-}
-
-bool BufferCache::DrawPlansOn() {
-	return Common::LiveAb::Gate(Common::LiveAb::Switch::DrawPlans, DrawPlansFixed()) != 0u; // (KYTY_LIVE_AB: per call)
-}
-
-bool BufferCache::DrawPlansPossible() {
-	static const bool possible = Common::LiveAb::Possible(Common::LiveAb::Switch::DrawPlans, DrawPlansFixed());
-	return possible;
-}
 
 bool BufferCache::PlanBufferCheck() {
 	static const bool on = [] {
@@ -3344,7 +3326,7 @@ std::pair<Buffer*, uint64_t> BufferCache::PlanChecked(PlanBuffer& entry, uint64_
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer,
                                                        BufferId id, bool image_source) {
-	if (DrawPlansOn() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
+	if (!PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
 		// N4.3: the plan's answer - what today's path does for a clean, registered range with no image at its start: the touch.
 		auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false);
 		if (entry != nullptr && entry->peek.klass == BufferPeek::Ready && PeekProofHolds(entry->peek, vaddr, size)) {
