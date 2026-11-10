@@ -1396,6 +1396,20 @@ void GuestGpu::ResolveThread() {
 				             static_cast<double>(get(hs.wait_max_ns)) / 1e3, get(hs.wait_commands), get(hs.both_empty),
 				             get(hs.refused), get(hs.reads_differ), get(hs.compared), get(hs.bad), get(hs.injected), get(hs.injected_compared),
 				             get(hs.detected), get(hs.plans), get(hs.plans_short));
+				{
+					// N5.3: the plans the helpers built, as the execution thread checked and used them (read racily: a report)
+					const auto& a       = g_ahead;
+					uint64_t    writes  = 0;
+					for (const auto& w: g_helper_translator_writes) writes += w.load(std::memory_order_relaxed);
+					const auto  u       = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+					std::fprintf(stderr,
+					             "PERF helper_plans programs[compared|bad|share_diff|lost]=%llu|%llu|%llu|%llu fault=%llu|%llu "
+					             "key[compared|bad|unchecked|find_diff]=%llu|%llu|%llu|%llu fault=%llu|%llu used_draws=%llu used_pipeline=%llu "
+					             "buffers[answered|today]=%llu|%llu helper_writes=%llu\n",
+					             u(a.p_compared), u(a.p_bad), u(a.p_share_diff), u(a.p_lost), u(a.p_injected), u(a.p_detected),
+					             u(a.k_compared), u(a.k_bad), u(a.k_unchecked), u(a.k_find_diff), u(a.k_injected), u(a.k_detected),
+					             u(a.used_draws), u(a.used_pipeline), u(a.buffers_answered), u(a.buffers_today), u(writes));
+				}
 				std::string hist;
 				for (size_t i = 0; i < hs.hist_n.size(); i++) {
 					char buf[48];
