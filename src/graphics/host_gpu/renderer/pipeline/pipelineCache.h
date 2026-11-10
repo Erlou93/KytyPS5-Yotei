@@ -294,6 +294,24 @@ private:
 	                                            const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
 	                                            bool primitive_restart_enable, const GraphicsPrograms& programs);
 
+public:
+	// Project 15 S2c: the same key from the operation's registers. described: the targets come from their description
+	// (DescribeRenderColorTarget / DescribeRenderDepthTarget, no image id): every color given is present, the depth is
+	// present when its format is defined.
+	[[nodiscard]] GraphicsPipelineKey MakeGraphicsPipelineKeyFrom(std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
+	                                                              std::span<const ShaderVertexInputInfo> vertex_info,
+	                                                              const HW::Context& ctx, const HW::UserConfig& user_config,
+	                                                              const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
+	                                                              bool primitive_restart_enable, const GraphicsPrograms& programs,
+	                                                              bool described);
+	// Project 15 S2c: the pipeline of a key without a write. Found: in the map with its objects (the pointer stays valid:
+	// entries are never removed); the other classes go in order (today's GetGraphicsPipeline[Async]).
+	enum class PipelineFind : uint8_t { Found, Evicted, PendingDone, Pending, Missing, Count };
+	[[nodiscard]] std::pair<Pipeline*, PipelineFind> FindGraphicsPipeline(const GraphicsPipelineKey& key) const;
+	[[nodiscard]] size_t GraphicsPipelineCount() const { return m_graphics_pipelines.size() + m_table_pending.size(); }
+
+private:
+
 	GraphicContext&               m_graphics;
 	std::unique_ptr<ProgramCache> m_program_cache;
 	vk::PipelineCache             m_driver_cache = nullptr;

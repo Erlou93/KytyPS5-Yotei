@@ -3,6 +3,7 @@
 #include "graphics/guest_gpu/chunkLead.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheTrace.h"
+#include "graphics/host_gpu/translatorGuard.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -105,7 +106,8 @@ struct ResolveStats {
 // Project 15 S2d (KYTY_CHECK_PEEK=2, diagnostic): PeekAdopt's prediction against what Adopt did (execution thread).
 struct PeekAdoptStats {
 	uint64_t calls = 0, keep = 0, refind = 0, not_adoptable = 0, reads_changed = 0, bad = 0, injected = 0, detected = 0;
-	uint64_t refind_failed = 0;
+	uint64_t refind_failed = 0, refind_kept = 0;
+	std::array<uint64_t, 13> reasons {}, member_reasons {}; // PeekAdopt's reason (member: chunk-member draws)
 };
 PeekAdoptStats             g_peek_adopt;
 inline thread_local uint32_t t_adopt_refinds = 0; // stages whose permutation Adopt looked up again
@@ -1225,15 +1227,20 @@ struct PipelineCache::ProgramCache {
 	// cursor through them as Adopt walks it), so the commit's only write is the null share. False: Adopt looks a
 	// permutation up again (in order). The share's own write (ApplyNullFormattedShare) is not read here: it changes the
 	// specialization, and Adopt looks up again exactly when a stage shares, which the kinds say without it.
-	[[nodiscard]] static bool PeekAdopt(const ResolvedStages& results) {
+	// reason (diagnostic): 0 keep, 1 + stage * 3 + {0 no permutation found ahead, 1 null share, 2 push start differs}.
+	[[nodiscard]] static bool PeekAdopt(const ResolvedStages& results, uint32_t* reason = nullptr) {
 		uint32_t cursor = results.push_start;
 		for (uint32_t i = 0; i < results.count; i++) {
 			const auto& r           = results.stages[i];
 			const auto* permutation = static_cast<const Permutation*>(r.permutation);
 			const bool  shared      = std::ranges::find(r.null_share_kinds, uint8_t {1}) != r.null_share_kinds.end();
-			if (permutation == nullptr || shared || !permutation->program.bindings.PushStartMatches(cursor)) return false;
+			if (permutation == nullptr || shared || !permutation->program.bindings.PushStartMatches(cursor)) {
+				if (reason != nullptr) *reason = 1u + std::min(i, 3u) * 3u + (permutation == nullptr ? 0u : shared ? 1u : 2u);
+				return false;
+			}
 			permutation->program.bindings.AdvancePushData(cursor);
 		}
+		if (reason != nullptr) *reason = 0;
 		return true;
 	}
 
@@ -2219,13 +2226,16 @@ bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 		g_resolve_stats.not_adopted.fetch_add(1, std::memory_order_relaxed);
 		return false;
 	}
-	bool keep = ProgramCache::PeekAdopt(results);
+	uint32_t reason = 0;
+	bool     keep   = ProgramCache::PeekAdopt(results, &reason);
 	if (!ResolvedReadsHold(results)) {
 		st.reads_changed++;
 		g_resolve_stats.not_adopted.fetch_add(1, std::memory_order_relaxed);
 		return false;
 	}
 	(keep ? st.keep : st.refind)++;
+	st.reasons[reason]++;
+	if (t_peek_member == 1) st.member_reasons[reason]++;
 	const bool fault = keep && PeekAdoptFaultEvery() != 0 && st.keep % PeekAdoptFaultEvery() == 0;
 	if (fault) {
 		keep = false;
@@ -2241,7 +2251,7 @@ bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 		} else if (keep) {
 			st.bad++; // predicted a keep, Adopt looked up again
 		}
-		// a predicted look-up that kept: PeekAdopt said "in order" where it could have answered (counted as refind)
+		if (!keep && !fault) st.refind_kept++; // PeekAdopt said "in order", Adopt looked nothing up
 	}
 	(adopted ? g_resolve_stats.adopted : g_resolve_stats.not_adopted).fetch_add(1, std::memory_order_relaxed);
 	if ((st.calls & ((1u << 18u) - 1u)) == 0) {
@@ -2253,6 +2263,14 @@ bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 		             static_cast<unsigned long long>(st.reads_changed), static_cast<unsigned long long>(st.refind_failed),
 		             static_cast<unsigned long long>(st.bad), static_cast<unsigned long long>(st.injected),
 		             static_cast<unsigned long long>(st.detected));
+		const auto join = [](const auto& a) {
+			std::string out;
+			for (size_t i = 0; i < a.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);
+			return out;
+		};
+		std::fprintf(stderr,
+		             "PERF peek_adopt_reasons[keep|s0:none,share,push|s1:..|s2:..|s3:..]=%s member=%s refind_kept=%llu\n",
+		             join(st.reasons).c_str(), join(st.member_reasons).c_str(), static_cast<unsigned long long>(st.refind_kept));
 	}
 	return adopted;
 }
@@ -2266,6 +2284,28 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKey(
     std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
     bool primitive_restart_enable, const GraphicsPrograms& programs) {
+	return MakeGraphicsPipelineKeyFrom(colors, depth, vertex_info, command.GetRegisters(), command.GetUserConfig(), ps_input_info,
+	                                   topology, primitive_restart_enable, programs, false);
+}
+
+std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> PipelineCache::FindGraphicsPipeline(
+    const GraphicsPipelineKey& key) const {
+	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
+		auto* found = iter->second.get();
+		return {found, found->pipeline != nullptr ? PipelineFind::Found : PipelineFind::Evicted};
+	}
+	if (auto pending = m_table_pending.find(key); pending != m_table_pending.end()) {
+		const auto& job = *pending->second;
+		return {nullptr, job.done.load(std::memory_order_acquire) && !job.failed ? PipelineFind::PendingDone : PipelineFind::Pending};
+	}
+	return {nullptr, PipelineFind::Missing};
+}
+
+PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKeyFrom(
+    std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
+    std::span<const ShaderVertexInputInfo> vertex_info, const HW::Context& ctx, const HW::UserConfig& user_config,
+    const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
+    bool primitive_restart_enable, const GraphicsPrograms& programs, bool described) {
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
@@ -2276,7 +2316,6 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKey(
 	EXIT_IF(ps_active && !pixel_program);
 	const auto color_count = static_cast<uint32_t>(colors.size());
 
-	auto&             ctx = command.GetRegisters();
 
 	const HW::ModeControl& mc = ctx.GetModeControl();
 
@@ -2295,7 +2334,7 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKey(
 		const auto slot = colors[i].target_slot;
 		EXIT_IF(slot >= RENDER_COLOR_ATTACHMENTS_MAX);
 		rendering.color_count = std::max(rendering.color_count, slot + 1);
-		EXIT_IF(!colors[i].image_id || colors[i].desc.view_info.format == vk::Format::eUndefined);
+		EXIT_IF((!described && !colors[i].image_id) || colors[i].desc.view_info.format == vk::Format::eUndefined);
 		static_params.color_mask[slot] = colors[i].export_mapping.ApplyMask(
 		    render_target_mask_slot(ctx.GetRenderTargetMask(), colors[i].target_slot));
 		// Upstream b4406b046: a packed 11-11-10 UNorm export writes one 32-bit channel (not with
@@ -2360,7 +2399,7 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKey(
 		}
 	}
 	const bool with_depth =
-	    depth.desc.view_info.format != vk::Format::eUndefined && static_cast<bool>(depth.image_id);
+	    depth.desc.view_info.format != vk::Format::eUndefined && (described || static_cast<bool>(depth.image_id));
 	if (with_depth) {
 		const auto aspects       = ImageViewOps::DepthAspectMask(depth.desc.view_info.format);
 		rendering.depth_format   = aspects & vk::ImageAspectFlagBits::eDepth
@@ -2404,7 +2443,7 @@ PipelineCache::GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKey(
 		EXIT("Pipeline: sample-rate shading is required but unsupported by the host\n");
 	}
 	static_params.alpha_to_coverage_enable = ps_active && ctx.GetShaderRegisters().AlphaToMask();
-	const bool rect_list = Prospero::IsRectList(command.GetUserConfig().GetPrimType());
+	const bool rect_list = Prospero::IsRectList(user_config.GetPrimType());
 	static_params.cull_back  = !rect_list && mc.cull_back;
 	static_params.cull_front = !rect_list && mc.cull_front;
 	static_params.face       = mc.face;

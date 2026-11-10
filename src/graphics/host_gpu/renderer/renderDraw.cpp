@@ -1540,6 +1540,61 @@ void Report(TargetMemo& m) {
 }
 } // namespace C1
 
+// Project 15 S2c (KYTY_CHECK_PEEK=2, diagnostic): the draw's targets described from the registers, its pipeline key
+// from them and the pipeline found without a write, against today's (execution thread).
+namespace PeekTargets {
+struct Stats {
+	uint64_t draws = 0, targets_bad = 0, key_bad = 0, compared = 0, bad = 0, created = 0, injected = 0, detected = 0;
+	std::array<uint64_t, static_cast<size_t>(PipelineCache::PipelineFind::Count)> find {}, member_find {};
+	uint32_t logged = 0;
+};
+Stats g_stats;
+struct Scratch {
+	bool            valid = false;
+	uint32_t        count = 0;
+	RenderColorInfo colors[RENDER_COLOR_ATTACHMENTS_MAX];
+	RenderDepthInfo depth;
+};
+Scratch g_scratch;
+bool    Check() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK");
+		return env != nullptr && env[0] == '2';
+	}();
+	return on;
+}
+uint64_t FaultEvery() {
+	static const uint64_t every = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK_FAULT");
+		return env != nullptr ? std::strtoull(env, nullptr, 10) : 0u;
+	}();
+	return every;
+}
+void Report() {
+	auto& st = g_stats;
+	if ((st.draws & ((1u << 18u) - 1u)) != 0) return;
+	const auto join = [](const auto& a) {
+		std::string out;
+		for (size_t i = 0; i < a.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);
+		return out;
+	};
+	std::fprintf(stderr,
+	             "PERF peek_pipeline draws=%llu targets_bad=%llu key_bad=%llu find[found|evicted|pending_done|pending|missing]=%s "
+	             "member=%s compared=%llu bad=%llu created=%llu fault[injected|detected]=%llu|%llu\n",
+	             static_cast<unsigned long long>(st.draws), static_cast<unsigned long long>(st.targets_bad),
+	             static_cast<unsigned long long>(st.key_bad), join(st.find).c_str(), join(st.member_find).c_str(),
+	             static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.bad),
+	             static_cast<unsigned long long>(st.created), static_cast<unsigned long long>(st.injected),
+	             static_cast<unsigned long long>(st.detected));
+}
+// The key fields of a described target against today's resolved one.
+bool SameColor(const RenderColorInfo& a, const RenderColorInfo& b) {
+	return a.target_slot == b.target_slot && a.desc.view_info.format == b.desc.view_info.format &&
+	       a.desc.info.samples == b.desc.info.samples && a.desc.info.guest_format == b.desc.info.guest_format &&
+	       std::memcmp(&a.export_mapping, &b.export_mapping, sizeof(a.export_mapping)) == 0;
+}
+} // namespace PeekTargets
+
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
 	                                        DrawRenderState& state) {
@@ -1621,6 +1676,35 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (c0_targets) {
 		CleanDraws::t_front_parts.targets_ns += static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - c0_targets_start).count());
+	}
+	if (PeekTargets::Check()) {
+		// KYTY_CHECK_PEEK=2 (S2c): the same targets from the registers alone, inside the translator section.
+		auto& sc = PeekTargets::g_scratch;
+		++t_translator;
+		sc.count = 0;
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+			if ((mrt_mask & (1u << slot)) == 0) continue;
+			if (DescribeRenderColorTarget(buffer.GetRegisters(), sc.colors[sc.count], render_target_slice_offset, slot, false)) sc.count++;
+		}
+		sc.depth = {};
+		(void)DescribeRenderDepthTarget(buffer.GetGraphics(), buffer.GetRegisters(), sc.depth);
+		--t_translator;
+		sc.valid  = true;
+		bool same = sc.count == state.color_count;
+		for (uint32_t i = 0; same && i < sc.count; i++) same = PeekTargets::SameColor(sc.colors[i], state.color_info[i]);
+		const bool depth_described = sc.depth.desc.view_info.format != vk::Format::eUndefined;
+		const bool depth_today = state.depth_info.desc.view_info.format != vk::Format::eUndefined && static_cast<bool>(state.depth_info.image_id);
+		same = same && depth_described == depth_today &&
+		       (!depth_today || (sc.depth.desc.view_info.format == state.depth_info.desc.view_info.format &&
+		                         sc.depth.desc.info.samples == state.depth_info.desc.info.samples));
+		if (!same) {
+			auto& st = PeekTargets::g_stats;
+			st.targets_bad++;
+			if (st.logged++ < 20u) {
+				std::fprintf(stderr, "CHECK_PEEK_TARGETS bad colors=%u/%u depth=%d/%d mrt=0x%x\n", sc.count, state.color_count,
+				             depth_described ? 1 : 0, depth_today ? 1 : 0, mrt_mask);
+			}
+		}
 	}
 
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
@@ -2423,6 +2507,45 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const bool     c0_parts     = CleanDraws::On();
 	const auto     c0_pipeline  = c0_parts ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	const uint64_t c0_programs0 = CleanDraws::t_front_parts.programs_ns;
+	// KYTY_CHECK_PEEK=2 (S2c): the key from the described targets and the registers, and the pipeline found without a write.
+	std::pair<PipelineCache::Pipeline*, PipelineCache::PipelineFind> peek_find {nullptr, PipelineCache::PipelineFind::Count};
+	size_t                                                           peek_pipelines = 0;
+	if (PeekTargets::Check() && PeekTargets::g_scratch.valid) {
+		auto& sc = PeekTargets::g_scratch;
+		auto& st = PeekTargets::g_stats;
+		auto& pc = m_context.GetPipelineCache();
+		sc.valid = false;
+		st.draws++;
+		const auto* ps_info   = state.ps_active ? &state.ps_input_info : nullptr;
+		++t_translator;
+		const auto  key_peek  = pc.MakeGraphicsPipelineKeyFrom(std::span {sc.colors, sc.count}, sc.depth, vertex_stages, buffer.GetRegisters(),
+		                                                       buffer.GetUserConfig(), ps_info, topology, primitive_restart_enable,
+		                                                       state.programs, true);
+		peek_find             = pc.FindGraphicsPipeline(key_peek);
+		--t_translator;
+		const auto key_today = pc.MakeGraphicsPipelineKeyFrom(std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages,
+		                                                      buffer.GetRegisters(), buffer.GetUserConfig(), ps_info, topology,
+		                                                      primitive_restart_enable, state.programs, false);
+		if (!(key_peek == key_today)) st.key_bad++;
+		st.find[static_cast<size_t>(peek_find.second)]++;
+		if (t_peek_member == 1) st.member_find[static_cast<size_t>(peek_find.second)]++;
+		peek_pipelines = pc.GraphicsPipelineCount();
+		PeekTargets::Report();
+	}
+	const auto peek_compare = [&](PipelineCache::Pipeline* today) {
+		if (peek_find.second != PipelineCache::PipelineFind::Found) return;
+		auto& st = PeekTargets::g_stats;
+		st.compared++;
+		auto*      predicted = peek_find.first;
+		const bool fault     = PeekTargets::FaultEvery() != 0 && st.compared % PeekTargets::FaultEvery() == 0;
+		if (fault) {
+			predicted = nullptr;
+			st.injected++;
+		}
+		const bool created = m_context.GetPipelineCache().GraphicsPipelineCount() != peek_pipelines;
+		if (created) st.created++;
+		if (predicted != today || created) (fault ? st.detected : st.bad)++;
+	};
 	// A draw of today's programs whose pipeline is not created yet is not issued (StageWritesMemory, above).
 	PipelineCache::Pipeline* async_pipeline = nullptr;
 	if (DrawWritesMemory(state)) {
@@ -2434,6 +2557,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 		    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable, state.programs, &failed);
 		if (async_pipeline == nullptr && !failed) {
+			peek_compare(nullptr);
 			NoteAsyncDraw(true);
 			m_async_skipped_draws++;
 			return;
@@ -2445,6 +2569,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	                           std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 	                           state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
 	                           state.programs);
+	peek_compare(&pipeline);
 	if (c0_parts) {
 		const auto total = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - c0_pipeline).count());
