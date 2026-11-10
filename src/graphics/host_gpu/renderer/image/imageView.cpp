@@ -351,6 +351,7 @@ vk::ImageView Image::FindViewExisting(const ImageViewInfo& view_info) const {
 vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	const auto& image      = backing;
 	const auto  normalized = NormalizeView(view_info);
+	const bool  is_storage = static_cast<bool>(normalized.usage & vk::ImageUsageFlagBits::eStorage);
 	for (const auto& cached: views) {
 		if (cached.info == normalized) {
 			return cached.view;
