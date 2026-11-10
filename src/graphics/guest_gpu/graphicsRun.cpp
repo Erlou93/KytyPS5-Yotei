@@ -878,6 +878,7 @@ bool GuestGpu::WaitForOperations() {
 			return true;
 		}
 		if (m_pending_commands.load(std::memory_order_acquire) != 0) {
+			const Common::SlowFrame::Scope slow_commands(Common::SlowFrame::Commands); // KYTY_TRACE_SLOW_FRAMES
 			if (ChunkLead::PeekCensusOn()) { // (way B measurement: the commands served while idle)
 				const uint64_t t0 = ChunkLead::Tsc();
 				RunCommands();
@@ -943,7 +944,12 @@ void GuestGpu::ExecutionThread() {
 			const bool     census    = ChunkLead::PeekCensusOn();
 			const int      census_cause = census && m_operations.SizeApprox() == 0 ? 1 : 0;
 			const uint64_t census_t0 = census ? ChunkLead::Tsc() : 0;
-			if (!WaitForOperations()) {
+			bool have_operations = false;
+			{
+				const Common::SlowFrame::Scope slow_idle(Common::SlowFrame::ExecIdle); // KYTY_TRACE_SLOW_FRAMES
+				have_operations = WaitForOperations();
+			}
+			if (!have_operations) {
 				break;
 			}
 			if (census) ChunkLead::NoteExecIdle(census_cause, ChunkLead::Tsc() - census_t0);
@@ -987,6 +993,7 @@ void GuestGpu::ExecutionThread() {
 				std::optional<Common::LiveAb::BusyScope>* live;
 			} scopes {&perf_process, &live_busy};
 			const uint64_t claim_t0 = ChunkLead::PeekCensusOn() ? ChunkLead::Tsc() : 0; // (way B measurement)
+			const Common::SlowFrame::Scope slow_claim(Common::SlowFrame::Claim); // KYTY_TRACE_SLOW_FRAMES
 			ClaimResolved(
 			    *operation,
 			    [](void* context, bool waiting) {
@@ -1268,6 +1275,9 @@ void GuestGpu::ExecutionThread() {
 			const auto      kind         = operation->kind;
 			if (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto || kind == GpuOperationKind::DrawIndirect) {
 				draws_in_frame++;
+				Common::SlowFrame::CountOne(Common::SlowFrame::Draws); // KYTY_TRACE_SLOW_FRAMES
+			} else if (kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect) {
+				Common::SlowFrame::CountOne(Common::SlowFrame::Dispatches); // KYTY_TRACE_SLOW_FRAMES
 			}
 			const uint32_t present = DebugPresentCount().load(std::memory_order_relaxed);
 			if (present != last_present) {
@@ -1285,6 +1295,7 @@ void GuestGpu::ExecutionThread() {
 		operation.reset();
 		m_executed.Publish(sequence);
 		if (m_pending_commands.load(std::memory_order_acquire) != 0) {
+			const Common::SlowFrame::Scope slow_commands(Common::SlowFrame::Commands); // KYTY_TRACE_SLOW_FRAMES
 			if (ChunkLead::PeekCensusOn()) { // (way B measurement: the commands served between operations)
 				const uint64_t t0 = ChunkLead::Tsc(), w0 = PassCensus::t_wait_ns;
 				RunCommands();
