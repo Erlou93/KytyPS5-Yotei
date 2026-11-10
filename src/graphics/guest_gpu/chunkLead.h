@@ -50,7 +50,8 @@ void ResolveOperationStart();
 // operation, ExecutePreparedDraw, CommitPreparedDraw, the render targets (PrepareDrawRenderState), the adoption's read
 // check, the bindless tables, PrepareBda, the pipeline lookup. Parts nest (the commit is inside ExecutePreparedDraw);
 // PERF commit_floor prints each part's mean per member draw. Execution thread.
-[[nodiscard]] bool PeekCensusOn();
+[[nodiscard]] bool     PeekCensusOn();
+[[nodiscard]] uint64_t Tsc();
 enum FloorPart : uint32_t { FpTotal, FpExecute, FpCommit, FpTargets, FpAdopt, FpBindless, FpBda, FpPipeline, FpCount };
 inline thread_local uint64_t t_floor[FpCount] {};
 inline thread_local bool     t_floor_on = false; // set per operation: the census is on and the operation a member draw
