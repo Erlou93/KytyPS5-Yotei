@@ -22,13 +22,31 @@ inline thread_local int                     t_peek_member  = -1;
 inline thread_local uint32_t                t_peek_markers = 0;
 inline thread_local std::array<uint64_t, 4> t_peek_marker_hist {};
 
+// The operation's plan (n3-s2b-przeglad.md section 4): its programs predicted (S2d) and its pipeline found (S2c, not mesh);
+// member draws with a plan, by in-order markers (buffers in order + image stages without a full answer).
+inline thread_local bool                    t_op_programs = false, t_op_pipeline = false;
+inline thread_local uint64_t                t_member_draws = 0, t_plan_draws = 0;
+inline thread_local std::array<uint64_t, 4> t_plan_marker_hist {};
+// Slow paths of today's image binding (S2b: a peeked-ready slot that took one went stale on the way).
+inline thread_local uint64_t t_peek_slow = 0;
+
 inline void PeekOperationBegin(bool member) {
 	t_peek_member  = member ? 1 : 0;
 	t_peek_markers = 0;
+	t_op_programs  = false;
+	t_op_pipeline  = false;
 }
 
 inline void PeekOperationEnd() {
-	if (t_peek_member == 1) t_peek_marker_hist[t_peek_markers < 3u ? t_peek_markers : 3u]++;
+	if (t_peek_member == 1) {
+		const uint32_t bucket = t_peek_markers < 3u ? t_peek_markers : 3u;
+		t_peek_marker_hist[bucket]++;
+		t_member_draws++;
+		if (t_op_programs && t_op_pipeline) {
+			t_plan_draws++;
+			t_plan_marker_hist[bucket]++;
+		}
+	}
 	t_peek_member = -1;
 }
 

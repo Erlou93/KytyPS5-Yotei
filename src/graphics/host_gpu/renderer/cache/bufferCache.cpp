@@ -3101,10 +3101,12 @@ void PeekReport() {
 	             join(t_translator_writes, 6).c_str());
 	std::fprintf(stderr,
 	             "PERF peek_split member[%s] member_draws_by_in_order[0|1|2|3+]=%s bda[%s] bda_compared=%llu image_granule_only=%llu "
-	             "image[plain_found|plain_none|formatted_found|formatted_none]=%s\n",
+	             "image[plain_found|plain_none|formatted_found|formatted_none]=%s member_draws=%llu plan_draws=%llu "
+	             "plan_by_in_order[0|1|2|3+]=%s\n",
 	             classes(st.member).c_str(), join(t_peek_marker_hist, 4).c_str(), classes(st.bda).c_str(),
 	             static_cast<unsigned long long>(st.bda_compared), static_cast<unsigned long long>(st.image_granule_only),
-	             join(st.image_split, 4).c_str());
+	             join(st.image_split, 4).c_str(), static_cast<unsigned long long>(t_member_draws),
+	             static_cast<unsigned long long>(t_plan_draws), join(t_plan_marker_hist, 4).c_str());
 }
 } // namespace
 

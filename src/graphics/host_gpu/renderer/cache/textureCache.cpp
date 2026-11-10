@@ -3462,6 +3462,7 @@ vk::ImageView TextureCache::PeekTextureView(ImageId id, const ImageDesc& desc) c
 
 vk::ImageView TextureCache::FindTextureReplay(ImageId id, const ImageDesc& desc) {
 	if (desc.type != BindingType::Texture) {
+		t_peek_slow++; // KYTY_CHECK_PEEK=2 (S2b)
 		return FindTexture(id, desc);
 	}
 	vk::ImageView fast_view = nullptr;
@@ -3477,6 +3478,7 @@ vk::ImageView TextureCache::FindTextureReplay(ImageId id, const ImageDesc& desc)
 			return fast_view;
 		}
 	}
+	t_peek_slow++; // KYTY_CHECK_PEEK=2 (S2b): the full FindTexture
 	const auto view = FindTexture(id, desc);
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];

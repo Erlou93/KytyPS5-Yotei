@@ -4126,6 +4126,7 @@ namespace PeekImages {
 enum Slot : uint8_t { SetSlot, Replay, NotTexture, ReplayMiss, ViewMissing, NullImage, Count };
 struct Stage {
 	bool                                    pending = false, samplers_answered = false;
+	std::vector<uint8_t>                    stale; // today's path took a slow path for the slot
 	uint64_t                                epoch   = 0;
 	std::vector<uint8_t>                    klass;
 	std::vector<ImageId>                    ids;
@@ -4136,7 +4137,7 @@ struct Stage {
 struct Stats {
 	std::array<uint64_t, Count> slots {};
 	uint64_t stages = 0, all_slots = 0, samplers = 0, answered = 0, member_stages = 0, member_answered = 0;
-	uint64_t compared = 0, bad = 0, race = 0, sampler_bad = 0, unchecked = 0, injected = 0, detected = 0;
+	uint64_t compared = 0, bad = 0, moved = 0, stale_ready = 0, sampler_bad = 0, unchecked = 0, injected = 0, detected = 0;
 	uint32_t logged = 0;
 };
 Stats g_stats;
@@ -4165,13 +4166,14 @@ void Report() {
 	for (size_t i = 0; i < st.slots.size(); i++) slots += std::string(i == 0 ? "" : "|") + std::to_string(st.slots[i]);
 	std::fprintf(stderr,
 	             "PERF peek_images stages=%llu all_slots=%llu samplers=%llu answered=%llu member[stages|answered]=%llu|%llu "
-	             "slots[set|replay|not_texture|replay_miss|view_missing|null]=%s compared=%llu bad=%llu race=%llu sampler_bad=%llu "
+	             "slots[set|replay|not_texture|replay_miss|view_missing|null]=%s compared=%llu bad=%llu moved=%llu stale_ready=%llu sampler_bad=%llu "
 	             "unchecked=%llu fault[injected|detected]=%llu|%llu\n",
 	             static_cast<unsigned long long>(st.stages), static_cast<unsigned long long>(st.all_slots),
 	             static_cast<unsigned long long>(st.samplers), static_cast<unsigned long long>(st.answered),
 	             static_cast<unsigned long long>(st.member_stages), static_cast<unsigned long long>(st.member_answered), slots.c_str(),
 	             static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.bad),
-	             static_cast<unsigned long long>(st.race), static_cast<unsigned long long>(st.sampler_bad),
+	             static_cast<unsigned long long>(st.moved), static_cast<unsigned long long>(st.stale_ready),
+	             static_cast<unsigned long long>(st.sampler_bad),
 	             static_cast<unsigned long long>(st.unchecked), static_cast<unsigned long long>(st.injected),
 	             static_cast<unsigned long long>(st.detected));
 }
@@ -4286,12 +4288,15 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 	static thread_local std::vector<uint8_t> table_exact;
 	table_exact.assign(program.info.images.size(), 0u);
 	const auto table_loop_epoch = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
+	PeekImages::Stage* peek_entry = nullptr; // KYTY_CHECK_PEEK=2 (S2b): this stage's peek
 	// One image binding of today's path (for the slots a table set does not serve).
 	const auto prepare_image_slot = [&](uint32_t i) {
+		const uint64_t slow0 = t_peek_slow;
 		DebugDepthStorageNulled() = false;
 		KYTY_PROFILER_BLOCK("PrepareBindings::Image");
 		const uint32_t compare_funcs = ImageCompareFuncs(program, snapshot, i);
 		const auto     resolve       = [&] {
+			t_peek_slow++; // KYTY_CHECK_PEEK=2 (S2b): the full image search
 			return ResolveTexture(program.info.images[i], snapshot.images[i], compare_funcs);
 		};
 		TextureBinding binding = ResolveTextureReplay(m_context.GetTextureCache(), m_soft_texture_resolve, program, i,
@@ -4313,6 +4318,7 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
 		prepared.images[i] = std::move(binding);
+		if (peek_entry != nullptr && t_peek_slow != slow0 && i < peek_entry->stale.size()) peek_entry->stale[i] = 1u;
 	};
 	if (PeekImages::Check() && GuestGpu::IsGpuThread()) {
 		// KYTY_CHECK_PEEK=2 (S2b): the stage's images and samplers without a write (no set moved, no replay slot inserted,
@@ -4320,12 +4326,15 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 		++t_translator;
 		auto&       cache = m_context.GetTextureCache();
 		auto&       peek  = PeekImages::Pending()[&prepared];
+		peek_entry        = &peek;
+		cache.LockPeekRead();
 		auto&       st    = PeekImages::g_stats;
 		const auto  count = program.info.images.size();
 		peek          = {};
 		peek.pending  = true;
 		peek.epoch    = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
 		peek.klass.assign(count, PeekImages::ReplayMiss);
+		peek.stale.assign(count, 0u);
 		peek.ids.assign(count, ImageId {});
 		peek.views.assign(count, nullptr);
 		peek.mips.assign(count, {});
@@ -4405,6 +4414,7 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 		}
 		peek.samplers_answered = set != nullptr || program.info.samplers.empty();
 		if (set != nullptr) peek.samplers = set->samplers;
+		cache.UnlockPeekRead();
 		--t_translator;
 		st.stages++;
 		if (all) st.all_slots++;
@@ -4414,6 +4424,7 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 		if (t_peek_member == 1) {
 			st.member_stages++;
 			if (answered) st.member_answered++;
+			if (!answered) t_peek_markers++; // an image stage in order (the operation's plan)
 		}
 		PeekImages::Report();
 	}
@@ -4945,14 +4956,29 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	auto&       images   = prepared.images;
 	EXIT_IF(images.size() != program.info.images.size());
 	auto& texture_cache = m_context.GetTextureCache();
+	PeekImages::Stage* peek_entry = nullptr; // KYTY_CHECK_PEEK=2 (S2b)
+	if (PeekImages::Check()) {
+		auto& pending = PeekImages::Pending();
+		if (const auto it = pending.find(&prepared); it != pending.end() && it->second.pending) peek_entry = &it->second;
+	}
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	const auto rebind_image_slot = [&](uint32_t i) {
+		const uint64_t slow0 = t_peek_slow;
+		struct SlowNote {
+			PeekImages::Stage* entry;
+			uint64_t           slow0;
+			uint32_t           i;
+			~SlowNote() {
+				if (entry != nullptr && t_peek_slow != slow0 && i < entry->stale.size()) entry->stale[i] = 1u;
+			}
+		} const slow_note {peek_entry, slow0, i};
 		const auto old_image = texture_cache.m_slot_images.try_get(images[i].image_id);
 		if (old_image == nullptr || (!old_image->registered && !old_image->info.data.Empty()) ||
 		    old_image->binding.needs_rebind) {
 			if (old_image != nullptr) {
 				ClearImageBinding(*old_image, images[i].image_id);
 			}
+			t_peek_slow++; // KYTY_CHECK_PEEK=2 (S2b): the full image search
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
 			                           ImageCompareFuncs(program, snapshot, i));
 			if (i < prepared.image_source.size()) prepared.image_source[i] = 0u;
@@ -5026,14 +5052,14 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	prepared.table_hit = nullptr;
 	if (PeekImages::Check()) {
 		// KYTY_CHECK_PEEK=2 (S2b): an answered slot must hold the peeked image and views.
-		auto& pending = PeekImages::Pending();
-		auto& st      = PeekImages::g_stats;
-		if (const auto it = pending.find(&prepared); it != pending.end() && it->second.pending) {
-			auto& peek       = it->second;
+		auto& st = PeekImages::g_stats;
+		if (peek_entry != nullptr) {
+			auto& peek       = *peek_entry;
 			peek.pending     = false;
 			const bool moved = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) != peek.epoch;
 			for (size_t i = 0; i < images.size() && i < peek.klass.size(); i++) {
 				if (peek.klass[i] != PeekImages::SetSlot && peek.klass[i] != PeekImages::Replay) continue;
+				if (peek.stale[i] != 0u) st.stale_ready++; // ready at the peek, today's path took a slow path
 				st.compared++;
 				auto       view  = peek.views[i];
 				const bool fault = PeekImages::FaultEvery() != 0 && st.compared % PeekImages::FaultEvery() == 0;
@@ -5046,7 +5072,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				if (fault) {
 					st.detected++;
 				} else if (moved) {
-					st.race++;
+					st.moved++;
 				} else {
 					st.bad++;
 					if (st.logged++ < 20u) {

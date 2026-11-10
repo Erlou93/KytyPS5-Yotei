@@ -2276,6 +2276,7 @@ bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
 	const bool     fault    = predicted && PeekAdoptFaultEvery() != 0 && (st.keep + st.refind) % PeekAdoptFaultEvery() == 0;
 	const uint32_t refinds0 = t_adopt_refinds;
 	const bool     adopted  = m_program_cache->Adopt(results);
+	if (adopted && predicted) t_op_programs = true; // the operation's plan (translatorGuard.h)
 	if (adopted != predicted) {
 		st.bad++; // a compile predicted where Adopt found one, or the other way
 	} else if (adopted) {

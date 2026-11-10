@@ -2528,6 +2528,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                                      primitive_restart_enable, state.programs, false);
 		if (!(key_peek == key_today)) st.key_bad++;
 		st.find[static_cast<size_t>(peek_find.second)]++;
+		if (peek_find.second == PipelineCache::PipelineFind::Found && !mesh_active) t_op_pipeline = true; // the operation's plan
 		if (t_peek_member == 1) st.member_find[static_cast<size_t>(peek_find.second)]++;
 		peek_pipelines = pc.GraphicsPipelineCount();
 		PeekTargets::Report();

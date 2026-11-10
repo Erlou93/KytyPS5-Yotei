@@ -151,6 +151,9 @@ public:
 	// Project 15 S2b: the view FindTextureReplay returns on its fast path, without the touch (null: not ready, not a
 	// sampled texture, or the view not created yet: today's call in order). Lock-free, as the other checks.
 	[[nodiscard]] vk::ImageView PeekTextureView(ImageId id, const ImageDesc& desc) const;
+	// Project 15 S2b: the read section of the cache's lock around a stage's peek (counted as a lock, no write).
+	void LockPeekRead() noexcept { m_lock.lock(false); }
+	void UnlockPeekRead() noexcept { m_lock.unlock(); }
 	// The image replay (pipeline\descriptors.cpp): whether this thread's last FindImage found an existing image by
 	// the plain search and did nothing else; and FindImage's work for an image a caller proved it would find again: the
 	// LRU touch and access tick (null id when it is gone).
