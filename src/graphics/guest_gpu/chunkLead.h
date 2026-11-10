@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 // KYTY_TRACE_CHUNK_LEAD=1 (project 15 N1, measurement only; design: the analysis session's n1-projekt-licznikow.md): how
 // far ahead of the execution thread the work of a chunk is when the execution thread opens it.
@@ -59,6 +60,9 @@ enum FloorPart : uint32_t {
 	FpTotal, FpExecute, FpCommit, FpTargets, FpAdopt, FpBindless, FpBda, FpPipeline, FpBuild,
 	FpTake, FpStageBind, FpUpload, FpDrawBind, FpImages, FpAcquire, FpScanTransit,
 	FpD1, FpD2, FpD3, FpD4, FpD5, FpD6, FpD7, FpWritten,
+	// W3 P0 (10.11): the draw-buffer pool - FindBuffers, the record-keyed V# ranges, the SRT words, the buffer loop of
+	// RebindBuffers, vertex/index/argument acquisitions, the plan-answer branch of ObtainBuffer (time; t_floor_answers count)
+	FpFindBuffers, FpVRanges, FpSrtWords, FpBufLoop, FpVtxIdx, FpPlanAnswer,
 	FpCount
 };
 inline thread_local uint64_t t_floor[FpCount] {};
@@ -104,6 +108,10 @@ void NoteCover(int bucket, int reason, int reason_without_buffers);
 // Way B W0: the draw bucket of the running operation (-1: none or the census off) and a read acquisition with a plan:
 // the entry's kind (0 buffer, 1 range, 2 vertex, 3 index, 4 args, 5 count, 6 no entry) and the reason (0 answered).
 inline thread_local int t_floor_bucket = -1;
+[[nodiscard]] inline bool B3On() {
+	static const bool on = std::getenv("KYTY_TRACE_W0_B3") != nullptr; // (W3 P0: the B3 split costs per acquisition)
+	return on;
+}
 void NoteB3(uint32_t kind, int reason);
 
 // After an operation (bucket 0..2 the three passes' draws, then the buckets below): its parts summed per bucket;
@@ -111,6 +119,7 @@ void NoteB3(uint32_t kind, int reason);
 // t_floor_wait: the card waits (ns, masterSemaphore) inside the operation, set before NoteFloor.
 constexpr int BucketOtherDraws = 3, BucketDispatches = 4, BucketOther = 5, Buckets = 6;
 inline thread_local uint64_t t_floor_wait = 0;
+inline thread_local uint64_t t_floor_answers = 0; // W3 P0: plan answers in the operation
 // The execution thread between operations (same switch, way B measurement 10.11): idle with nothing resolved (cause 0:
 // operations queued - the resolve dispatcher behind; 1: none - the command processor has produced nothing), the commands
 // it serves while idle (inside the idle time), the claim of a slot from a helper, and the card waits by marker pass.

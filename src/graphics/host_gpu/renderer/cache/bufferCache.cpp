@@ -3397,6 +3397,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	std::optional<ChunkLead::FloorTimer> floor_written; // KYTY_TRACE_PEEK_CENSUS (way B W0 D5w): a written range's acquisition
 	if (is_written) floor_written.emplace(ChunkLead::FpWritten);
 	if (!PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
+		const ChunkLead::FloorTimer floor_answer(ChunkLead::FpPlanAnswer); // KYTY_TRACE_PEEK_CENSUS (W3 P0)
 		// N4.3: the plan's answer - what today's path does for a clean, registered range with no image at its start: the touch.
 		auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false);
 		// W2.2: a Direct entry answers as today's path does for an active direct range: the buffer and offset, no touch.
@@ -3406,11 +3407,12 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			auto& buffer = m_slot_buffers[entry->peek.id];
 			if (!direct) TouchBuffer(buffer);
 			g_ahead.buffers_answered++;
-			if (ChunkLead::t_floor_bucket >= 0) ChunkLead::NoteB3(entry->kind, 0);
+			ChunkLead::t_floor_answers++; // (W3 P0)
+			if (ChunkLead::t_floor_bucket >= 0 && ChunkLead::B3On()) ChunkLead::NoteB3(entry->kind, 0);
 			return {&buffer, entry->peek.offset};
 		}
 		g_ahead.buffers_today++;
-		if (ChunkLead::t_floor_bucket >= 0) {
+		if (ChunkLead::t_floor_bucket >= 0 && ChunkLead::B3On()) {
 			// Way B W0: why the acquisition went today's way (1 no entry, 2 a helper's direct-range span, 3 upload, 4 stream,
 			// 5 image, 6 another class, 7-9 the proof failed: registry, CPU pages, image pages)
 			int reason = 1;

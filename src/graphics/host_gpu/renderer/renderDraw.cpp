@@ -2504,6 +2504,7 @@ void RenderExecutor::PrepareDrawBindings(DrawPlan& plan, CommandBuffer& buffer, 
 		PrepareGraphicsBuffersTail(stages);
 		if (pass == 0 && buffers_mark != nullptr) *buffers_mark = std::chrono::steady_clock::now();
 		if (!plan.mesh_active) {
+			const ChunkLead::FloorTimer floor_vtx(ChunkLead::FpVtxIdx); // KYTY_TRACE_PEEK_CENSUS (W3 P0)
 			if (pass == 0) LogDrawPhase(plan.draw.Name(), "PrepareVertexBuffers");
 			plan.vertex_bindings = {};
 			AcquireVertexBuffers(buffer, plan.state->vertex_info[0], plan.vertex_bindings);

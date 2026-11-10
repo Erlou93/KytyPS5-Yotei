@@ -528,7 +528,7 @@ void NoteB3(uint32_t kind, int reason) {
 void NoteFloor(int pass) {
 	struct FloorState {
 		std::array<std::array<uint64_t, FpCount>, Buckets> ticks {};
-		std::array<uint64_t, Buckets>                      draws {}, wait_ns {};
+		std::array<uint64_t, Buckets>                      draws {}, wait_ns {}, answers {};
 		Clock                                              clock;
 		std::chrono::steady_clock::time_point              window       = std::chrono::steady_clock::now();
 		uint32_t                                           window_frame = 0;
@@ -539,7 +539,9 @@ void NoteFloor(int pass) {
 		for (uint32_t i = 0; i < FpCount; i++) s.ticks[static_cast<size_t>(pass)][i] += t_floor[i];
 		s.draws[static_cast<size_t>(pass)]++;
 		s.wait_ns[static_cast<size_t>(pass)] += t_floor_wait;
+		s.answers[static_cast<size_t>(pass)] += t_floor_answers;
 	}
+	t_floor_answers = 0;
 	t_floor_wait = 0;
 	std::fill(std::begin(t_floor), std::end(t_floor), uint64_t {0});
 	if ((++s.calls & 255u) != 0) return;
@@ -572,6 +574,13 @@ void NoteFloor(int pass) {
 			             "scan_transit=%.3f d1=%.3f d2=%.3f d3=%.3f d4=%.3f d5=%.3f d6=%.3f d7=%.3f written=%.3f\n",
 			             name(p).c_str(), us(FpTake), us(FpStageBind), us(FpUpload), us(FpDrawBind), us(FpImages), us(FpAcquire),
 			             us(FpScanTransit), us(FpD1), us(FpD2), us(FpD3), us(FpD4), us(FpD5), us(FpD6), us(FpD7), us(FpWritten));
+			std::fprintf(stderr,
+			             "PERF w3_p0 pass=\"%s\" us/op find_buffers=%.3f vranges=%.3f srt_words=%.3f buf_loop=%.3f vtx_idx=%.3f "
+			             "plan_answer=%.3f answers/op=%.2f ms/frame find_buffers=%.2f vranges=%.2f srt_words=%.2f buf_loop=%.2f vtx_idx=%.2f "
+			             "plan_answer=%.2f\n",
+			             name(p).c_str(), us(FpFindBuffers), us(FpVRanges), us(FpSrtWords), us(FpBufLoop), us(FpVtxIdx), us(FpPlanAnswer),
+			             static_cast<double>(s.answers[static_cast<size_t>(p)]) / static_cast<double>(n), ms(FpFindBuffers), ms(FpVRanges),
+			             ms(FpSrtWords), ms(FpBufLoop), ms(FpVtxIdx), ms(FpPlanAnswer));
 		}
 		if (p <= BucketOtherDraws) {
 			const auto& r     = g_cover.reasons[static_cast<size_t>(p)];
@@ -651,6 +660,7 @@ void NoteFloor(int pass) {
 	s.ticks        = {};
 	s.draws        = {};
 	s.wait_ns      = {};
+	s.answers      = {};
 	g_cover.reasons  = {};
 	g_cover.runs     = {};
 	g_cover.reasons2 = {};

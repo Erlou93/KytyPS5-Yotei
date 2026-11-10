@@ -4737,6 +4737,7 @@ static std::optional<std::pair<uint64_t, uint64_t>> VSharpRange(RenderContext&  
 }
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
+	const ChunkLead::FloorTimer floor_find(ChunkLead::FpFindBuffers); // KYTY_TRACE_PEEK_CENSUS (W3 P0)
 	KYTY_PROFILER_FUNCTION();
 	auto& cache = m_context.GetBufferCache();
 	// Each storage-buffer binding's memo entry is fetched now, for the ObtainBuffer of this stage's RebindBuffers (once per call).
@@ -4880,6 +4881,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	// buffer-cache operation that must see the uploads commits the batch itself.
 	const BufferCache::UploadBatchScope upload_batch(m_context.GetBufferCache());
 	std::optional<DispatchSubTimer>     sub_timer(std::in_place, DispatchSub::BdaRanges); // KYTY_TRACE_DISPATCH_CENSUS
+	std::optional<ChunkLead::FloorTimer> floor_part(std::in_place, ChunkLead::FpVRanges); // KYTY_TRACE_PEEK_CENSUS (W3 P0)
 	// Record-keyed V#s: resident and synchronized before the shader reaches them through BDA, and written
 	// ranges GPU-modified, like the written storage buffers below (NativeStorageBuffer). First, so that a read-only
 	// binding of the same bytes cannot take a stream copy of what the shader writes through BDA.
@@ -4906,6 +4908,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	// ObtainBdaRange finds or creates that buffer and uploads its CPU-modified bytes, so the shader reads the bytes
 	// guest memory holds for it when it runs (GPU writes in place, CPU writes uploaded), as the walker did after waiting.
 	// Before the other bindings, like the record-keyed ranges: a buffer this creates cannot replace one they named.
+	floor_part.emplace(ChunkLead::FpSrtWords); // (W3 P0)
 	m_gpu_word_patches.clear();
 	prepared.gpu_words_key = 0;
 	const bool gw_key = ChunkCensus::CheckOn() && ChunkCensus::t_member; // KYTY_CHECK_CHUNKS
@@ -4986,6 +4989,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		}
 	}
 	sub_timer.reset();
+	floor_part.emplace(ChunkLead::FpBufLoop); // (W3 P0: from here to the end of the buffer loop)
 	EXIT_IF(prepared.shader_data.size() != layout.ShaderDataDwords());
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
 	          prepared.shader_data.end(), 0);
@@ -5023,6 +5027,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			prepared.shader_data[layout.memory_stride_dword + index] = descriptor.Type() == 0u ? descriptor.Stride() : 0u;
 		}
 	}
+	floor_part.reset(); // (W3 P0)
 	const bool srt_uniform = layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrtUniform)] != 0;
 	// Uniform const buffers (ShaderIR.h): words uploaded once, padded with zeros to whole uvec4 elements; the uniform view
 	// covers the padded words (the uvec4 elements the shader declares lie inside: every ReadConst slot is below the
