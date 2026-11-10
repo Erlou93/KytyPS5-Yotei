@@ -3798,56 +3798,6 @@ struct ImageReplaySlot {
 	// 7 metadata, 8 one byte); 9 the registry moved during the resolve).
 	uint8_t why = 0;
 };
-// KYTY_PERF_ONE_BYTE_REPLAY=2 (test): today's full resolve beside every one-byte answer of the replay or a set; `bad` = another
-// image or view, or the full resolve ran a stencil tail (a reader was replayed). The fault test passes every N-th real reader
-// (stencil tail run) through the check as if the replay had answered it.
-struct OneByteStats {
-	uint64_t checked = 0, set_checked = 0, bad = 0, readers = 0, injected = 0, detected = 0;
-	uint32_t logged  = 0;
-};
-OneByteStats g_one_byte; // execution thread
-uint64_t     OneByteFaultEvery() {
-    static const uint64_t every = [] {
-        const char* env = std::getenv("KYTY_CHECK_PEEK_FAULT");
-        return env != nullptr ? std::strtoull(env, nullptr, 10) : 0u;
-    }();
-    return every;
-}
-void OneByteReport() {
-	auto& s = g_one_byte;
-	if (((s.checked + s.set_checked) & ((1u << 16u) - 1u)) != 0) return;
-	std::fprintf(stderr, "PERF one_byte_replay checked=%llu set_checked=%llu bad=%llu readers=%llu fault[injected|detected]=%llu|%llu\n",
-	             static_cast<unsigned long long>(s.checked), static_cast<unsigned long long>(s.set_checked),
-	             static_cast<unsigned long long>(s.bad), static_cast<unsigned long long>(s.readers),
-	             static_cast<unsigned long long>(s.injected), static_cast<unsigned long long>(s.detected));
-}
-// One check: the answer (id, description) against today's full resolve, run with the stencil-tail flag cleared.
-template <typename Resolve>
-void OneByteCheck(ImageId id, const TextureCache::ImageDesc& desc, Resolve&& resolve, bool set, bool fault = false) {
-	auto& s = g_one_byte;
-	if (fault) {
-		s.injected++; // a real reader passed through the check as if the replay had answered it
-	} else {
-		(set ? s.set_checked : s.checked)++;
-	}
-	t_stencil_tail   = false;
-	const auto full  = resolve();
-	(void)TextureCache::TakeLastFindImagePlain();
-	const bool same  = full.image_id == id && full.desc.type == desc.type && full.desc.view_info == desc.view_info &&
-	                  full.desc.info.data.address == desc.info.data.address && full.desc.info.data.size == desc.info.data.size;
-	if (fault) {
-		if (!same || t_stencil_tail) s.detected++;
-	} else if (!same || t_stencil_tail) {
-		s.bad++;
-		if (s.logged++ < 20u) {
-			std::fprintf(stderr, "CHECK_ONE_BYTE bad addr=%llx same=%d tail=%d set=%d\n",
-			             static_cast<unsigned long long>(desc.info.data.address), same ? 1 : 0, t_stencil_tail ? 1 : 0, set ? 1 : 0);
-		}
-	}
-	t_stencil_tail = false;
-	OneByteReport();
-}
-
 // The image replay slots of this thread (ResolveTextureReplay; project 15 S2b peeks them without inserting).
 std::unordered_map<uint64_t, ImageReplaySlot>& ImageReplaySlots() {
 	static thread_local std::unordered_map<uint64_t, ImageReplaySlot> slots;
@@ -3870,9 +3820,6 @@ static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const
 	if (same) {
 		if (const auto id = cache.ReplayImage(memo.id)) {
 			g_slot_exact = true;
-			if (TextureCache::OneByteReplayMode() == 2 && memo.desc.info.bytes_per_block == 1u && !memo.desc.info.data.Empty()) {
-				OneByteCheck(id, memo.desc, resolve, false);
-			}
 			return {id, nullptr, memo.desc};
 		}
 	}
@@ -3885,15 +3832,6 @@ static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const
 	// A one-byte texture whose resolve ran a stencil tail (a plane reader or an association) stays out of the replay.
 	const bool replayable = cache.ImageReplayableTexture(binding.image_id) && !t_stencil_tail;
 	g_slot_exact       = plain && binding.desc.type == TextureCache::BindingType::Texture && replayable;
-	if (TextureCache::OneByteReplayMode() == 2 && t_stencil_tail && binding.desc.info.bytes_per_block == 1u) {
-		auto& s = g_one_byte;
-		s.readers++;
-		if (OneByteFaultEvery() != 0 && s.readers % OneByteFaultEvery() == 0) {
-			// The reader passed through the check as if the replay had answered it: the full resolve's tail must catch it.
-			OneByteCheck(binding.image_id, binding.desc, resolve, false, true);
-			t_stencil_tail = true; // (this resolve's own tail ran; the flag stays as it was for the code below)
-		}
-	}
 	memo.why           = binding.desc.type != TextureCache::BindingType::Texture ? 1u
 	                     : !plain ? (binding.desc.info.metadata.kind != ImageMetadataKind::None ? 2u : 3u)
 	                              : static_cast<uint8_t>(cache.ImageReplayable(binding.image_id) ? 9u : 3u + cache.ImageReplayableWhy(binding.image_id));
@@ -4588,11 +4526,6 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		if (table_use != nullptr && table_use->memo[i] != 0u) {
 			const auto& stored = table_use->images[i];
-			if (TextureCache::OneByteReplayMode() == 2 && stored.desc.info.bytes_per_block == 1u && !stored.desc.info.data.Empty()) {
-				const uint32_t compare_funcs = ImageCompareFuncs(program, snapshot, i);
-				OneByteCheck(stored.image_id, stored.desc,
-				             [&] { return ResolveTexture(program.info.images[i], snapshot.images[i], compare_funcs); }, true);
-			}
 			BindImage(stored.image_id, false);
 			auto& slot      = prepared.images[i];
 			slot.image_view = nullptr;
