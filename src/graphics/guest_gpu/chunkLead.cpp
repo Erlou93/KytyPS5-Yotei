@@ -442,7 +442,21 @@ bool PeekCensusOn() {
 	static const bool on = [] {
 		const char* value = std::getenv("KYTY_TRACE_PEEK_CENSUS");
 		const bool  o     = value != nullptr && value[0] == '1';
-		if (o) std::fprintf(stderr, "TRACE_PEEK_CENSUS enabled (project 15 N3.0: the commit floor)\n");
+		if (o) {
+			std::fprintf(stderr, "TRACE_PEEK_CENSUS enabled (project 15 N3.0: the commit floor)\n");
+			// Way B P1.4 review: the cost of one timer pair (Tsc twice plus the thread variables), to subtract from parts whose
+			// work is of the same order (a part's drop = its counter's drop - the removed pairs x this).
+			const bool on0 = t_floor_on;
+			t_floor_on     = true;
+			const auto t0  = std::chrono::steady_clock::now();
+			for (int i = 0; i < 1000000; i++) {
+				const FloorTimer pair(FpBuild);
+			}
+			const auto ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / 1e6;
+			t_floor_on       = on0;
+			t_floor[FpBuild] = 0;
+			std::fprintf(stderr, "FLOOR_TIMER_CALIBRATION ns_per_pair=%.2f\n", ns);
+		}
 		return o;
 	}();
 	return on;
