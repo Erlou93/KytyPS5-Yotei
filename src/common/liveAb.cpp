@@ -51,6 +51,9 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
+    // Project 15 way B shortcut A (test switch): the obtain and write memos use 65536 slots instead of 8192 (the same result
+    // by construction: every use checks the entry's range and epochs).
+    {Switch::MemoBig, "KYTY_PERF_MEMO_BIG", 1},
 };
 static_assert(std::size(Switches) == SwitchCount);
 

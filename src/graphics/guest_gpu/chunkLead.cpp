@@ -581,6 +581,8 @@ void NoteFloor(int pass) {
 			             name(p).c_str(), us(FpFindBuffers), us(FpVRanges), us(FpSrtWords), us(FpBufLoop), us(FpVtxIdx), us(FpPlanAnswer),
 			             static_cast<double>(s.answers[static_cast<size_t>(p)]) / static_cast<double>(n), ms(FpFindBuffers), ms(FpVRanges),
 			             ms(FpSrtWords), ms(FpBufLoop), ms(FpVtxIdx), ms(FpPlanAnswer));
+			std::fprintf(stderr, "PERF w3_target_parts pass=\"%s\" us/op key=%.3f search=%.3f ms/frame key=%.2f search=%.2f\n",
+			             name(p).c_str(), us(FpTargetKey), us(FpTargetSearch), ms(FpTargetKey), ms(FpTargetSearch));
 		}
 		if (p <= BucketOtherDraws) {
 			const auto& r     = g_cover.reasons[static_cast<size_t>(p)];

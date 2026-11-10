@@ -1600,6 +1600,21 @@ void CopyBytes(T& to, const T& from) {
 	std::memcpy(static_cast<void*>(&to), static_cast<const void*>(&from), sizeof(T));
 }
 
+// Way B shortcut B, S0 (KYTY_TRACE_PEEK_CENSUS): the key against the previous draw's whatever the memo holds, the first
+// group that differs (0 equal, 1 color targets, 2 depth target, 3 render/depth control, 4 stencil, 5 clears, 6 masks and
+// slice, 7 image registry, 8 GC tick, 9 command tick, 10 metadata operations), and why a searched result was not kept.
+struct KeyDiffStats {
+	std::array<uint64_t, 11> first {};
+	std::array<uint64_t, 3>  not_stored {}; // searches, registry, meta (each counted when it changed)
+	uint64_t                 searched = 0, draws = 0;
+	std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+inline KeyDiffStats g_key_diff;
+template <typename A>
+bool DiffBytes(const A& a, const A& b) {
+	return std::memcmp(static_cast<const void*>(&a), static_cast<const void*>(&b), sizeof(A)) != 0;
+}
+
 // Byte copies (the padding too), on a zeroed key: two keys of equal registers compare equal.
 void FillKey(TargetKey& k, const HW::Context& hw, uint32_t mrt_mask, uint32_t slice_offset, uint64_t gc_tick, uint64_t tick) {
 	std::memset(static_cast<void*>(&k), 0, sizeof(k));
@@ -1643,6 +1658,63 @@ void Report(TargetMemo& m) {
 	std::fprintf(stderr, "PERF clean_draw_skip draws=%llu equal=%llu hits=%llu stored=%llu\n",
 	             static_cast<unsigned long long>(m.draws), static_cast<unsigned long long>(m.equal),
 	             static_cast<unsigned long long>(m.hits), static_cast<unsigned long long>(m.stored));
+}
+void ReportKeyDiff() {
+	auto&      s   = g_key_diff;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.window < std::chrono::seconds(5) || s.draws == 0) return;
+	const auto pc = [&](uint64_t v) { return 100.0 * static_cast<double>(v) / static_cast<double>(s.draws); };
+	std::fprintf(stderr,
+	             "PERF w3_targets draws=%llu key_vs_prev%%[equal|colors|depth|control|stencil|clears|masks|registry|gc_tick|tick|meta]="
+	             "%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f searched=%.1f%% not_stored%%[searches|registry|meta]=%.1f|%.1f|%.1f\n",
+	             static_cast<unsigned long long>(s.draws), pc(s.first[0]), pc(s.first[1]), pc(s.first[2]), pc(s.first[3]), pc(s.first[4]),
+	             pc(s.first[5]), pc(s.first[6]), pc(s.first[7]), pc(s.first[8]), pc(s.first[9]), pc(s.first[10]), pc(s.searched),
+	             pc(s.not_stored[0]), pc(s.not_stored[1]), pc(s.not_stored[2]));
+	s        = {};
+	s.window = now;
+}
+
+void NoteKeyDiff(const TargetKey& k) {
+	static TargetKey prev {};
+	static bool      have = false;
+	auto&            s    = g_key_diff;
+	s.draws++;
+	int first = 0;
+	if (!have) {
+		first = 1;
+	} else if (DiffBytes(k.rt, prev.rt)) {
+		first = 1;
+	} else if (DiffBytes(k.depth, prev.depth)) {
+		first = 2;
+	} else if (DiffBytes(k.rc, prev.rc) || DiffBytes(k.dc, prev.dc)) {
+		first = 3;
+	} else if (DiffBytes(k.sc, prev.sc) || DiffBytes(k.sm, prev.sm)) {
+		first = 4;
+	} else if (k.depth_clear != prev.depth_clear || k.stencil_clear != prev.stencil_clear) {
+		first = 5;
+	} else if (k.rt_mask != prev.rt_mask || k.mrt_mask != prev.mrt_mask || k.slice_offset != prev.slice_offset) {
+		first = 6;
+	} else if (k.registry != prev.registry) {
+		first = 7;
+	} else if (k.gc_tick != prev.gc_tick) {
+		first = 8;
+	} else if (k.tick != prev.tick) {
+		first = 9;
+	} else if (k.meta_ops != prev.meta_ops) {
+		first = 10;
+	}
+	s.first[static_cast<size_t>(first)]++;
+	std::memcpy(static_cast<void*>(&prev), static_cast<const void*>(&k), sizeof(k));
+	have = true;
+	ReportKeyDiff();
+}
+
+void NoteNotStored(bool searches, bool registry, bool meta) {
+	auto& s = g_key_diff;
+	s.searched++;
+	if (searches) s.not_stored[0]++;
+	if (registry) s.not_stored[1]++;
+	if (meta) s.not_stored[2]++;
 }
 } // namespace C1
 
@@ -1736,9 +1808,12 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	// The previous draw's targets when its search would find them again.
 	C1::TargetKey target_key;
 	auto&         memo = C1::g_targets;
+	std::optional<ChunkLead::FloorTimer> floor_key(std::in_place, ChunkLead::FpTargetKey); // KYTY_TRACE_PEEK_CENSUS (B S0)
 	C1::FillKey(target_key, buffer.GetRegisters(), mrt_mask, render_target_slice_offset,
 	            m_context.GetTextureCache().GcTick(), m_context.GetCommandScheduler().CurrentTick());
 	const bool target_equal = memo.valid && C1::SameBytes(target_key, memo.key);
+	floor_key.reset();
+	if (ChunkLead::PeekCensusOn()) C1::NoteKeyDiff(target_key); // (way B shortcut B, S0: the key against the previous draw's)
 	memo.draws++;
 	memo.equal += target_equal ? 1u : 0u;
 	if (target_equal) {
@@ -1751,6 +1826,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		if (c0_targets) CleanDraws::t_front_parts.target_hit = true; // KYTY_TRACE_CLEAN_DRAWS
 		C1::Report(memo);
 	} else {
+		const ChunkLead::FloorTimer floor_search(ChunkLead::FpTargetSearch); // KYTY_TRACE_PEEK_CENSUS (B S0)
 		const uint64_t full_searches = TextureCache::FullSearches();
 		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 			if ((mrt_mask & (1u << slot)) != 0) {
@@ -1769,6 +1845,12 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		memo.valid = TextureCache::FullSearches() == full_searches &&
 		             DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == target_key.registry &&
 		             CleanDraws::g_meta_ops.load(std::memory_order_relaxed) == target_key.meta_ops;
+		if (ChunkLead::PeekCensusOn()) {
+			// (B S0) why the result was not kept: a search did more than find, an image registered, a metadata operation
+			C1::NoteNotStored(TextureCache::FullSearches() != full_searches,
+			                  DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) != target_key.registry,
+			                  CleanDraws::g_meta_ops.load(std::memory_order_relaxed) != target_key.meta_ops);
+		}
 		if (memo.valid) {
 			memo.key         = target_key;
 			memo.color_count = state.color_count;

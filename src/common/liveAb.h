@@ -35,6 +35,7 @@ enum class Switch : uint32_t {
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
 	DiagTablesAssume,          // KYTY_DIAG_TABLES_ASSUME_UNCHANGED (measurement only, APPROXIMATION)
+	MemoBig,                   // KYTY_PERF_MEMO_BIG (project 15 way B, shortcut A: the obtain and write memos 8x larger; test)
 	Count
 };
 
