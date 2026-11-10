@@ -1034,6 +1034,21 @@ static TextureDescribe DescribeTexture(const ShaderRecompiler::IR::ImageResource
 	// above them, their pages not even reserved) still has every viewed level inside reserved memory; the whole-chain
 	// test dropped it (the distant terrain's snow mask: transparent black, no snow on Mount Yotei). Single-layer 2D only.
 	// The image is then described as those levels alone (StreamedViewSubChain) when their layout allows it.
+	// KYTY_DIAG_TEXTURE_SKIP_MIPS=N (diagnostic, default off; idea of cosmo, the Kyty developer, 10.11): a sampled
+	// single-layer 2D texture with more than N viewed levels is viewed from N levels down (1/4^N of the texels); the
+	// streamed sub-chain path below then describes and uploads only those levels. Blurry textures: a ceiling for the
+	// texture uploads behind the stutters in motion and at scene changes, not a mode to play.
+	static const uint32_t diag_skip_mips = [] {
+		const char* value = std::getenv("KYTY_DIAG_TEXTURE_SKIP_MIPS");
+		const auto  skip  = value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+		if (skip != 0u) std::fprintf(stderr, "DIAG_TEXTURE_SKIP_MIPS %u (sampled 2D textures viewed %u levels down)\n", skip, skip);
+		return skip;
+	}();
+	if (diag_skip_mips != 0u && !storage && !(!resource.r128 && descriptor.MetaCompress()) &&
+	    desc.info.resources.layers == 1u && !volume && view_levels > diag_skip_mips) {
+		view_base += diag_skip_mips;
+		view_levels -= diag_skip_mips;
+	}
 	uint64_t reserved_needed = desc.info.data.size;
 	if (view_base != 0u && desc.info.resources.layers == 1u && !volume) {
 		uint64_t end = 0;
