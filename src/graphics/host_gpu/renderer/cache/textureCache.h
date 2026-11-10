@@ -168,11 +168,9 @@ public:
 	// for a table's unchanged slots, under one lock.
 	void TouchTableImages(std::span<const ImageId> ids);
 	[[nodiscard]] bool        ImageReplayable(ImageId id) const;
-	// Project 15 (n3-s2b-one-byte.md): ImageReplayable for a sampled texture whose resolve ran no stencil tail (the caller
-	// knows that): one byte per block no longer excludes it. KYTY_PERF_ONE_BYTE_REPLAY: 0 the old exclusion, 1 this, 2 this
-	// with today's full resolve beside every one-byte answer (test switch).
+	// ImageReplayable for a sampled texture whose resolve ran no stencil tail (the caller knows that): one byte per block
+	// does not exclude it (project 15, n3-s2b-one-byte.md; checked 10.11: 17.1 M one-byte answers equal to the full resolve).
 	[[nodiscard]] bool        ImageReplayableTexture(ImageId id) const;
-	[[nodiscard]] static uint32_t OneByteReplayMode();
 	// Project 15 S2b (diagnostic): why ImageReplayable refuses (0 it accepts, 1 gone or unregistered, 2 depth, 3 stencil,
 	// 4 metadata, 5 one byte per block).
 	[[nodiscard]] uint32_t    ImageReplayableWhy(ImageId id) const;
