@@ -451,7 +451,7 @@ bool PeekCensusOn() {
 namespace {
 struct ExecWaits {
 	std::array<uint64_t, 2>              idle {};
-	uint64_t                             claim = 0;
+	uint64_t                             claim = 0, commands = 0, commands_wait_ns = 0;
 	std::unordered_map<uint16_t, uint64_t> card; // ns by pass
 };
 ExecWaits g_exec_waits; // execution thread
@@ -463,6 +463,11 @@ void NoteExecIdle(int cause, uint64_t ticks) {
 
 void NoteExecClaim(uint64_t ticks) {
 	g_exec_waits.claim += ticks;
+}
+
+void NoteExecCommands(uint64_t ticks, uint64_t wait_ns) {
+	g_exec_waits.commands += ticks;
+	g_exec_waits.commands_wait_ns += wait_ns;
 }
 
 void NoteCardWait(uint16_t pass_id, uint64_t ns) {
@@ -534,13 +539,18 @@ void NoteFloor(int pass) {
 			top += buf;
 		}
 		std::fprintf(stderr,
-		             "PERF exec_waits ms/frame idle[resolve_behind|cp_empty]=%.2f|%.2f idle_commands=%.2f claim=%.2f card_wait_by_pass:%s\n",
-		             tms(w.idle[0]), tms(w.idle[1]), tms(t_idle_commands), tms(w.claim), top.c_str());
+		const double accounted = all_ms[FpTotal] + tms(w.idle[0]) + tms(w.idle[1]) + tms(w.claim) + tms(w.commands);
+		std::fprintf(stderr,
+		             "PERF exec_waits ms/frame idle[resolve_behind|cp_empty]=%.2f|%.2f idle_commands=%.2f claim=%.2f "
+		             "commands_between_ops=%.2f (card_wait %.2f) unaccounted=%.2f card_wait_by_pass:%s\n",
+		             tms(w.idle[0]), tms(w.idle[1]), tms(t_idle_commands), tms(w.claim), tms(w.commands),
+		             static_cast<double>(w.commands_wait_ns) / 1e6 / frames, seconds * 1e3 / frames - accounted, top.c_str());
 		w             = {};
 		t_idle_commands = 0;
 	}
 	s.ticks        = {};
 	s.draws        = {};
+	s.wait_ns      = {};
 	s.window       = now;
 	s.window_frame = frame;
 }

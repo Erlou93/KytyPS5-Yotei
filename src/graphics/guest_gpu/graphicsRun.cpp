@@ -1247,7 +1247,13 @@ void GuestGpu::ExecutionThread() {
 		operation.reset();
 		m_executed.Publish(sequence);
 		if (m_pending_commands.load(std::memory_order_acquire) != 0) {
-			RunCommands();
+			if (ChunkLead::PeekCensusOn()) { // (way B measurement: the commands served between operations)
+				const uint64_t t0 = ChunkLead::Tsc(), w0 = PassCensus::t_wait_ns;
+				RunCommands();
+				ChunkLead::NoteExecCommands(ChunkLead::Tsc() - t0, PassCensus::t_wait_ns - w0);
+			} else {
+				RunCommands();
+			}
 		}
 		if (++unnotified >= NotifyInterval) {
 			m_executed.Notify();

@@ -79,6 +79,7 @@ inline thread_local uint64_t t_floor_wait = 0;
 void NoteExecIdle(int cause, uint64_t ticks);
 inline thread_local uint64_t t_idle_commands = 0; // tsc ticks, added by WaitForOperations around RunCommands
 void NoteExecClaim(uint64_t ticks);
+void NoteExecCommands(uint64_t ticks, uint64_t wait_ns); // the game's commands served between operations
 void NoteCardWait(uint16_t pass_id, uint64_t ns);
 void NoteFloor(int pass);
 
