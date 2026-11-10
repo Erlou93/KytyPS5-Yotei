@@ -538,7 +538,6 @@ void NoteFloor(int pass) {
 			              static_cast<double>(card[i].second) / 1e6 / frames);
 			top += buf;
 		}
-		std::fprintf(stderr,
 		const double accounted = all_ms[FpTotal] + tms(w.idle[0]) + tms(w.idle[1]) + tms(w.claim) + tms(w.commands);
 		std::fprintf(stderr,
 		             "PERF exec_waits ms/frame idle[resolve_behind|cp_empty]=%.2f|%.2f idle_commands=%.2f claim=%.2f "
