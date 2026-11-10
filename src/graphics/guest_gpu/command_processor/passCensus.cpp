@@ -177,7 +177,7 @@ static bool Active() {
 	// KYTY_CHECK_CHUNKS, KYTY_TRACE_CHUNK_LEAD and KYTY_TRACE_PEEK_CENSUS (project 15) need the pass ids too.
 	static const bool active = Enabled() || !FreeList().empty() || std::getenv("KYTY_CHECK_CHUNKS") != nullptr ||
 	                           std::getenv("KYTY_TRACE_CHUNK_LEAD") != nullptr || std::getenv("KYTY_TRACE_PEEK_CENSUS") != nullptr ||
-	                           std::getenv("KYTY_CHECK_PEEK") != nullptr ||
+	                           std::getenv("KYTY_CHECK_PEEK") != nullptr || std::getenv("KYTY_TRACE_CHUNK_PLAN") != nullptr ||
 	                           std::getenv("KYTY_LIVE_AB") != nullptr;
 	return active;
 }

@@ -985,6 +985,80 @@ void GuestGpu::ExecutionThread() {
 			    },
 			    &scopes);
 		}
+		// KYTY_TRACE_CHUNK_PLAN (project 15 N4.0, diagnostic): how many chunk-member draws with a ready slot follow in the
+		// queue when the execution thread opens a chunk, and what ends it. Nothing changes.
+		static const bool plan_census = std::getenv("KYTY_TRACE_CHUNK_PLAN") != nullptr;
+		if (plan_census) {
+			struct PlanCensus {
+				uint32_t                remaining = 0;
+				std::array<uint64_t, 5> chunks {}, draws {}, end {};
+				uint64_t                member_draws = 0, own_not_ready = 0, others = 0;
+			};
+			static PlanCensus pc;
+			const auto        is_member = [&](const GpuOperation& op) {
+                const auto kind = op.kind;
+                return op.processor == m_gfx_cp.get() && (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto) &&
+                       ChunkLead::TargetPass(op.pass_id) >= 0;
+			};
+			const auto ready = [](const GpuOperation& op) {
+				return op.resolved != nullptr &&
+				       RenderExecutor::TryClaimResolvedDraw(op.resolved, false) == RenderExecutor::ResolvedClaim::Ready;
+			};
+			if (!is_member(*operation)) {
+				pc.remaining = 0;
+				pc.others++;
+			} else {
+				pc.member_draws++;
+				if (pc.remaining > 0) {
+					pc.remaining--;
+				} else if (!ready(*operation)) {
+					pc.own_not_ready++;
+				} else {
+					// end: 0 another operation, 1 a slot not resolved yet, 2 an empty slot, 3 the limit 128, 4 the queue's end
+					uint32_t k = 1, end = 3;
+					for (; k < 128u; k++) {
+						const auto* next = m_resolved.PeekAt(k - 1u);
+						if (next == nullptr) {
+							end = 4;
+							break;
+						}
+						if (!is_member(*next)) {
+							end = 0;
+							break;
+						}
+						if (next->resolved == nullptr) {
+							end = 2;
+							break;
+						}
+						const auto claim = RenderExecutor::TryClaimResolvedDraw(next->resolved, false);
+						if (claim != RenderExecutor::ResolvedClaim::Ready) {
+							end = claim == RenderExecutor::ResolvedClaim::Empty ? 2u : 1u;
+							break;
+						}
+					}
+					const uint32_t bucket = k == 1u ? 0u : k < 16u ? 1u : k < 64u ? 2u : k < 128u ? 3u : 4u;
+					pc.chunks[bucket]++;
+					pc.draws[bucket] += k;
+					pc.end[end]++;
+					pc.remaining = k - 1u;
+					uint64_t chunks = 0;
+					for (const auto n: pc.chunks) chunks += n;
+					if ((chunks & ((1u << 16u) - 1u)) == 0) {
+						const auto join = [](const auto& a) {
+							std::string out;
+							for (size_t i = 0; i < a.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);
+							return out;
+						};
+						std::fprintf(stderr,
+						             "PERF chunk_plan chunks[1|2-15|16-63|64-127|128]=%s draws=%s end[other|unresolved|empty|limit|queue_end]=%s "
+						             "member_draws=%llu own_not_ready=%llu others=%llu\n",
+						             join(pc.chunks).c_str(), join(pc.draws).c_str(), join(pc.end).c_str(),
+						             static_cast<unsigned long long>(pc.member_draws), static_cast<unsigned long long>(pc.own_not_ready),
+						             static_cast<unsigned long long>(pc.others));
+					}
+				}
+			}
+		}
 		// KYTY_CHECK_PEEK (project 15 N3 S2a): the peek's split by chunk-member draw.
 		static const bool peek_split = std::getenv("KYTY_CHECK_PEEK") != nullptr;
 		if (peek_split) {

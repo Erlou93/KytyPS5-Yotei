@@ -1004,6 +1004,7 @@ bool TextureCache::SyncStencilPlaneReader(uint64_t plane_address, ImageId reader
 	if (owner == m_stencil_plane_depth.end()) {
 		return false;
 	}
+	t_stencil_tail = true; // KYTY_CHECK_PEEK=2 (S2b): a stencil plane reader
 	auto*      reader   = m_slot_images.try_get(reader_id);
 	// After a copy the reader holds the plane's current contents, which exist only on the GPU (stencil writes never
 	// reach guest memory). Its guest-memory state is consumed as for a GPU write; otherwise the refresh when it is

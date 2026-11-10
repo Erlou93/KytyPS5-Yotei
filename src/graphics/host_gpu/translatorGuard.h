@@ -27,6 +27,9 @@ inline thread_local std::array<uint64_t, 4> t_peek_marker_hist {};
 inline thread_local bool                    t_op_programs = false, t_op_pipeline = false;
 inline thread_local uint64_t                t_member_draws = 0, t_plan_draws = 0;
 inline thread_local std::array<uint64_t, 4> t_plan_marker_hist {};
+// Project 15 S2b (n3-s2b-one-byte.md): the stencil tail of today's texture resolve ran (a stencil plane reader or an
+// association under the address), set by SyncStencilPlaneReader and FindResolvedTexture, read by the image replay.
+inline thread_local bool t_stencil_tail = false;
 // Slow paths of today's image binding (S2b: a peeked-ready slot that took one went stale on the way).
 inline thread_local uint64_t t_peek_slow = 0;
 

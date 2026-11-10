@@ -1547,6 +1547,7 @@ TextureBinding RenderExecutor::FindResolvedTexture(const ShaderRecompiler::IR::I
 	if (stencil_alias_copy && !stencil_plane_synced && !stencil_association && !storage &&
 	    image->info.bytes_per_block == 1u && !image->info.IsDepth()) {
 		if (const auto association = texture_cache.FindStencilAssociationAt(address)) {
+			t_stencil_tail      = true; // KYTY_CHECK_PEEK=2 (S2b): an association under the address
 			const auto depth_id = texture_cache.GetImage(association).depth_id;
 			if (depth_id && depth_id != id) {
 				texture_cache.EnsureStencilPlane(depth_id, address);
@@ -3824,6 +3825,7 @@ static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const
 	}
 	const auto epoch = DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire);
 	(void)TextureCache::TakeLastFindImagePlain();
+	t_stencil_tail     = false;
 	auto       binding = resolve();
 	const bool plain   = TextureCache::TakeLastFindImagePlain();
 	memo.valid         = false;
@@ -3831,6 +3833,7 @@ static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const
 	memo.why           = binding.desc.type != TextureCache::BindingType::Texture ? 1u
 	                     : !plain ? (binding.desc.info.metadata.kind != ImageMetadataKind::None ? 2u : 3u)
 	                              : static_cast<uint8_t>(cache.ImageReplayable(binding.image_id) ? 9u : 3u + cache.ImageReplayableWhy(binding.image_id));
+	if (memo.why == 8u && t_stencil_tail) memo.why = 10u; // a one-byte stencil reader (n3-s2b-one-byte.md)
 	if (plain && binding.desc.type == TextureCache::BindingType::Texture && cache.ImageReplayable(binding.image_id)) {
 		const auto page_sum = DrawRepeat::ImagePageEpochSum(binding.desc.info.data.address, binding.desc.info.data.size);
 		if (DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == epoch) {
@@ -4144,8 +4147,9 @@ struct Stage {
 };
 struct Stats {
 	std::array<uint64_t, Count> slots {};
-	// replay_miss by cause: 0 no entry, 1-9 the entry's why, 10 other words or compare functions, 11 page sum, 12 image gone
-	std::array<uint64_t, 13>    miss {}, member_miss {};
+	// replay_miss by cause: 0 no entry, 1-9 the entry's why, 10 other words or compare functions, 11 page sum, 12 image
+	// gone, 13 a one-byte stencil reader (out of one_byte, index 8)
+	std::array<uint64_t, 14>    miss {}, member_miss {};
 	uint64_t stages = 0, all_slots = 0, samplers = 0, answered = 0, member_stages = 0, member_answered = 0;
 	uint64_t compared = 0, bad = 0, moved = 0, stale_ready = 0, sampler_bad = 0, unchecked = 0, injected = 0, detected = 0;
 	uint32_t logged = 0;
@@ -4193,7 +4197,7 @@ void Report() {
 	};
 	std::fprintf(stderr,
 	             "PERF peek_images_miss[none|not_texture|meta_desc|not_plain|gone|depth|stencil|metadata|one_byte|moved|words|pages|"
-	             "image_gone]=%s member=%s\n",
+	             "image_gone|one_byte_stencil_reader]=%s member=%s\n",
 	             join(st.miss).c_str(), join(st.member_miss).c_str());
 }
 vk::ImageView Shifted(vk::ImageView view) {
@@ -4405,7 +4409,7 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 				if (it == slots.end()) {
 					cause = 0;
 				} else if (!it->second.valid) {
-					cause = std::min<uint32_t>(it->second.why, 9u);
+					cause = it->second.why == 10u ? 13u : std::min<uint32_t>(it->second.why, 9u);
 				} else if (it->second.shader_hash != program.shader_hash || it->second.dword_count != value.dword_count ||
 				           it->second.words != value.dwords || it->second.compare_funcs != compare_funcs ||
 				           it->second.soft != m_soft_texture_resolve) {
