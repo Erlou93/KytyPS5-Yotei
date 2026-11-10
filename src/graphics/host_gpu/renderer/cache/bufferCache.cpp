@@ -3153,7 +3153,8 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 				// N5.3: a helper reads only the ranges' fixed spans (the flags are the execution thread's): in order.
 				for (const auto& range: m_direct_ranges) {
 					if (end > range.start && vaddr < range.end) {
-						p.klass = BufferPeek::Upload;
+						p.klass         = BufferPeek::Upload;
+						p.helper_direct = true; // (way B W0: the B3 split)
 						return;
 					}
 				}
@@ -3353,9 +3354,25 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			auto& buffer = m_slot_buffers[entry->peek.id];
 			TouchBuffer(buffer);
 			g_ahead.buffers_answered++;
+			if (ChunkLead::t_floor_bucket >= 0) ChunkLead::NoteB3(entry->kind, 0);
 			return {&buffer, entry->peek.offset};
 		}
 		g_ahead.buffers_today++;
+		if (ChunkLead::t_floor_bucket >= 0) {
+			// Way B W0: why the acquisition went today's way (1 no entry, 2 a helper's direct-range span, 3 upload, 4 stream,
+			// 5 image, 6 another class, 7-9 the proof failed: registry, CPU pages, image pages)
+			int reason = 1;
+			if (entry != nullptr) {
+				const auto k = entry->peek.klass;
+				reason       = entry->peek.helper_direct      ? 2
+				               : k == BufferPeek::Upload      ? 3
+				               : k == BufferPeek::Stream      ? 4
+				               : k == BufferPeek::Image       ? 5
+				               : k != BufferPeek::Ready       ? 6
+				                                              : 6 + static_cast<int>(std::min<uint32_t>(PeekProofFail(entry->peek, vaddr, size), 3u));
+			}
+			ChunkLead::NoteB3(entry != nullptr ? entry->kind : 6u, reason);
+		}
 	}
 	if (PlanBufferCheck() && g_plan_buffers != nullptr && !is_written && !image_source && GuestGpu::IsGpuThread()) {
 		if (auto* entry = PlanBufferFind(vaddr, size, is_texel_buffer, false); entry != nullptr) {

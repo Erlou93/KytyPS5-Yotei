@@ -476,10 +476,11 @@ void NoteCardWait(uint16_t pass_id, uint64_t ns) {
 
 namespace {
 struct CoverState {
-	std::array<std::array<uint64_t, 9>, Buckets> reasons {};
-	std::array<std::array<uint64_t, 4>, Buckets> runs {};
-	int                                          run_bucket = -1;
-	uint64_t                                     run        = 0;
+	std::array<std::array<uint64_t, 9>, Buckets> reasons {}, reasons2 {};
+	std::array<std::array<uint64_t, 4>, Buckets> runs {}, runs2 {};
+	int                                          run_bucket = -1, run_bucket2 = -1;
+	uint64_t                                     run        = 0, run2 = 0;
+	std::array<std::array<std::array<uint64_t, 10>, 7>, 4> b3 {}; // [bucket][kind][reason]
 };
 CoverState g_cover; // execution thread
 void CloseRun() {
@@ -491,7 +492,7 @@ void CloseRun() {
 }
 } // namespace
 
-void NoteCover(int bucket, int reason) {
+void NoteCover(int bucket, int reason, int reason_without_buffers) {
 	auto& s = g_cover;
 	if (bucket < 0 || bucket >= Buckets) return;
 	s.reasons[static_cast<size_t>(bucket)][static_cast<size_t>(reason)]++;
@@ -502,6 +503,26 @@ void NoteCover(int bucket, int reason) {
 	} else {
 		s.run_bucket = -1;
 	}
+	// the same without the buffer condition (B3)
+	s.reasons2[static_cast<size_t>(bucket)][static_cast<size_t>(reason_without_buffers)]++;
+	if (reason_without_buffers != 0 || bucket != s.run_bucket2) {
+		if (s.run_bucket2 >= 0 && s.run2 != 0) {
+			s.runs2[static_cast<size_t>(s.run_bucket2)][s.run2 == 1 ? 0u : s.run2 < 16 ? 1u : s.run2 < 64 ? 2u : 3u]++;
+		}
+		s.run2 = 0;
+	}
+	if (reason_without_buffers == 0) {
+		s.run_bucket2 = bucket;
+		s.run2++;
+	} else {
+		s.run_bucket2 = -1;
+	}
+}
+
+void NoteB3(uint32_t kind, int reason) {
+	const int bucket = t_floor_bucket;
+	if (bucket < 0 || bucket > 3 || kind > 6u || reason < 0 || reason > 9) return;
+	g_cover.b3[static_cast<size_t>(bucket)][kind][static_cast<size_t>(reason)]++;
 }
 
 void NoteFloor(int pass) {
@@ -566,6 +587,33 @@ void NoteFloor(int pass) {
 				             pc(r[5]), pc(r[6]), pc(r[7]), pc(r[8]), static_cast<unsigned long long>(runs[0]),
 				             static_cast<unsigned long long>(runs[1]), static_cast<unsigned long long>(runs[2]),
 				             static_cast<unsigned long long>(runs[3]));
+				const auto& r2    = g_cover.reasons2[static_cast<size_t>(p)];
+				const auto& runs2 = g_cover.runs2[static_cast<size_t>(p)];
+				std::fprintf(stderr,
+				             "PERF w0_cover_no_buffers pass=\"%s\" all_met=%.1f%% first_unmet%%[plan|pipeline|-|images|barrier|render_pass|"
+				             "in_order|scan]=%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f|%.1f runs[1|2-15|16-63|64+]=%llu|%llu|%llu|%llu\n",
+				             name(p).c_str(), pc(r2[0]), pc(r2[1]), pc(r2[2]), pc(r2[3]), pc(r2[4]), pc(r2[5]), pc(r2[6]), pc(r2[7]),
+				             pc(r2[8]), static_cast<unsigned long long>(runs2[0]), static_cast<unsigned long long>(runs2[1]),
+				             static_cast<unsigned long long>(runs2[2]), static_cast<unsigned long long>(runs2[3]));
+				static const char* const kinds[7] = {"buffer", "range", "vertex", "index", "args", "count", "no_entry"};
+				std::string b3;
+				for (size_t k = 0; k < 7; k++) {
+					const auto& v   = g_cover.b3[static_cast<size_t>(p)][k];
+					uint64_t    sum = 0;
+					for (const auto x: v) sum += x;
+					if (sum == 0) continue;
+					char buf[256];
+					std::snprintf(buf, sizeof(buf), " %s[%.1f/draw]=", kinds[k], static_cast<double>(sum) / static_cast<double>(draws));
+					b3 += buf;
+					for (size_t i = 0; i < v.size(); i++) {
+						std::snprintf(buf, sizeof(buf), "%s%.1f", i == 0 ? "" : "|", 100.0 * static_cast<double>(v[i]) / static_cast<double>(sum));
+						b3 += buf;
+					}
+				}
+				std::fprintf(stderr,
+				             "PERF w0_b3 pass=\"%s\" %%[answered|no_entry|helper_direct|upload|stream|image|other|proof_registry|"
+				             "proof_cpu|proof_image]:%s\n",
+				             name(p).c_str(), b3.c_str());
 			}
 		}
 		std::fprintf(stderr,
@@ -603,8 +651,11 @@ void NoteFloor(int pass) {
 	s.ticks        = {};
 	s.draws        = {};
 	s.wait_ns      = {};
-	g_cover.reasons = {};
-	g_cover.runs    = {};
+	g_cover.reasons  = {};
+	g_cover.runs     = {};
+	g_cover.reasons2 = {};
+	g_cover.runs2    = {};
+	g_cover.b3       = {};
 	s.window       = now;
 	s.window_frame = frame;
 }

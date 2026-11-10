@@ -1195,6 +1195,7 @@ void GuestGpu::ExecutionThread() {
 		};
 		const bool      cover_on = floor_pass >= 0 && floor_pass <= ChunkLead::BucketOtherDraws;
 		const CoverSnap cover0   = cover_on ? cover_snap() : CoverSnap {};
+		ChunkLead::t_floor_bucket = cover_on ? floor_pass : -1;
 		if (PassCensus::Enabled()) {
 			// KYTY_TRACE_PASS_CENSUS (PASS_EXEC): execution time per marker pass, less the card waits inside.
 			const auto kind  = operation->kind;
@@ -1244,7 +1245,16 @@ void GuestGpu::ExecutionThread() {
 				                         : c1.work != cover0.work || c1.images != cover0.images         ? 7
 				                         : c1.scans != cover0.scans                                     ? 8
 				                                                                                        : 0;
-				ChunkLead::NoteCover(floor_pass, reason);
+				// the same without the buffer condition (B3), to see the conditions behind it
+				const int reason2 = reason != 3 ? reason
+				                    : c1.set_missed != cover0.set_missed || c1.slow != cover0.slow ? 4
+				                    : c1.barriers != cover0.barriers                               ? 5
+				                    : c1.begins != cover0.begins                                   ? 6
+				                    : c1.work != cover0.work || c1.images != cover0.images         ? 7
+				                    : c1.scans != cover0.scans                                     ? 8
+				                                                                                   : 0;
+				ChunkLead::NoteCover(floor_pass, reason, reason2);
+				ChunkLead::t_floor_bucket = -1;
 			}
 			ChunkLead::NoteFloor(floor_pass);
 			ChunkLead::t_floor_on = false;

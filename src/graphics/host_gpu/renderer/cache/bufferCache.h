@@ -130,6 +130,7 @@ public:
 		uint32_t epochs[2] {};
 		uint32_t regions = 0;
 		bool     bda     = false; // ObtainBdaRange's peek: no image in the proof
+		bool     helper_direct = false; // way B W0: a helper's peek of a range overlapping a direct range (Upload, in order)
 	};
 	// bda: ObtainBdaRange's peek (no direct ranges, no stream copy, no image copy).
 	[[nodiscard]] BufferPeek PeekBuffer(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer, BufferId hint,

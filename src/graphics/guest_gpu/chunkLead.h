@@ -100,7 +100,11 @@ private:
 // Way B W0 Table B: a draw's first unmet condition (0 none; 1 no plan, 2 pipeline not from it, 3 a buffer acquisition went
 // today's way, 4 an image set or slot was not ready, 5 an image barrier, 6 a render pass begun, 7 other in-order work -
 // buffer work or an image created, 8 a scalar-read overlap scan), per draw bucket, with the runs of draws meeting all.
-void NoteCover(int bucket, int reason);
+void NoteCover(int bucket, int reason, int reason_without_buffers);
+// Way B W0: the draw bucket of the running operation (-1: none or the census off) and a read acquisition with a plan:
+// the entry's kind (0 buffer, 1 range, 2 vertex, 3 index, 4 args, 5 count, 6 no entry) and the reason (0 answered).
+inline thread_local int t_floor_bucket = -1;
+void NoteB3(uint32_t kind, int reason);
 
 // After an operation (bucket 0..2 the three passes' draws, then the buckets below): its parts summed per bucket;
 // PERF commit_floor every ~5 s, and PERF commit_floor_frame (ms per frame of every bucket and part).
