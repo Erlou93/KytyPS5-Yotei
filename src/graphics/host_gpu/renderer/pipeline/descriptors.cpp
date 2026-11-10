@@ -3792,6 +3792,10 @@ struct ImageReplaySlot {
 	std::array<uint32_t, 8> words {};
 	ImageId                 id;
 	TextureCache::ImageDesc desc;
+	// Project 15 S2b (diagnostic): why the last resolve kept no entry (0 kept; 1 not a sampled texture; 2 not plain with
+	// metadata in the description; 3 not plain otherwise; 4 + ImageReplayableWhy - 1 (4 gone, 5 depth, 6 stencil,
+	// 7 metadata, 8 one byte); 9 the registry moved during the resolve).
+	uint8_t why = 0;
 };
 // The image replay slots of this thread (ResolveTextureReplay; project 15 S2b peeks them without inserting).
 std::unordered_map<uint64_t, ImageReplaySlot>& ImageReplaySlots() {
@@ -3824,6 +3828,9 @@ static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const
 	const bool plain   = TextureCache::TakeLastFindImagePlain();
 	memo.valid         = false;
 	g_slot_exact       = plain && binding.desc.type == TextureCache::BindingType::Texture && cache.ImageReplayable(binding.image_id);
+	memo.why           = binding.desc.type != TextureCache::BindingType::Texture ? 1u
+	                     : !plain ? (binding.desc.info.metadata.kind != ImageMetadataKind::None ? 2u : 3u)
+	                              : static_cast<uint8_t>(cache.ImageReplayable(binding.image_id) ? 9u : 3u + cache.ImageReplayableWhy(binding.image_id));
 	if (plain && binding.desc.type == TextureCache::BindingType::Texture && cache.ImageReplayable(binding.image_id)) {
 		const auto page_sum = DrawRepeat::ImagePageEpochSum(binding.desc.info.data.address, binding.desc.info.data.size);
 		if (DrawRepeat::g_image_registry_epoch.load(std::memory_order_acquire) == epoch) {
@@ -3836,6 +3843,7 @@ static TextureBinding ResolveTextureReplay(TextureCache& cache, bool soft, const
 			memo.words         = value.dwords;
 			memo.id            = binding.image_id;
 			memo.desc          = binding.desc;
+			memo.why           = 0;
 		}
 	}
 	return binding;
@@ -4136,6 +4144,8 @@ struct Stage {
 };
 struct Stats {
 	std::array<uint64_t, Count> slots {};
+	// replay_miss by cause: 0 no entry, 1-9 the entry's why, 10 other words or compare functions, 11 page sum, 12 image gone
+	std::array<uint64_t, 13>    miss {}, member_miss {};
 	uint64_t stages = 0, all_slots = 0, samplers = 0, answered = 0, member_stages = 0, member_answered = 0;
 	uint64_t compared = 0, bad = 0, moved = 0, stale_ready = 0, sampler_bad = 0, unchecked = 0, injected = 0, detected = 0;
 	uint32_t logged = 0;
@@ -4176,6 +4186,15 @@ void Report() {
 	             static_cast<unsigned long long>(st.sampler_bad),
 	             static_cast<unsigned long long>(st.unchecked), static_cast<unsigned long long>(st.injected),
 	             static_cast<unsigned long long>(st.detected));
+	const auto join = [](const auto& a) {
+		std::string out;
+		for (size_t i = 0; i < a.size(); i++) out += std::string(i == 0 ? "" : "|") + std::to_string(a[i]);
+		return out;
+	};
+	std::fprintf(stderr,
+	             "PERF peek_images_miss[none|not_texture|meta_desc|not_plain|gone|depth|stencil|metadata|one_byte|moved|words|pages|"
+	             "image_gone]=%s member=%s\n",
+	             join(st.miss).c_str(), join(st.member_miss).c_str());
 }
 vk::ImageView Shifted(vk::ImageView view) {
 	return vk::ImageView(reinterpret_cast<VkImageView>(reinterpret_cast<uintptr_t>(static_cast<VkImageView>(view)) + 1u));
@@ -4382,6 +4401,20 @@ void RenderExecutor::PrepareBindingsToday(const ShaderStageRuntime& runtime,
 			const ImageId id = same ? cache.ReplayImageCheck(it->second.id) : ImageId {};
 			if (!id) {
 				klass = PeekImages::ReplayMiss;
+				uint32_t cause = 12;
+				if (it == slots.end()) {
+					cause = 0;
+				} else if (!it->second.valid) {
+					cause = std::min<uint32_t>(it->second.why, 9u);
+				} else if (it->second.shader_hash != program.shader_hash || it->second.dword_count != value.dword_count ||
+				           it->second.words != value.dwords || it->second.compare_funcs != compare_funcs ||
+				           it->second.soft != m_soft_texture_resolve) {
+					cause = 10;
+				} else if (!same) {
+					cause = 11;
+				}
+				st.miss[cause]++;
+				if (t_peek_member == 1) st.member_miss[cause]++;
 			} else if (it->second.desc.type != TextureCache::BindingType::Texture) {
 				klass = PeekImages::NotTexture;
 			} else if (it->second.desc.info.data.Empty()) {

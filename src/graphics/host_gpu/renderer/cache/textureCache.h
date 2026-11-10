@@ -168,6 +168,9 @@ public:
 	// for a table's unchanged slots, under one lock.
 	void TouchTableImages(std::span<const ImageId> ids);
 	[[nodiscard]] bool        ImageReplayable(ImageId id) const;
+	// Project 15 S2b (diagnostic): why ImageReplayable refuses (0 it accepts, 1 gone or unregistered, 2 depth, 3 stencil,
+	// 4 metadata, 5 one byte per block).
+	[[nodiscard]] uint32_t    ImageReplayableWhy(ImageId id) const;
 	// The table sets (pipeline\descriptors.cpp): FindImage / FindTexture work of a stage image set, all or none.
 	[[nodiscard]] bool TableReplayStage(std::span<const ImageId> ids);
 	[[nodiscard]] bool TableTexturesReady(std::span<const ImageId> ids);

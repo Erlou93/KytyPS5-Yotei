@@ -3018,6 +3018,17 @@ bool TextureCache::TakeLastFindImagePlain() {
 	return plain;
 }
 
+uint32_t TextureCache::ImageReplayableWhy(ImageId id) const {
+	const auto* image = m_slot_images.try_get(id);
+	if (image != nullptr && image->info.data.Empty()) return 0;
+	if (image == nullptr || !image->registered) return 1;
+	if (image->depth_id || image->info.IsDepth()) return 2;
+	if (image->info.HasStencil() || !image->stencil_ids.empty()) return 3;
+	if (image->info.HasMetadata()) return 4;
+	if (image->info.bytes_per_block == 1u) return 5;
+	return 0;
+}
+
 bool TextureCache::ImageReplayable(ImageId id) const {
 	const auto* image = m_slot_images.try_get(id);
 	if (image != nullptr && image->info.data.Empty()) {
