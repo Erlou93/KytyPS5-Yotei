@@ -3030,7 +3030,18 @@ uint32_t TextureCache::ImageReplayableWhy(ImageId id) const {
 	return 0;
 }
 
+uint32_t TextureCache::OneByteReplayMode() {
+	static const uint32_t mode = [] {
+		const char*    env = std::getenv("KYTY_PERF_ONE_BYTE_REPLAY");
+		const uint32_t m   = env != nullptr ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : 0u;
+		if (m != 0) std::fprintf(stderr, "PERF_ONE_BYTE_REPLAY=%u: one-byte textures without a stencil tail take the image replay\n", m);
+		return m;
+	}();
+	return mode;
+}
+
 bool TextureCache::ImageReplayableTexture(ImageId id) const {
+	if (OneByteReplayMode() == 0) return ImageReplayable(id);
 	const auto* image = m_slot_images.try_get(id);
 	if (image != nullptr && image->info.data.Empty()) return true;
 	return image != nullptr && image->registered && !image->depth_id && !image->info.IsDepth() && !image->info.HasStencil() &&
@@ -3542,9 +3553,9 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	image.info.metadata = desc.info.metadata;
 	if (desc.info.HasStencil()) {
 		const auto [plane, inserted] = m_stencil_plane_depth.insert_or_assign(desc.info.stencil.address, image.info.data.address);
-		// An address becoming a known stencil plane bumps its page epoch, so a one-byte replay entry or set member there
-		// (kept because its resolve ran no stencil tail) is proven stale.
-		if (inserted) DrawRepeat::NoteImageRegistryChange(desc.info.stencil.address, 1);
+		// KYTY_PERF_ONE_BYTE_REPLAY: an address becoming a known stencil plane bumps its page epoch, so a one-byte replay
+		// entry or set member there (kept because its resolve ran no stencil tail) is proven stale.
+		if (inserted && OneByteReplayMode() != 0) DrawRepeat::NoteImageRegistryChange(desc.info.stencil.address, 1);
 	}
 	if (desc.info.HasMetadata()) {
 		const auto [entry, inserted] =
