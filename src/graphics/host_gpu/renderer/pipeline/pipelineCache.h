@@ -227,6 +227,7 @@ public:
 	// The execution thread: the whole selection stands in for GetGraphicsPrograms or GetComputeProgram (true), when
 	// the resolve thread found every stage and everything it read reads the same now.
 	[[nodiscard]] bool AdoptResolvedPrograms(ResolvedStages& results);
+	[[nodiscard]] bool AdoptResolvedProgramsChecked(ResolvedStages& results); // KYTY_CHECK_PEEK=2 (project 15 S2d)
 
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,

@@ -102,6 +102,27 @@ struct ResolveStats {
 	std::array<std::array<std::atomic<uint64_t>, static_cast<size_t>(ResolveMiss::Count)>, 2> walks {}, walk_ns {};
 	std::array<std::atomic<uint64_t>, 16> missing_by_stage {};
 } g_resolve_stats;
+// Project 15 S2d (KYTY_CHECK_PEEK=2, diagnostic): PeekAdopt's prediction against what Adopt did (execution thread).
+struct PeekAdoptStats {
+	uint64_t calls = 0, keep = 0, refind = 0, not_adoptable = 0, reads_changed = 0, bad = 0, injected = 0, detected = 0;
+	uint64_t refind_failed = 0;
+};
+PeekAdoptStats             g_peek_adopt;
+inline thread_local uint32_t t_adopt_refinds = 0; // stages whose permutation Adopt looked up again
+bool PeekAdoptCheck() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK");
+		return env != nullptr && env[0] == '2';
+	}();
+	return on;
+}
+uint64_t PeekAdoptFaultEvery() {
+	static const uint64_t every = [] {
+		const char* env = std::getenv("KYTY_CHECK_PEEK_FAULT");
+		return env != nullptr ? std::strtoull(env, nullptr, 10) : 0u;
+	}();
+	return every;
+}
 } // namespace
 
 struct ResolvedStages {
@@ -1184,6 +1205,7 @@ struct PipelineCache::ProgramCache {
 			auto*      permutation = static_cast<Permutation*>(r.permutation);
 			const bool shared      = std::ranges::find(r.null_share_kinds, uint8_t {1}) != r.null_share_kinds.end();
 			if (permutation == nullptr || shared || !permutation->program.bindings.PushStartMatches(cursor)) {
+				t_adopt_refinds++; // KYTY_CHECK_PEEK=2 (S2d)
 				permutation = entry.FindPermutation<false>(cursor, r.specialization);
 				if (permutation == nullptr) return false;
 				r.out_stage->program = &permutation->program;
@@ -1196,6 +1218,22 @@ struct PipelineCache::ProgramCache {
 			r.taken = true;
 		}
 		g_resolve_stats.taken.fetch_add(results.count, std::memory_order_relaxed);
+		return true;
+	}
+
+	// Project 15 S2d: Adopt's outcome without a write. True: every stage keeps the permutation the resolve found (the push
+	// cursor through them as Adopt walks it), so the commit's only write is the null share. False: Adopt looks a
+	// permutation up again (in order). The share's own write (ApplyNullFormattedShare) is not read here: it changes the
+	// specialization, and Adopt looks up again exactly when a stage shares, which the kinds say without it.
+	[[nodiscard]] static bool PeekAdopt(const ResolvedStages& results) {
+		uint32_t cursor = results.push_start;
+		for (uint32_t i = 0; i < results.count; i++) {
+			const auto& r           = results.stages[i];
+			const auto* permutation = static_cast<const Permutation*>(r.permutation);
+			const bool  shared      = std::ranges::find(r.null_share_kinds, uint8_t {1}) != r.null_share_kinds.end();
+			if (permutation == nullptr || shared || !permutation->program.bindings.PushStartMatches(cursor)) return false;
+			permutation->program.bindings.AdvancePushData(cursor);
+		}
 		return true;
 	}
 
@@ -2161,12 +2199,61 @@ void PipelineCache::ResolveGraphicsPrograms(RenderContext& renderer, const HW::V
 }
 
 bool PipelineCache::AdoptResolvedPrograms(ResolvedStages& results) {
+	if (PeekAdoptCheck()) return AdoptResolvedProgramsChecked(results);
 	if (!results.adoptable || !ResolvedReadsHold(results)) {
 		g_resolve_stats.not_adopted.fetch_add(1, std::memory_order_relaxed);
 		return false;
 	}
 	const bool adopted = m_program_cache->Adopt(results);
 	(adopted ? g_resolve_stats.adopted : g_resolve_stats.not_adopted).fetch_add(1, std::memory_order_relaxed);
+	return adopted;
+}
+
+// KYTY_CHECK_PEEK=2 (S2d, diagnostic): PeekAdopt first, then today's adoption; a predicted keep must be an adoption that
+// looked nothing up again. KYTY_CHECK_PEEK_FAULT=N: every N-th keep is reported as a look-up and must be caught.
+bool PipelineCache::AdoptResolvedProgramsChecked(ResolvedStages& results) {
+	auto& st = g_peek_adopt;
+	st.calls++;
+	if (!results.adoptable) {
+		st.not_adoptable++;
+		g_resolve_stats.not_adopted.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	bool keep = ProgramCache::PeekAdopt(results);
+	if (!ResolvedReadsHold(results)) {
+		st.reads_changed++;
+		g_resolve_stats.not_adopted.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	(keep ? st.keep : st.refind)++;
+	const bool fault = keep && PeekAdoptFaultEvery() != 0 && st.keep % PeekAdoptFaultEvery() == 0;
+	if (fault) {
+		keep = false;
+		st.injected++;
+	}
+	const uint32_t refinds0 = t_adopt_refinds;
+	const bool     adopted  = m_program_cache->Adopt(results);
+	const bool     looked   = t_adopt_refinds != refinds0;
+	if (!adopted) st.refind_failed++;
+	if (keep != !looked) {
+		if (fault) {
+			st.detected++;
+		} else if (keep) {
+			st.bad++; // predicted a keep, Adopt looked up again
+		}
+		// a predicted look-up that kept: PeekAdopt said "in order" where it could have answered (counted as refind)
+	}
+	(adopted ? g_resolve_stats.adopted : g_resolve_stats.not_adopted).fetch_add(1, std::memory_order_relaxed);
+	if ((st.calls & ((1u << 18u) - 1u)) == 0) {
+		std::fprintf(stderr,
+		             "PERF peek_adopt calls=%llu keep=%llu refind=%llu not_adoptable=%llu reads_changed=%llu refind_failed=%llu bad=%llu "
+		             "fault[injected|detected]=%llu|%llu\n",
+		             static_cast<unsigned long long>(st.calls), static_cast<unsigned long long>(st.keep),
+		             static_cast<unsigned long long>(st.refind), static_cast<unsigned long long>(st.not_adoptable),
+		             static_cast<unsigned long long>(st.reads_changed), static_cast<unsigned long long>(st.refind_failed),
+		             static_cast<unsigned long long>(st.bad), static_cast<unsigned long long>(st.injected),
+		             static_cast<unsigned long long>(st.detected));
+	}
 	return adopted;
 }
 
