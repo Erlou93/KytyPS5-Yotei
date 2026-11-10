@@ -421,8 +421,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		result = m_graphics.device.createImageView(&create, nullptr, &view);
 	}
 	if (Common::SlowFrame::Threshold() != 0u && Common::SlowFrame::NowNs() - slow_t0 >= 2'000'000u) {
-		std::fprintf(stderr, "SLOW_VIEW ms=%.1f image_format=%d view_format=%d type=%d usage=0x%x levels=%u layers=%u extent=%ux%ux%u views=%zu
-",
+		std::fprintf(stderr, "SLOW_VIEW ms=%.1f image_format=%d view_format=%d type=%d usage=0x%x levels=%u layers=%u extent=%ux%ux%u views=%zu\n",
 		             static_cast<double>(Common::SlowFrame::NowNs() - slow_t0) / 1e6, static_cast<int>(image.format),
 		             static_cast<int>(normalized.format), static_cast<int>(normalized.type),
 		             static_cast<uint32_t>(static_cast<vk::ImageUsageFlags::MaskType>(usage.usage)), normalized.level_count,
