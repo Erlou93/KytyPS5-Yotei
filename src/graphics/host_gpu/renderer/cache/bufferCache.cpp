@@ -3148,6 +3148,15 @@ BufferCache::BufferPeek BufferCache::PeekBuffer(uint64_t vaddr, uint64_t size, b
 		}
 		if (direct_mode != 0) {
 			const uint64_t end = vaddr + size;
+			if (!GuestGpu::IsGpuThread()) {
+				// N5.3: a helper reads only the ranges' fixed spans (the flags are the execution thread's): in order.
+				for (const auto& range: m_direct_ranges) {
+					if (end > range.start && vaddr < range.end) {
+						p.klass = BufferPeek::Upload;
+						return;
+					}
+				}
+			}
 			for (const auto& range: m_direct_ranges) {
 				if (range.refused || end <= range.start || vaddr >= range.end) continue;
 				if (range.active && vaddr >= range.start && end <= range.end) {

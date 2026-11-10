@@ -242,8 +242,10 @@ private:
 	uint32_t                                       m_deal_turn = 0; // N5.2: the tasks dealt in the current turn
 	uint64_t                                       m_tasks_pushed = 0;
 	std::atomic<uint64_t>                          m_tasks_finished {0};
+	std::atomic<uint64_t>                          m_tasks_claimed {0}; // N5.3: operations with a resolution the execution thread began
 	struct HelperStats {
 		std::atomic<uint64_t> tasks {0}, done {0}, empty {0}, stolen {0}, skipped {0}, ready {0}, running {0}, pending {0};
+		std::atomic<uint64_t> plans {0}, plans_short {0}; // N5.3: plans built; member draws without (lead below the margin)
 		std::atomic<uint64_t> waits {0}, wait_ns {0}, wait_cmd_ns {0}, wait_max_ns {0}, wait_commands {0};
 		// The waits by length (<5, <20, <100, <500, <2000, >=2000 us: count and ns).
 		std::array<std::atomic<uint64_t>, 6> hist_n {}, hist_ns {};

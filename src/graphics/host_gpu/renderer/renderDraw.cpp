@@ -3625,6 +3625,11 @@ bool RenderExecutor::ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task
 		slot.fault = task.fault;
 	}
 	slot.empty = !ok;
+	if (ok && !task.dispatch && task.build_plan) {
+		// N5.3: the helper builds the draw's plan while the slot is still its own (before it is marked ready).
+		PeekAhead(&slot, *task.context, *task.user_config, *task.shaders, task.indexed, task.draw_count, 1u, task.index_type,
+		          task.slice_offset, task.draw_indirect, std::min(task.lead, 127u), task.index_address);
+	}
 	slot.phase.store(PhaseReady, std::memory_order_release);
 	return ok;
 }
@@ -3858,7 +3863,8 @@ bool RenderExecutor::TakeAheadImages(const void* program, PeekStageImagesResult&
 void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shaders,
                                bool indexed, uint32_t count, uint32_t instances, uint32_t index_type, uint32_t slice_offset,
                                uint64_t indirect, uint32_t distance, uint64_t index_address) {
-	auto&          a      = g_ahead;
+	const bool     on_helper = !GuestGpu::IsGpuThread();
+	auto&          a         = on_helper ? t_ahead_helper : g_ahead;
 	const uint32_t bucket = AheadBucket(distance);
 	a.planned++;
 	a.peeked[bucket]++;
@@ -3969,9 +3975,11 @@ void RenderExecutor::PeekAhead(ResolvedDraw* slot, const HW::Context& ctx, const
 			const auto* program   = PipelineCache::AheadProgram(*slot->stages, i);
 			const auto* resources = PipelineCache::StageResources(*slot->stages, i);
 			if (program == nullptr || resources == nullptr) continue;
-			PeekStageImagesResult images;
-			front = PeekStageImages(*program, *resources, false, images, false) && front;
-			slot->ahead.images.emplace_back(program, std::move(images));
+			if (!on_helper) { // (a helper does not read the table sets: they are the execution thread's, n5-projekt.md 4)
+				PeekStageImagesResult images;
+				front = PeekStageImages(*program, *resources, false, images, false) && front;
+				slot->ahead.images.emplace_back(program, std::move(images));
+			}
 			// N4.2b: the stage's buffers
 			PeekStageBuffers(*program, *resources, PipelineCache::StageRecord(*slot->stages, i), distance, slot->ahead.buffers);
 		}

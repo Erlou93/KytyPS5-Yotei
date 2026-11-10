@@ -993,10 +993,10 @@ void GuestGpu::ExecutionThread() {
 		static const bool peek_ahead = [] {
 			const char* env    = std::getenv("KYTY_CHECK_PEEK");
 			const char* oracle = std::getenv("KYTY_CHECK_CHUNKS");
-			const char* plan   = std::getenv("KYTY_CHECK_PLAN_BUFFERS");
-			return (env != nullptr && env[0] == '2') || (oracle != nullptr && oracle[0] == '2') || // N4.2a: the plans too
-			       (plan != nullptr && plan[0] == '2') ||                                           // N4.2b
-			       BufferCache::DrawPlansOn();                                                       // N4.3
+			// N5.3: with the plans or the buffer check the helpers build the plans; the opening builds them under the oracle,
+			// and under the peek checks without plans.
+			const bool helpers = (BufferCache::DrawPlansOn() || BufferCache::PlanBufferCheck()) && !(oracle != nullptr && oracle[0] == '2');
+			return !helpers && ((env != nullptr && env[0] == '2') || (oracle != nullptr && oracle[0] == '2'));
 		}();
 		if (plan_census || peek_ahead) {
 			struct PlanCensus {
@@ -1363,6 +1363,7 @@ void GuestGpu::ResolveThread() {
 			}
 			// N5.2: with two helpers the tasks go in turns of 8 (warm caches); slots are independent, the execution thread
 			// takes them in order by their phase.
+			task.seq    = m_tasks_pushed; // N5.3: the lead is this minus the operations the execution thread began
 			auto& queue = (m_deal_turn++ & 8u) != 0 ? m_tasks2 : m_tasks;
 			if (!queue.TryPush(task)) EXIT("resolve helper: the task queue is full\n"); // a task holds a slot: never full
 			m_tasks_pushed++;
@@ -1389,12 +1390,12 @@ void GuestGpu::ResolveThread() {
 				std::fprintf(stderr,
 				             "PERF resolve_helper tasks=%llu done=%llu empty=%llu stolen=%llu skipped=%llu claim[ready|running|stolen]=%llu|%llu|%llu "
 				             "wait=%llu/%.1fms wait_cmd_ms=%.1f wait_max_us=%.1f wait_commands=%llu check[both_empty|refused|reads_differ|compared|bad]=%llu|%llu|%llu|%llu|%llu "
-				             "fault[injected|compared|detected]=%llu|%llu|%llu\n",
+				             "fault[injected|compared|detected]=%llu|%llu|%llu plans[built|short]=%llu|%llu\n",
 				             get(hs.tasks), get(hs.done), get(hs.empty), get(hs.stolen), get(hs.skipped), get(hs.ready), get(hs.running),
 				             get(hs.pending), get(hs.waits), static_cast<double>(get(hs.wait_ns)) / 1e6, static_cast<double>(get(hs.wait_cmd_ns)) / 1e6,
 				             static_cast<double>(get(hs.wait_max_ns)) / 1e3, get(hs.wait_commands), get(hs.both_empty),
 				             get(hs.refused), get(hs.reads_differ), get(hs.compared), get(hs.bad), get(hs.injected), get(hs.injected_compared),
-				             get(hs.detected));
+				             get(hs.detected), get(hs.plans), get(hs.plans_short));
 				std::string hist;
 				for (size_t i = 0; i < hs.hist_n.size(); i++) {
 					char buf[48];
@@ -1419,7 +1420,21 @@ void GuestGpu::ResolveHelperThread(uint32_t index) {
 	auto& executor = m_renderer.GetRenderExecutor();
 	auto& hs       = m_helper_stats;
 	auto& tasks    = index == 0 ? m_tasks : m_tasks2;
+	// N5.3: the helpers build plans (KYTY_PERF_DRAW_PLANS=1 or KYTY_CHECK_PLAN_BUFFERS=2; not under the oracle, whose
+	// execution thread builds them), for member draws with a lead of at least 32 operations - never making anyone wait.
+	static const bool helper_plans = [] {
+		const char* oracle = std::getenv("KYTY_CHECK_CHUNKS");
+		return (BufferCache::DrawPlansOn() || BufferCache::PlanBufferCheck()) && !(oracle != nullptr && oracle[0] == '2');
+	}();
+	constexpr uint64_t PlanMargin = 32;
 	while (auto task = tasks.Pop()) {
+		if (helper_plans && task->member && !task->dispatch) {
+			const uint64_t claimed = m_tasks_claimed.load(std::memory_order_relaxed);
+			const uint64_t lead    = task->seq > claimed ? task->seq - claimed : 0u;
+			task->lead             = static_cast<uint32_t>(std::min<uint64_t>(lead, UINT32_MAX));
+			task->build_plan       = lead >= PlanMargin;
+			(task->build_plan ? hs.plans : hs.plans_short).fetch_add(1, std::memory_order_relaxed);
+		}
 		if (!RenderExecutor::BeginResolveTask(task->slot)) {
 			hs.skipped.fetch_add(1, std::memory_order_relaxed);
 			m_tasks_finished.fetch_add(1, std::memory_order_release);
@@ -1449,6 +1464,7 @@ void GuestGpu::ResolveHelperThread(uint32_t index) {
 // selects itself, as without a resolution).
 void GuestGpu::ClaimResolved(GpuOperation& operation, void (*busy)(void* context, bool waiting), void* busy_context) {
 	auto* const slot = operation.resolved;
+	m_tasks_claimed.fetch_add(1, std::memory_order_relaxed); // N5.3: the helpers' lead
 	auto&       hs   = m_helper_stats;
 	const auto  wait_for = [&](RenderExecutor::ResolvedDraw* r, bool steal) {
 		auto       claim     = RenderExecutor::TryClaimResolvedDraw(r, steal);

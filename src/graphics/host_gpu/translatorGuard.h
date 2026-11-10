@@ -59,6 +59,7 @@ struct AheadStats {
 	uint64_t lookup_busy     = 0; // N5.1: a helper's buffer peeks found the lookup lock busy (no entries)
 };
 inline AheadStats g_ahead;
+inline thread_local AheadStats t_ahead_helper; // N5.3: a resolve helper's plans count here (not into the execution thread's)
 inline uint32_t   AheadBucket(uint32_t distance) {
     return distance == 0u ? 0u : distance < 16u ? 1u : distance < 64u ? 2u : 3u;
 }

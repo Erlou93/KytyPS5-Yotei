@@ -320,6 +320,10 @@ public:
 		bool                   member = false, indexed = false;
 		uint32_t               draw_count = 0, index_type = 0, slice_offset = 0;
 		uint64_t               draw_indirect = 0, index_address = 0;
+		// N5.3: the dispatcher's number of the task, and whether the helper builds the draw's plan (it has the lead)
+		uint64_t               seq = 0;
+		bool                   build_plan = false;
+		uint32_t               lead       = 0;
 	};
 	// The helper (or, with KYTY_CHECK_RESOLVE=2, the resolve thread for the reference): resolves the task into `slot`
 	// (the draw's pre-check included) and marks it ready (empty when there was nothing to resolve).
