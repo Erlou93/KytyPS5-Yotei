@@ -26,6 +26,7 @@
 #include <QByteArray>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
@@ -241,7 +242,12 @@ private:
 	// v0.1.6 first-start steps for a game version whose hints the package ships (hints\<title>_<version>.kyhints):
 	// 1 = the hints were imported, 2 = a precompile then finished. Play waits for 2, Precompile for 1.
 	static QMap<QString, int> g_shader_setup; // "<title id>_<version>" -> step
+	// The shipped hints file the steps were made with (SHA-1 of its bytes): another file (a new package's hints) starts
+	// the steps again, so its new shaders are imported too ([ShaderSetupHints] in Kyty.ini; none: an older launcher's).
+	static QMap<QString, QString> g_shader_setup_hints; // "<title id>_<version>" -> hex SHA-1
 	[[nodiscard]] QString ShippedHintsKey(const ConfigurationItem* item) const; // empty: no hints shipped for it
+	[[nodiscard]] QString ShippedHintsId(const QString& key) const;             // SHA-1 of the shipped file, cached
+	mutable QMap<QString, QString> m_hints_ids;
 	[[nodiscard]] int     ShaderSetupStep(const ConfigurationItem* item) const;   // 2 when no hints are shipped
 	// v0.1.6: the player guide (KytyPS5-Yotei-Player-Guide.pdf next to the launcher) opened at a step's page.
 	void         OpenGuide(int page);
@@ -291,6 +297,7 @@ int        MainDialogPrivate::g_precompile_threads       = 0;
 bool       MainDialogPrivate::g_precompile_on_start      = true;
 QMap<QString, QPair<qint64, qint64>> MainDialogPrivate::g_precompile_progress;
 QMap<QString, int>                   MainDialogPrivate::g_shader_setup;
+QMap<QString, QString>               MainDialogPrivate::g_shader_setup_hints;
 
 MainDialog::MainDialog(QWidget* parent): QDialog(parent), m_p(new MainDialogPrivate(this)) {
 	m_p->Setup(this);
@@ -740,9 +747,25 @@ QString MainDialogPrivate::ShippedHintsKey(const ConfigurationItem* item) const 
 	return QDir(HintsDir()).exists(key + QStringLiteral(".kyhints")) ? key : QString();
 }
 
+QString MainDialogPrivate::ShippedHintsId(const QString& key) const {
+	if (key.isEmpty()) return {};
+	if (const auto found = m_hints_ids.constFind(key); found != m_hints_ids.constEnd()) return found.value();
+	QFile file(QDir(HintsDir()).filePath(key + QStringLiteral(".kyhints")));
+	QString id;
+	if (file.open(QIODevice::ReadOnly)) {
+		QCryptographicHash hash(QCryptographicHash::Sha1);
+		if (hash.addData(&file)) id = QString::fromLatin1(hash.result().toHex());
+	}
+	m_hints_ids.insert(key, id);
+	return id;
+}
+
 int MainDialogPrivate::ShaderSetupStep(const ConfigurationItem* item) const {
 	const auto key = ShippedHintsKey(item);
-	return key.isEmpty() ? 2 : g_shader_setup.value(key, 0);
+	if (key.isEmpty()) return 2;
+	// Steps made with another hints file (or by a launcher that did not record it) count as not done.
+	if (g_shader_setup_hints.value(key) != ShippedHintsId(key)) return 0;
+	return g_shader_setup.value(key, 0);
 }
 
 QString MainDialogPrivate::FirstStartHints(const QString& title, const QString& version) const {
@@ -1784,6 +1807,11 @@ void MainDialogPrivate::WriteSettings(QSettings& s) {
 		s.setValue(it.key(), it.value());
 	}
 	s.endGroup();
+	s.beginGroup(QStringLiteral("ShaderSetupHints"));
+	for (auto it = g_shader_setup_hints.constBegin(); it != g_shader_setup_hints.constEnd(); ++it) {
+		s.setValue(it.key(), it.value());
+	}
+	s.endGroup();
 
 	s.endGroup();
 }
@@ -1808,6 +1836,12 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 	s.beginGroup(QStringLiteral("ShaderSetup"));
 	for (const auto& key: s.childKeys()) {
 		g_shader_setup.insert(key, std::clamp(s.value(key).toInt(), 0, 2));
+	}
+	s.endGroup();
+	g_shader_setup_hints.clear();
+	s.beginGroup(QStringLiteral("ShaderSetupHints"));
+	for (const auto& key: s.childKeys()) {
+		g_shader_setup_hints.insert(key, s.value(key).toString());
 	}
 	s.endGroup();
 
@@ -2148,13 +2182,14 @@ void MainDialogPrivate::PrecompileFinished(int exit_code, QProcess::ExitStatus e
 	m_ui->precompile_status->setVisible(true);
 	// v0.1.6 first-start steps: an import that found the hints usable, then a precompile that finished.
 	if (const auto key = ShippedHintsKey(m_ui->widget->GetSelectedItem()); !key.isEmpty()) {
-		int step = g_shader_setup.value(key, 0);
+		int step = ShaderSetupStep(m_ui->widget->GetSelectedItem()); // 0 when the steps were for another hints file
 		if (m_precompile_hints.value(QStringLiteral("kind")) == QLatin1String("import") &&
 		    m_precompile_hints.value(QStringLiteral("status")) == QLatin1String("ok")) {
 			step = std::max(step, 1);
 		}
 		if (step >= 1 && status == QLatin1String("complete")) step = 2;
-		g_shader_setup[key] = step;
+		g_shader_setup[key]       = step;
+		g_shader_setup_hints[key] = ShippedHintsId(key);
 	}
 	m_ui->widget->WriteSettings();
 	Update();
