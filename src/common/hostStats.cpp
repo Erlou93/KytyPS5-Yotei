@@ -14,7 +14,11 @@
 #include <windows.h> // IWYU pragma: keep
 // clang-format off
 #include <psapi.h>
+#include <pdh.h>
 // clang-format on
+#include <string>
+#include <vector>
+#pragma comment(lib, "pdh.lib")
 #elif defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -67,9 +71,54 @@ uint64_t FileTimeTo100Ns(const FILETIME& time) {
 	return (static_cast<uint64_t>(time.dwHighDateTime) << 32u) | time.dwLowDateTime;
 }
 
-struct PlatformState {};
+// GPU utilization of this process (11.11: the overlay's "GPU" row was n/a on Windows - only macOS read it): the
+// Windows performance counter behind Task Manager's GPU column, "\GPU Engine(pid_<pid>_*engtype_3D)\Utilization
+// Percentage", summed over the matching engine instances and clamped to 100. The first sample has no value (PDH needs
+// two collections for a rate).
+struct PlatformState {
+	PDH_HQUERY   query   = nullptr;
+	PDH_HCOUNTER counter = nullptr;
+	bool         tried   = false;
+	~PlatformState() {
+		if (query != nullptr) PdhCloseQuery(query);
+	}
+};
 
-void SamplePlatform(PlatformState& /*state*/, HostStats& stats, Counters& now) {
+void SampleGpu(PlatformState& state, HostStats& stats) {
+	if (!state.tried) {
+		state.tried = true;
+		if (PdhOpenQueryW(nullptr, 0, &state.query) != ERROR_SUCCESS) {
+			state.query = nullptr;
+			return;
+		}
+		const std::wstring path = L"\\GPU Engine(pid_" + std::to_wstring(GetCurrentProcessId()) +
+		                          L"_*engtype_3D)\\Utilization Percentage";
+		if (PdhAddEnglishCounterW(state.query, path.c_str(), 0, &state.counter) != ERROR_SUCCESS) {
+			PdhCloseQuery(state.query);
+			state.query   = nullptr;
+			state.counter = nullptr;
+			return;
+		}
+		PdhCollectQueryData(state.query);
+		return;
+	}
+	if (state.query == nullptr || PdhCollectQueryData(state.query) != ERROR_SUCCESS) return;
+	DWORD bytes = 0, count = 0;
+	if (PdhGetFormattedCounterArrayW(state.counter, PDH_FMT_DOUBLE, &bytes, &count, nullptr) != PDH_MORE_DATA) return;
+	std::vector<unsigned char> buffer(bytes);
+	auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+	if (PdhGetFormattedCounterArrayW(state.counter, PDH_FMT_DOUBLE, &bytes, &count, items) != ERROR_SUCCESS) return;
+	double sum = 0.0;
+	for (DWORD i = 0; i < count; i++) {
+		if (items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || items[i].FmtValue.CStatus == PDH_CSTATUS_NEW_DATA) {
+			sum += items[i].FmtValue.doubleValue;
+		}
+	}
+	stats.gpu_percent = std::min(100.0, sum);
+}
+
+void SamplePlatform(PlatformState& state, HostStats& stats, Counters& now) {
+	SampleGpu(state, stats);
 	const auto process = GetCurrentProcess();
 	FILETIME   creation {};
 	FILETIME   exit {};
