@@ -1059,7 +1059,18 @@ static void RecordPad(const ControllerState& state) {
 	}();
 	if (file == nullptr) return;
 	const int64_t ms = MsSinceGameplay();
-	if (ms < 0) return;
+	if (ms < 0) {
+		// Before gameplay (the menus): each change with its presented frame, to stderr, for a KYTY_TEST_PAD_SCRIPT.
+		static PadRecord menu {-1, 0xffffffffu, {-1, -1, -1, -1, -1, -1}};
+		bool same_menu = state.buttons == menu.buttons;
+		for (size_t a = 0; a < menu.axes.size(); a++) same_menu = same_menu && state.axes[a] == menu.axes[a];
+		if (same_menu) return;
+		menu.buttons = state.buttons;
+		for (size_t a = 0; a < menu.axes.size(); a++) menu.axes[a] = state.axes[a];
+		std::fprintf(stderr, "TEST_PAD_MENU frame=%u buttons=%x axes=%d %d %d %d %d %d\n", Libs::Graphics::DebugPresentCount().load(),
+		             state.buttons, state.axes[0], state.axes[1], state.axes[2], state.axes[3], state.axes[4], state.axes[5]);
+		return;
+	}
 	static PadRecord last {-1, 0xffffffffu, {-1, -1, -1, -1, -1, -1}};
 	bool same = state.buttons == last.buttons;
 	for (size_t a = 0; a < last.axes.size(); a++) same = same && state.axes[a] == last.axes[a];
