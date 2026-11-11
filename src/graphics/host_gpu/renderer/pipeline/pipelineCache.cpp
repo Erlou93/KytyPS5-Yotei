@@ -276,7 +276,34 @@ bool ResolvedReadsHold(ResolvedStages& results) {
 			                    ? Reads::Hold
 			                    : Reads::Changed;
 			if (slow_adopt) {
-				const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+				const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+				const auto us = ns / 1000;
+				// The aggregate (11.11, topic "reads from the card"): every 16384 checks, how the entries went.
+				static uint64_t a_calls = 0, a_entries = 0, a_fast = 0, a_runs = 0, a_slow = 0, a_ns = 0, a_slow_calls = 0,
+				                a_slow_ns = 0, a_changed = 0, a_empty = 0;
+				a_calls++;
+				a_entries += results.log.entries.size();
+				a_fast += stats.entries_fast;
+				a_runs += stats.runs;
+				a_slow += stats.entries_slow;
+				a_ns += static_cast<uint64_t>(ns);
+				if (stats.entries_slow != 0) {
+					a_slow_calls++;
+					a_slow_ns += static_cast<uint64_t>(ns);
+				}
+				if (results.reads != Reads::Hold) a_changed++;
+				if (results.log.entries.empty()) a_empty++;
+				if ((a_calls & 0x3fffu) == 0u) {
+					std::fprintf(stderr,
+					             "PERF adopt_reads calls=%llu empty=%llu entries/call=%.1f fast=%.1f runs=%.1f slow=%.2f ns/call=%.0f "
+					             "calls_with_slow=%llu (ns/call %.0f) changed=%llu\n",
+					             static_cast<unsigned long long>(a_calls), static_cast<unsigned long long>(a_empty),
+					             static_cast<double>(a_entries) / a_calls, static_cast<double>(a_fast) / a_calls,
+					             static_cast<double>(a_runs) / a_calls, static_cast<double>(a_slow) / a_calls,
+					             static_cast<double>(a_ns) / a_calls, static_cast<unsigned long long>(a_slow_calls),
+					             a_slow_calls != 0 ? static_cast<double>(a_slow_ns) / a_slow_calls : 0.0,
+					             static_cast<unsigned long long>(a_changed));
+				}
 				static std::atomic_uint printed {0};
 				if (us >= 200 && printed.fetch_add(1, std::memory_order_relaxed) < 400u) {
 					std::fprintf(stderr,
