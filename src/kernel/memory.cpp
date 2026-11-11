@@ -1698,46 +1698,6 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 	if (g_gpu_resources == nullptr || g_guest_address_space == nullptr || !Graphics::GuestGpu::IsGpuThread()) {
 		return Result::NeedsReader;
 	}
-	// KYTY_PERF_ADOPT_PREFETCH=1 (test switch, project 15 way B 11.11): the log was written by a helper on another core
-	// and the guest bytes were last read there too, so the compares below can miss one after another. Ask for the
-	// lines first (entries, logged bytes, the guest bytes of ordinary entries; a strict entry is compared with the
-	// backing store, so only its logged bytes) so the misses overlap. A prefetch changes no result and never faults.
-	static const uint32_t prefetch_fixed = [] {
-		const char* value = std::getenv("KYTY_PERF_ADOPT_PREFETCH");
-		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
-	}();
-	if (Common::LiveAb::Gate(Common::LiveAb::Switch::AdoptPrefetch, prefetch_fixed) != 0u) {
-		constexpr size_t kPrefetchEntries = 48;
-		const size_t     end              = std::min(count, begin + kPrefetchEntries);
-		const auto*      entries          = log.entries.data();
-		const uint8_t*   bytes            = log.bytes.data();
-		uintptr_t        last_entry_line  = ~uintptr_t {0};
-		uint64_t         last_guest_line  = ~0ull;
-		uint64_t         last_byte_line   = ~0ull;
-		for (size_t i = begin; i < end; ++i) {
-			const uintptr_t entry_line = reinterpret_cast<uintptr_t>(entries + i) >> 6u;
-			if (entry_line != last_entry_line) {
-				_mm_prefetch(reinterpret_cast<const char*>(entries + i), _MM_HINT_T0);
-				last_entry_line = entry_line;
-			}
-			const auto& e = entries[i];
-			if (!e.ok || e.size == 0 || e.first >= byte_count) {
-				continue;
-			}
-			const uint64_t byte_line = e.first >> 6u;
-			if (byte_line != last_byte_line) {
-				_mm_prefetch(reinterpret_cast<const char*>(bytes + e.first), _MM_HINT_T0);
-				last_byte_line = byte_line;
-			}
-			if (e.kind == Graphics::ShaderRecompiler::IR::ReadLog::Kind::Ordinary && IsGpuAddressRange(e.address, e.size)) {
-				const uint64_t guest_line = e.address >> 6u;
-				if (guest_line != last_guest_line) {
-					_mm_prefetch(reinterpret_cast<const char*>(e.address), _MM_HINT_T0);
-					last_guest_line = guest_line;
-				}
-			}
-		}
-	}
 	uint64_t  local_pages[OrdinaryReadPageCache::kSlots] = {~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull};
 	uint64_t* pages = cache.active ? cache.pages : local_pages;
 	auto&          buffers    = GetGpuResources().GetBufferCache();
