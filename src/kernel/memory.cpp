@@ -1,4 +1,3 @@
-#include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "kernel/memory.h"
@@ -19,7 +18,6 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 
-#include <optional>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1716,10 +1714,7 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 			return Result::Unchanged;
 		}
 		size_t     bad     = 0;
-		std::optional<Common::SlowFrame::Scope> fv_batch;
-		fv_batch.emplace(Common::SlowFrame::FvBatch); // KYTY_TRACE_SLOW_FRAMES
 		const auto outcome = g_guest_address_space->CompareBackingBatch(spans, pending, &bad);
-		fv_batch.reset();
 		size_t     proven  = pending;
 		if (outcome != GuestAddressSpace::BackingCompareResult::Equal) {
 			proven = bad; // the spans before the bad one are proven
@@ -1775,13 +1770,7 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 			for (size_t i = index; i < next; ++i) run_class |= log.entries[i].cls;
 		}
 		// Prove the run's pages (one question per page, answers shared through the session's page cache).
-		std::optional<Common::SlowFrame::Scope> fv_proof;
-		fv_proof.emplace(Common::SlowFrame::FvProof); // KYTY_TRACE_SLOW_FRAMES
-		bool clean = false;
-		{
-			const Common::SlowFrame::Scope fv_addr(Common::SlowFrame::FvAddr);
-			clean = IsGpuAddressRange(head.address, run_size);
-		}
+		bool clean = IsGpuAddressRange(head.address, run_size);
 		if (clean) {
 			const uint64_t last = (head.address + run_size - 1u) >> 12u;
 			for (uint64_t page = head.address >> 12u; page <= last; ++page) {
@@ -1810,7 +1799,6 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 				last_page = page;
 			}
 		}
-		fv_proof.reset();
 		if (!clean) {
 			const auto flushed = flush();
 			if (flushed != Result::Unchanged) {
@@ -1824,18 +1812,12 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 			// The ordinary hook said "clean": the reader copies from the guest address itself (through ReadGuestPlain, so the
 			// compare must see the same bytes without a fault on a page under the image read watch).
 			bool same = true;
-			bool armed = false;
-			{
-				const Common::SlowFrame::Scope fv_armed(Common::SlowFrame::FvArmed);
-				armed = GuestImageReadArmed(head.address, run_size);
-			}
-			if (armed) {
+			if (GuestImageReadArmed(head.address, run_size)) {
 				thread_local std::vector<uint8_t> watched;
 				watched.resize(run_size);
 				ReadGuestPlain(watched.data(), head.address, run_size);
 				same = std::memcmp(watched.data(), expected, static_cast<size_t>(run_size)) == 0;
 			} else {
-				const Common::SlowFrame::Scope fv_cmp(Common::SlowFrame::FvCmp);
 				same = std::memcmp(reinterpret_cast<const void*>(head.address), expected, static_cast<size_t>(run_size)) == 0;
 			}
 			if (!same) {

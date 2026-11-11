@@ -56,15 +56,10 @@ enum Part : uint32_t {
 	FtStorage,   // FindTexture: CommitGpuWrite + ArmWrittenImage (storage)
 	FtView,      // FindTexture: FindView
 	CreateView,  // vkCreateImageView (Image::FindView)
-	FvProof,     // FastVerifyLoggedReads: a run's address check and page proofs
-	FvAddr,      // FastVerifyLoggedReads: IsGpuAddressRange of a run
-	FvArmed,     // FastVerifyLoggedReads: GuestImageReadArmed of an ordinary run
-	FvCmp,       // FastVerifyLoggedReads: memcmp of an ordinary run
-	FvBatch,     // FastVerifyLoggedReads: CompareBackingBatch of strict runs
 	Count
 };
 inline constexpr const char* Names[Count] = {"download", "fence", "sync_buf", "variant", "depth", "new_img",
-                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready", "ft_fast", "ft_full", "ft_tail", "ft_lock", "ft_sync", "ft_owner", "ft_storage", "ft_view", "create_view", "fv_proof", "fv_addr", "fv_armed", "fv_cmp", "fv_batch"};
+                                             "new_buf",  "alloc", "free",     "reads",   "protect", "idle", "claim", "commands", "draws", "dispatches", "draw_op", "draw_ind", "disp_op", "prep_today", "find_buf", "rebind_buf", "rebind_img", "commit", "bindless", "targets", "bda", "upd_img", "upload_img", "find_img", "refresh_img", "resolve_tex", "find_view", "dcc_clear", "table_ready", "ft_fast", "ft_full", "ft_tail", "ft_lock", "ft_sync", "ft_owner", "ft_storage", "ft_view", "create_view"};
 
 inline uint32_t Threshold() {
 	static const uint32_t ms = [] {
@@ -130,7 +125,7 @@ inline void Report(uint32_t frame, double ms) {
 	static uint32_t base_frames = 0;
 	static double   base_ms     = 0.0;
 	if (ms >= threshold) {
-		char line[2048];
+		char line[1024];
 		int  n = std::snprintf(line, sizeof(line), "SLOW_FRAME frame=%u ms=%.1f", frame, ms);
 		for (uint32_t i = 0; i < Count && n > 0 && n < static_cast<int>(sizeof(line)); i++) {
 			if (calls[i] == 0) continue;
@@ -145,7 +140,7 @@ inline void Report(uint32_t frame, double ms) {
 	}
 	base_ms += ms;
 	if (++base_frames >= 200u) {
-		char line[2048];
+		char line[1024];
 		int  n = std::snprintf(line, sizeof(line), "SLOW_FRAME_BASE frame=%u frames=%u mean_ms=%.1f", frame, base_frames,
 		                       base_ms / base_frames);
 		for (uint32_t i = 0; i < Count && n > 0 && n < static_cast<int>(sizeof(line)); i++) {
