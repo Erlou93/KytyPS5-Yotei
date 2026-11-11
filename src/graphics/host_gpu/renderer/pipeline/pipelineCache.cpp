@@ -292,6 +292,39 @@ bool ResolvedReadsHold(ResolvedStages& results) {
 					a_slow_ns += static_cast<uint64_t>(ns);
 				}
 				if (results.reads != Reads::Hold) a_changed++;
+				// D1 estimate (11.11): the runs if the entries were sorted by address and merged where contiguous (same kind,
+				// adjacent or overlapping) - against today's runs in log order.
+				static uint64_t a_sorted_runs = 0, a_pages = 0;
+				{
+					thread_local std::vector<std::pair<uint64_t, uint64_t>> spans; // (address << 1 | kind, end)
+					spans.clear();
+					for (const auto& e: results.log.entries) {
+						if (e.size == 0) continue;
+						spans.emplace_back((e.address << 1u) | static_cast<uint64_t>(e.kind == ShaderRecompiler::IR::ReadLog::Kind::Ordinary),
+						                   e.address + e.size);
+					}
+					std::sort(spans.begin(), spans.end());
+					uint64_t runs = 0, end = 0, kind = 2, last_page = ~0ull;
+					for (const auto& [key, e_end]: spans) {
+						const uint64_t address = key >> 1u, k = key & 1u;
+						if (runs == 0 || k != kind || address > end) {
+							runs++;
+							end  = e_end;
+							kind = k;
+						} else {
+							end = std::max(end, e_end);
+						}
+						for (uint64_t page = address >> 12u; page <= ((e_end - 1u) >> 12u); page++) {
+							if (page != last_page) a_pages++;
+							last_page = page;
+						}
+					}
+					a_sorted_runs += runs;
+				}
+				if ((a_calls & 0x3fffu) == 0u) {
+					std::fprintf(stderr, "PERF adopt_reads_d1 sorted_runs/call=%.2f pages/call=%.2f\n",
+					             static_cast<double>(a_sorted_runs) / a_calls, static_cast<double>(a_pages) / a_calls);
+				}
 				if (results.log.entries.empty()) a_empty++;
 				if ((a_calls & 0x3fffu) == 0u) {
 					std::fprintf(stderr,
