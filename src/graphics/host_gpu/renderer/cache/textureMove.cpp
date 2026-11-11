@@ -107,6 +107,17 @@ void PipelineBarrier(vk::CommandBuffer command, const std::vector<vk::ImageMemor
 
 void TextureCache::RunTextureMove(BindlessTable& table) {
 	if (!m_scheduler.Active()) return;
+	// KYTY_DIAG_TEXMOVE_OFF=1 (diagnostic, 11.11, default off, removed with the fix): no relocation at all - an A/B for the
+	// square shadows reported after cutscenes (issue #11): whether they still appear when no texture ever moves.
+	static const bool off = [] {
+		const char* value = std::getenv("KYTY_DIAG_TEXMOVE_OFF");
+		if (value != nullptr && value[0] == '1') {
+			std::fprintf(stderr, "TEXMOVE disabled (KYTY_DIAG_TEXMOVE_OFF=1)\n");
+			return true;
+		}
+		return false;
+	}();
+	if (off) return;
 	const uint64_t now = NowMs();
 	static uint64_t last = now; // the first batch an interval after the first frame boundary
 	// Back-off: an attempt that moved nothing and ended exactly like the one before (same candidate blocks, same
