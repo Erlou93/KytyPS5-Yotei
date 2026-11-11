@@ -1,6 +1,7 @@
 #include "common/slowFrame.h" // KYTY_TRACE_SLOW_FRAMES (diagnostic)
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
+#include "graphics/host_gpu/renderer/drawCoverage.h" // KYTY_TRACE_TARGET_REPEAT
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/gpuCheckpoints.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
@@ -858,6 +859,53 @@ private:
 	DrawRenderState* m_state = nullptr;
 };
 } // namespace
+
+// KYTY_TRACE_TARGET_REPEAT=1 (diagnostic, 11.11, fork comparison: chenxiao takes the targets only when they changed):
+// per draw, the time of AcquireRenderTargets and whether its result repeats the previous draw's (same attachments,
+// views and layouts, no clear, no layout barrier). Every 5 s: PERF target_repeat (frames, draws, repeats, ms per frame
+// in all calls and in the repeating ones, barriers).
+namespace TargetRepeat {
+static bool On() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_TRACE_TARGET_REPEAT");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+static void Note(const RenderState& state, uint64_t ns, uint64_t barriers) {
+	static RenderState prev {};
+	static bool        have_prev = false;
+	static uint64_t    draws = 0, repeats = 0, ns_all = 0, ns_repeat = 0, barrier_draws = 0;
+	static uint32_t    window_frame = DebugPresentCount().load();
+	static auto        window_start = std::chrono::steady_clock::now();
+	bool clears = state.depth_stencil_attachment.depth_clear || state.depth_stencil_attachment.stencil_clear ||
+	              state.depth_stencil_attachment.is_clear;
+	for (uint32_t i = 0; i < state.num_color_attachments; i++) clears = clears || state.color_attachments[i].is_clear;
+	const bool repeat = have_prev && !clears && barriers == 0 && state == prev;
+	draws++;
+	ns_all += ns;
+	if (repeat) {
+		repeats++;
+		ns_repeat += ns;
+	}
+	if (barriers != 0) barrier_draws++;
+	prev      = state;
+	have_prev = true;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - window_start < std::chrono::seconds(5)) return;
+	const uint32_t frame  = DebugPresentCount().load();
+	const double   frames = frame > window_frame ? static_cast<double>(frame - window_frame) : 1.0;
+	std::fprintf(stderr,
+	             "PERF target_repeat frames=%.0f draws/frame=%.0f repeat=%.1f%% ms/frame all=%.2f repeat=%.2f "
+	             "ns/draw repeat=%.0f other=%.0f barrier_draws/frame=%.0f\n",
+	             frames, draws / frames, draws != 0 ? 100.0 * repeats / draws : 0.0, ns_all / 1e6 / frames,
+	             ns_repeat / 1e6 / frames, repeats != 0 ? static_cast<double>(ns_repeat) / repeats : 0.0,
+	             draws > repeats ? static_cast<double>(ns_all - ns_repeat) / (draws - repeats) : 0.0, barrier_draws / frames);
+	draws = repeats = ns_all = ns_repeat = barrier_draws = 0;
+	window_frame = frame;
+	window_start = now;
+}
+} // namespace TargetRepeat
 
 RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
                                                  uint32_t color_count, RenderDepthInfo& depth,
@@ -3163,7 +3211,17 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 		const bool any = OwnerDrawRect(vertex_stages.back(), state.color_info, state.color_count, plan.regs, ox0, oy0, ox1, oy1);
 		TextureCache::OwnerSetDrawRect(any, ox0, oy0, ox1, oy1);
 	}
+	const bool     target_repeat = TargetRepeat::On(); // KYTY_TRACE_TARGET_REPEAT
+	const auto     tr_start      = target_repeat ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+	const uint64_t tr_barriers   = DrawCoverage::t_barriers;
 	RenderState rendering = AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info, feedback_aspects, stages);
+	if (target_repeat) {
+		TargetRepeat::Note(rendering,
+		                   static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                             std::chrono::steady_clock::now() - tr_start)
+		                                             .count()),
+		                   DrawCoverage::t_barriers - tr_barriers);
+	}
 	if (owner_on) TextureCache::OwnerSetDrawRect(false, 0, 0, 0, 0);
 	commit_census.reset();
 	floor_acquire.reset();
