@@ -1756,7 +1756,8 @@ bool ShaderPrecompiler::GraphicsEnabled() {
 
 uint64_t ShaderPrecompiler::Revision() {
 	static const uint64_t revision = [] {
-		const std::string_view hash = KYTY_GIT_HASH;
+		// 11.11: the translator's revision, not the build's (a build that changes other code keeps the caches).
+		const std::string_view hash = KYTY_SHADER_REVISION;
 		return XXH3_64bits(hash.data(), hash.size());
 	}();
 	return revision;
@@ -1788,7 +1789,8 @@ ShaderPrecompiler::ShaderPrecompiler(GraphicContext& graphics, vk::PipelineCache
 		if (const auto at = name.find(".classes"); at != std::string::npos) name.resize(at);
 		path.replace_filename(name + ".reuse");
 		const auto&    properties = m_graphics.GetPhysicalDeviceProperties();
-		const uint64_t identity[] = {Revision(), ReuseDisk::ExecutableHash(), EnvironmentFingerprint(),
+		// (11.11: no executable hash - any rebuild discarded every translation; Revision() is the translator's.)
+		const uint64_t identity[] = {Revision(), EnvironmentFingerprint(),
 		                             DeviceFingerprint(m_graphics), properties.driverVersion};
 		m_disk = std::make_unique<ReuseDisk>(path, XXH3_64bits(identity, sizeof(identity)));
 	}

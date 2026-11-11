@@ -453,7 +453,7 @@ std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties)
 	// Default from Common::EnvDefaults; =0 turns it off.
 	const char* any_revision = Common::ShaderEnv::Read("KYTY_PIPELINE_CACHE_ANY_REVISION");
 	const bool  any          = any_revision != nullptr && any_revision[0] == '1';
-	return fmt::format("KytyPC1:{}:{:08x}:{:08x}:{:08x}:{}\n", any ? "any" : KYTY_GIT_REVISION,
+	return fmt::format("KytyPC1:{}:{:08x}:{:08x}:{:08x}:{}\n", any ? "any" : KYTY_SHADER_REVISION,
 	                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
 }
 
