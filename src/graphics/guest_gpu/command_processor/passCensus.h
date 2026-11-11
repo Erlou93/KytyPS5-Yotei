@@ -31,7 +31,8 @@ void NoteShader(uint64_t hash);
 [[nodiscard]] uint16_t CurrentPassId(const void* cp);
 // The name of an interned pass id ("-" when unknown).
 [[nodiscard]] std::string PassName(uint16_t id);
-void NoteExecute(uint16_t pass, int kind, uint64_t ns, uint64_t wait_ns);
+// gfx: the operation came from the graphics queue (false: a compute queue; the second-execution-thread ceiling, 11.11).
+void NoteExecute(uint16_t pass, int kind, uint64_t ns, uint64_t wait_ns, bool gfx = true);
 
 } // namespace Libs::Graphics::PassCensus
 

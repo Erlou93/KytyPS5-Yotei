@@ -1224,7 +1224,7 @@ void GuestGpu::ExecutionThread() {
 			operation->processor->Execute(*operation);
 			const auto ns = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-			PassCensus::NoteExecute(pass, k, ns, PassCensus::t_wait_ns - wait0);
+			PassCensus::NoteExecute(pass, k, ns, PassCensus::t_wait_ns - wait0, processor_is_gfx);
 			if (ChunkCensus::Enabled()) {
 				// KYTY_TRACE_CHUNK_CENSUS (S1a): how the parallel translation would group this operation.
 				ChunkCensus::OpInfo info;

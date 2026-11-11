@@ -221,7 +221,17 @@ uint16_t CurrentPassId(const void* cp) {
 	return it != t_processors.end() ? it->second.id : uint16_t {0};
 }
 
-void NoteExecute(uint16_t pass, int kind, uint64_t ns, uint64_t wait_ns) {
+// Per queue (index 0 graphics, 1 compute queues): execution time less card waits, and operations by kind.
+struct QueueTotals {
+	uint64_t ns = 0, wait_ns = 0, draws = 0, dispatches = 0, other = 0;
+};
+static thread_local QueueTotals t_queues[2];
+
+void NoteExecute(uint16_t pass, int kind, uint64_t ns, uint64_t wait_ns, bool gfx) {
+	auto& q = t_queues[gfx ? 0 : 1];
+	q.ns += ns > wait_ns ? ns - wait_ns : 0u;
+	q.wait_ns += wait_ns;
+	(kind == 1 ? q.draws : kind == 2 ? q.dispatches : q.other)++;
 	auto& e = Exec();
 	if (pass >= e.passes.size()) e.passes.resize(static_cast<size_t>(pass) + 1u);
 	auto& t = e.passes[pass];
@@ -242,6 +252,14 @@ void NoteExecute(uint16_t pass, int kind, uint64_t ns, uint64_t wait_ns) {
 	std::fprintf(stderr, "PASS_EXEC frames=%u exec_ms/frame=%.1f passes=%zu\n", frames, static_cast<double>(total) / 1e6 / frames,
 	             rows.size());
 	std::scoped_lock lock(g_names_mutex);
+	for (int i = 0; i < 2; i++) {
+		const auto& q = t_queues[i];
+		std::fprintf(stderr,
+		             "PASS_EXEC queue=%s exec_ms/frame=%.2f wait_ms/frame=%.2f draws/frame=%.0f dispatches/frame=%.0f other/frame=%.0f\n",
+		             i == 0 ? "gfx" : "compute", static_cast<double>(q.ns) / 1e6 / frames, static_cast<double>(q.wait_ns) / 1e6 / frames,
+		             static_cast<double>(q.draws) / frames, static_cast<double>(q.dispatches) / frames, static_cast<double>(q.other) / frames);
+		t_queues[i] = {};
+	}
 	for (size_t k = 0; k < rows.size() && k < 16u; k++) {
 		const auto& [id, t] = rows[k];
 		const uint64_t ops  = t.draws + t.dispatches;
