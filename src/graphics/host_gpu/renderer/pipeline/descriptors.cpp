@@ -4058,13 +4058,12 @@ static uint64_t TableSetSnapshotHash(const ShaderRecompiler::IR::CompiledShaderI
 static size_t TableSetFindHashed(const ShaderRecompiler::IR::CompiledShaderInfo& program,
                                  const ShaderRecompiler::IR::ResourceSnapshot& snapshot, bool soft, const TableSetList& list) {
 	if (list.empty()) return list.size();
-	// KYTY_PERF_BATCH3 (test switch, 11.11 night batch 3): the first set (the last one found) is tried before the hash; the
+	// 11.11 night batch 3 (the only path): the first set (the last one found) is tried before the hash; the
 	// first match in list order is index 0 when it matches, so the answer is the same. KYTY_CHECK_BATCH3=2: both, compared.
 	static const int batch3 = [] {
 		const char* check = std::getenv("KYTY_CHECK_BATCH3");
 		if (check != nullptr && check[0] == '2') return 2;
-		const char* value = std::getenv("KYTY_PERF_BATCH3");
-		return value != nullptr && value[0] == '1' ? 1 : 0;
+		return 1; // the only path (walk ABBA 11.11: +1.5%, with the BDA read memo)
 	}();
 	if (batch3 != 0 && TableSetMatches(program, snapshot, soft, list[0]->words)) {
 		if (batch3 == 1) return 0;

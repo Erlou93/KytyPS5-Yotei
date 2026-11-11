@@ -3805,7 +3805,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRange(uint64_t vaddr, uint64_
 }
 
 namespace {
-// KYTY_PERF_BATCH3 (test switch, 11.11 night batch 3): read-only device-address ranges remembered like the
+// 11.11 night batch 3 (the only path): read-only device-address ranges remembered like the
 // obtain memo (same proof - the buffer registry and the range's CPU-dirty tracker regions unchanged since a call left the
 // range CPU-clean; the BDA path has no image sync, so no image condition). A hit skips FindBuffer and SynchronizeBuffer,
 // which would claim nothing. KYTY_CHECK_BATCH3=2 runs the full path on a hit and compares the buffer and offset.
@@ -3817,11 +3817,7 @@ bool BdaMemoCheck() {
 	return on;
 }
 bool BdaMemoOn() {
-	static const uint32_t fixed = [] {
-		const char* value = std::getenv("KYTY_PERF_BATCH3");
-		return value != nullptr && value[0] == '1' ? 1u : 0u;
-	}();
-	return BdaMemoCheck() || fixed != 0u;
+	return true; // the only path (walk ABBA 11.11 with the table-set first try: 20.01/20.05 -> 20.25/20.41 fps)
 }
 constexpr size_t kBdaMemoSlots = 4096;
 ObtainMemoEntry  g_bda_memo[kBdaMemoSlots]; // GPU thread
