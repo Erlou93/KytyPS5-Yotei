@@ -47,15 +47,19 @@ of system memory in play; with 16 GB Windows runs out of memory and pages to dis
    `hints\PPSA26344_02.002.000.kyhints`. The launcher finds those shaders in your game files and compiles them; this
    takes a few minutes and runs only once. Until the hints are imported, **Precompile** and **Play** stay disabled, and
    **Play** stays disabled until the precompile has finished (a paused one finishes with *Continue precompiling*).
-   Without hints the first hours stutter while shaders compile during play. The v0.1.6 hints (7,014 shaders, 8,188
-   pipelines) cover the game **from the start to the Snake fight, the open world and further areas**: other areas
-   compile their shaders while you play, with short stutters the first time you reach them. Shaders compiled while
-   playing are saved, so the next visit is smooth.
+   Without hints the first hours stutter while shaders compile during play. The v0.1.6 hints (11,969 shaders, 16,117
+   pipelines: ours plus a large set a player shared from far into the game) cover the game **from the start to the
+   Snake fight, the open world and much further**; the precompile takes several minutes (longer on CPUs with fewer
+   cores). Other areas compile their shaders while you play, with short stutters the first time you reach them.
+   Shaders compiled while playing are saved, so the next visit is smooth. When a later version ships new hints, the
+   launcher asks for the import again. At every game start the window title shows **"preparing shaders N%"** while the
+   game waits for the prepared shaders (a few seconds after a finished precompile).
 4. **Graphics mode:** the game's own *Performance* mode is the one tested. In *Quality* mode the game changes its
    internal resolution all the time, which makes the screen flicker in this build; the **Render at 1080p** mod
    (launcher, Mods page; on by default on 1.512 and 2.002 since v0.1.3, also in cutscenes) keeps it steady. The
    **Shorter detail distance (LOD 0.4)** mod (1.512) gives the largest speed-up
    (about +16%, +29% while walking) at the cost of simpler distant objects.
+   The launcher's default window is **1920×1080** (the game renders at 1080p; a smaller window only makes it blurrier).
 5. **Performance panel:** F2 shows or hides it in game, Shift+F2 shows its details (frame time, CPU waiting on the GPU,
    draw calls, shader compiles, memory). The launcher's Overlay option shows it from the start.
 6. **If the game crashes:** every run writes a log to `_Logs` next to the emulator (the newest 10 are kept). Launcher,
@@ -65,29 +69,23 @@ of system memory in play; with 16 GB Windows runs out of memory and pages to dis
 
 The package has the same steps with pictures in `KytyPS5-Yotei-Player-Guide.pdf`.
 
-What to expect: on the test PC (Ryzen 7 9800X3D, RTX 5070 Ti) the game runs at roughly 15-17 fps while walking through
-towns and 21-25 fps in the open world with the default settings, more with the mods above. The emulator's GPU work runs on four threads, each on its own
+What to expect: on the test PC (Ryzen 7 9800X3D, RTX 5070 Ti) the game runs at roughly 19-20 fps while walking through
+towns and 26-27 fps riding through the open world with the default settings (test runs of 11.11), more with the mods above. The emulator's GPU work runs on four threads, each on its own
 physical CPU core, chosen automatically for the processor (`KYTY_GPU_THREAD_CPUS=off` turns that off).
 
-Since v0.1.6:
-- **Slow read-back from the graphics card is detected.** On some PCs reading GPU results back over PCIe is very slow (an
-  i9-12900K + RTX 5090 read at about 19 MB/s, against about 1 GB/s on the test PC, and stayed near 10 fps). The emulator
-  times the first reads and, when they are slow, copies the data through the GPU instead. The log shows
-  `BAR_READS fast` or `BAR_READS slow`; `KYTY_BAR_READS=0` / `=1` forces the choice.
-- **"Enable readback" (Graphics & display) is on by default** and is switched on once for existing settings: players
-  reported that faces stayed missing without it. It costs about 2% fps in the town walk; you can turn it off again.
-- Shader precompile uses 8 threads by default (was 6).
+What changed in this version: see `docs/RELEASE-NOTES-v0.1.6.md` (all changes since v0.1.5).
 
 Known slow spots:
-- Some in-engine cutscenes are still slower than play: the cutscene after the Snake fight runs at about 8 fps (5.5 in
-  v0.1.3). The **Render at 1080p** mod (on by default) keeps cutscenes at 1080p instead of up to 4K.
+- Some in-engine cutscenes are still slower than play: the cutscene after the Snake fight runs at about 11-12 fps
+  (its heaviest part about 8 fps; 5.5 in v0.1.3). The **Render at 1080p** mod (on by default) keeps cutscenes at 1080p instead of up to 4K.
 - Scenes with a lot of fire, such as parts of the Snake fight, can drop to about 10 fps.
 
 **Known issue: graphics memory grows over a long session.** Each change of scene (especially cutscenes) leaves unused
 gaps in the graphics card's memory. Since v0.1.5 the emulator moves textures out of nearly empty memory blocks so
-whole blocks can be released (texture relocation); this reclaims part of it, not all. **Texture relocation is new:
-if you see textures, trees or other objects disappearing, flickering or turning black, please open an issue** with a
-screenshot, the place and how long you had been playing. On a 16 GB card the usage goes from about
+whole blocks can be released (texture relocation); this reclaims part of it, not all. Since v0.1.6 a guard keeps the
+old copies of moved textures for 10 s and logs any late use (`TEXMOVE_STALE_USE`; none in our tests over 1,888 moved
+textures). **If you see textures, trees or other objects disappearing, flickering or turning black, please open an
+issue** with a screenshot (with the time), the place and the bug report zip (Advanced page). On a 16 GB card the usage goes from about
 12 GB after loading to 13.5-15 GB after 30-60 minutes; near the card's limit the driver moves data to system RAM and
 the frame rate drops. Watch "Vulkan budget" in the performance panel (Shift+F2): if it gets close to the limit and the
 game slows down, save, quit and start again.
@@ -96,8 +94,9 @@ game slows down, save, quit and start again.
 the draws that need it for a few frames instead of making the game wait (otherwise new areas would freeze for seconds).
 Sometimes such an incomplete frame gets into an effect the game carries from frame to frame, and shadows and lit
 surfaces turn into a blocky checkered pattern that stays. **Fix: quit to the main menu and load your save** (no
-restart needed). A proper fix (pipeline libraries, so new shaders no longer need draws skipped) is planned for the next
-version. Reported as issue #11.
+restart needed). Since v0.1.6 it is rarer: the game waits for the prepared shaders at the start and the hints cover
+much more of the game, so fewer draws are skipped. A proper fix (pipeline libraries, so new shaders no longer need
+draws skipped) is planned and replaces this workaround. Reported as issue #11.
 
 **Touch pad (e.g. "Swipe up" prompts):** a DualSense's touch pad works as on the PS5. With a keyboard and mouse press
 **F6**, move the mouse to swipe, and press F6 again to leave touch pad mode. With other controllers assign a button to
@@ -203,7 +202,7 @@ until their replacement lands.
 
 | Area (work item) | Switches | What may differ from the PS5 |
 |---|---|---|
-| Memory read through pointers before it has a buffer (M06) | BDA fallback (code) | such a read goes straight to the game's memory in RAM: the 2 MiB pieces the GPU used are made readable by the card (pinned RAM, shown as the card's shared memory; ~0.4 GB in a cutscene). A piece's first use in a session reads zeros once; the pieces are remembered in `_PipelineCache\<title>_<version>.bda_granules`, so the next start serves them from the beginning |
+| Memory read through pointers before it has a buffer (M06) | BDA fallback (code) | such a read goes straight to the game's memory in RAM: the 2 MiB pieces the GPU used are made readable by the card (pinned RAM, shown as the card's shared memory). Since v0.1.6 the game's memory is made readable when the game maps it (about 4 GB pinned), so such reads no longer return zeros the first time |
 | GPU-written memory (D6) | `DIAG_BDA_STORE_TRACK`, `DIAG_BDA_STORE_UNTRACKED`, `DIAG_BDA_PIN_FAULTED`, `DIAG_FAULT_WINDOW_KB`, `DIAG_SCALAR_READS_IGNORE_ADDRESS_WRITES` | pages the GPU writes through pointers are tracked late and kept generously; rare stale reads |
 | Image memory shared by several images (D4/D5) | `WORKAROUND_ALIAS_SYNC` | transient targets copied between aliases; some post-processing (screen-space GI filter) may be off; in the game's Quality mode, where the internal resolution changes all the time, the screen can flicker and textures can vanish for a moment (use the "Render at 1080p" mod). The exact replacement exists (`KYTY_FIX_IMAGE_MEMORY_OWNER=1`: no flicker) but costs 10-15% fps, so it is not the default yet |
 | Stencil and depth metadata (D8) | `WORKAROUND_STENCIL_PLANE_SYNC`, `WORKAROUND_STENCIL_STORAGE_SHADOW`, `WORKAROUND_PRESERVE_STENCIL`, `WORKAROUND_STENCIL_ALIAS_COPY`, `WORKAROUND_HTILE_FULL_RANGE`, `FIX_HTILE_RMW_CLEAR` (code), `WORKAROUND_DEPTH_ENCODING_LENIENT` | stencil kept as copies, HTILE emulated as "full range"; occasional missing masks or shadow tiles |
