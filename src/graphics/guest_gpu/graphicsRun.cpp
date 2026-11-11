@@ -1561,7 +1561,7 @@ void GuestGpu::ResolveHelperThread(uint32_t index) {
 	}();
 	constexpr uint64_t PlanMargin = 32;
 	while (auto task = tasks.Pop()) {
-		if (helper_plans && task->member && (!task->dispatch || RenderExecutor::ComputePlansOn())) {
+		if (helper_plans && task->member && !task->dispatch) {
 			const uint64_t claimed = m_tasks_claimed.load(std::memory_order_relaxed);
 			const uint64_t lead    = task->seq > claimed ? task->seq - claimed : 0u;
 			task->lead             = static_cast<uint32_t>(std::min<uint64_t>(lead, UINT32_MAX));

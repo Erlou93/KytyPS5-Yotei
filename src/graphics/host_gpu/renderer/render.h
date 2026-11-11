@@ -362,10 +362,6 @@ public:
 	               uint64_t index_address = 0, const DrawIndirectGpuArgs* gpu_indirect = nullptr);
 	// N4.2b: hands the running draw's buffer plan entries to the buffer cache's check (null: none).
 	void PlanBuffersBegin();
-	// Way B (KYTY_PERF_COMPUTE_PLANS=1, test switch 11.11): a helper plans a dispatch's read buffers (programs and
-	// PeekStageBuffers) into its slot; the dispatch takes the answers that still hold.
-	void               PeekAheadDispatch(ResolvedDraw* slot, uint32_t distance);
-	[[nodiscard]] static bool ComputePlansOn();
 	// KYTY_DIAG_GPU_BURN_NS / KYTY_DIAG_GPU_BURN_AT (measurement only): GPU-thread spin at one of these places.
 	// InvalidateCaller: the guest thread whose write fault reads GPU-modified bytes back, not the GPU thread.
 	// Readback and Pm4 (measurement only): a GPU-thread guest read of GPU-written data, a PM4 packet of the GPU thread.
