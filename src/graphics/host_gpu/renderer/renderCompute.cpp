@@ -495,6 +495,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// KYTY_CHECK_CHUNKS=2 (project 15, the oracle v2): a chunk-member dispatch is prepared once more before its preparation;
 	// the two preparations' prints must be equal (renderDraw.cpp ChunkCheckFirst; the commit uses the second).
 	const bool chunk_check = ChunkCensus::CheckOn() && ChunkCensus::t_member;
+	// Way B (KYTY_PERF_COMPUTE_PLANS=1): the helper's read buffer entries for this dispatch, as for a draw
+	// (renderDraw.cpp PlanBuffersScope; KYTY_CHECK_PLAN_BUFFERS=2 checks every planned acquisition instead).
+	const bool use_plan = ComputePlansOn() && !ChunkCensus::CheckOn() && !BufferCache::PlanBufferCheck() && PlanPresent() &&
+	                      PlanProgramsHold();
+	struct PlanBuffersScope {
+		bool on;
+		~PlanBuffersScope() {
+			if (on) BufferCache::SetPlanBuffers(nullptr);
+		}
+	} const plan_buffers_scope {ComputePlansOn() && (BufferCache::PlanBufferCheck() || use_plan)};
+	if (plan_buffers_scope.on) PlanBuffersBegin();
 	for (uint32_t preparation = chunk_check ? 0u : 1u; preparation < 2u; preparation++) {
 		// The first preparation (the oracle's) into bindings of its own.
 		auto&             prepared       = preparation == 0u ? ChunkScratchBindings(4) : bindings;

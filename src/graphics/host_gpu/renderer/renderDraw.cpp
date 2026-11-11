@@ -3956,6 +3956,7 @@ DrawRenderState* RenderExecutor::TakeResolvedState(const ShaderIndirectDrawInfo&
 
 bool RenderExecutor::TakeResolvedDispatch(ShaderComputeInputInfo& input_info, ShaderProgram& program) {
 	auto* const resolved = m_resolved_draw;
+	m_slot_taken         = false;
 	if (resolved == nullptr || !resolved->is_compute || std::exchange(resolved->consumed, true) ||
 	    !std::ranges::equal(input_info.workgroup_counts, resolved->compute.workgroup_counts) ||
 	    !m_context.GetPipelineCache().AdoptResolvedPrograms(*resolved->stages)) {
@@ -3964,7 +3965,64 @@ bool RenderExecutor::TakeResolvedDispatch(ShaderComputeInputInfo& input_info, Sh
 	input_info             = resolved->compute;
 	program                = resolved->compute_program;
 	t_compute_program_path = 3u; // KYTY_TRACE_DISPATCH_CENSUS
+	m_slot_taken           = true; // way B: the dispatch runs on the slot's programs (its plan may be used)
 	return true;
+}
+
+bool RenderExecutor::ComputePlansOn() {
+	static const bool on = [] {
+		const char* env = std::getenv("KYTY_PERF_COMPUTE_PLANS");
+		const bool  set = env != nullptr && env[0] == '1';
+		if (set) std::fprintf(stderr, "PERF_COMPUTE_PLANS=1: helpers plan the dispatches' read buffers\n");
+		return set;
+	}();
+	return on;
+}
+
+// Way B (KYTY_PERF_COMPUTE_PLANS=1): a dispatch's plan - the predicted program and its read buffer entries, as PeekAhead
+// makes them for a draw's stages (no targets, pipeline or images). Without a write; the entries are answers only while
+// their proof holds (BufferCache::PeekProofHolds), and the dispatch uses them only when the adopted program is the
+// predicted one (PlanProgramsHold).
+void RenderExecutor::PeekAheadDispatch(ResolvedDraw* slot, uint32_t distance) {
+	const bool on_helper = !GuestGpu::IsGpuThread();
+	auto&      a         = on_helper ? t_ahead_helper : g_ahead;
+	a.planned++;
+	a.peeked[AheadBucket(distance)]++;
+	if (slot == nullptr || slot->empty || !slot->is_compute || !PipelineCache::StagesAdoptable(*slot->stages)) {
+		a.gated[1]++;
+		return;
+	}
+	slot->ahead.key_valid = false;
+	slot->ahead.planned   = false;
+	slot->ahead.distance  = distance;
+	slot->ahead.images.clear();
+	slot->ahead.buffers.clear();
+	auto&             pc   = m_context.GetPipelineCache();
+	static const bool slim = std::getenv("KYTY_CHECK_PEEK") == nullptr && std::getenv("KYTY_CHECK_CHUNKS") == nullptr;
+	t_peek_slim            = slim;
+	++t_translator;
+	if (!pc.PeekAdoptAhead(*slot->stages, distance)) {
+		--t_translator;
+		a.compile++;
+		return;
+	}
+	slot->ahead.planned = true;
+	PipelineCache::AheadSaved saved;
+	PipelineCache::InstallAhead(*slot->stages, saved);
+	for (uint32_t i = 0; i < PipelineCache::StageCount(*slot->stages); i++) {
+		const auto* program   = PipelineCache::AheadProgram(*slot->stages, i);
+		const auto* resources = PipelineCache::StageResources(*slot->stages, i);
+		if (program == nullptr || resources == nullptr) continue;
+		PeekStageBuffers(*program, *resources, PipelineCache::StageRecord(*slot->stages, i), distance, slot->ahead.buffers);
+	}
+	PipelineCache::RestoreAhead(*slot->stages, saved);
+	--t_translator;
+	if (on_helper) {
+		for (size_t i = 0; i < t_translator_writes.size(); i++) {
+			if (t_translator_writes[i] != 0) g_helper_translator_writes[i].fetch_add(t_translator_writes[i], std::memory_order_relaxed);
+			t_translator_writes[i] = 0;
+		}
+	}
 }
 
 void RenderExecutor::ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept {
@@ -3987,6 +4045,10 @@ bool RenderExecutor::ResolveTaskInto(ResolvedDraw& slot, const ResolveTask& task
 		slot.fault = task.fault;
 	}
 	slot.empty = !ok;
+	if (ok && task.dispatch && task.build_plan) {
+		PeekAheadDispatch(&slot, std::min(task.lead, 127u)); // way B: the dispatch's read buffers
+		if (slot.ahead.planned) t_helper_plans_made++;
+	}
 	if (ok && !task.dispatch && task.build_plan) {
 		// N5.3: the helper builds the draw's plan while the slot is still its own (before it is marked ready).
 		PeekAhead(&slot, *task.context, *task.user_config, *task.shaders, task.indexed, task.draw_count, 1u, task.index_type,
