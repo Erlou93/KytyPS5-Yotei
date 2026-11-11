@@ -1716,7 +1716,7 @@ void Report(TargetMemo& m) {
 	             static_cast<unsigned long long>(m.hits), static_cast<unsigned long long>(m.stored));
 }
 // T1b: the mode (KYTY_PERF_TARGET_MEMO live A/B test switch; KYTY_CHECK_TARGET_MEMO=2 the check), its counters.
-// T1b is the only path since 10.11 (Rafał: "zostaw włączone"; live A/B +1.17/-2.32/-1.12%, the target state 3.19 -> 2.05
+// T1b is the only path since 10.11 (live A/B +1.17/-2.32/-1.12%, the target state 3.19 -> 2.05
 // ms/frame): 1, or 2 with KYTY_CHECK_TARGET_MEMO=2 (diagnostic).
 uint32_t TargetMemoMode() {
 	static const uint32_t mode = [] {

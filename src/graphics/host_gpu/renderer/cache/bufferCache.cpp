@@ -2034,12 +2034,12 @@ bool BufferCache::InDirectRange(uint64_t vaddr, uint64_t size) const {
 
 
 // A CPU write fault into a GPU-modified page of the data ring (two halves, each reused every second game frame; the game
-// overwrites what it allocates there and, before reusing a half, waits for the GPU work of the frame that last used it,
-// YOTEI-ENGINE 7.6 step 5) drops the page's GPU bytes written by the work of game frame W-2 or older (W: the frame whose
+// overwrites what it allocates there and, before reusing a half, waits for the GPU work of the frame that last used
+// it) drops the page's GPU bytes written by the work of game frame W-2 or older (W: the frame whose
 // half the game writes now) instead of downloading them (and waiting for their writer). Bytes of frames W-1 and W, and
 // bytes whose frame is not known, are downloaded as before. Returns true when no GPU byte is left in the page. Frames
 // are the game's, from its submissions (GuestGpu::Enqueue); 8.11: ~99% of the ring write faults are dropped (the
-// execution-thread frame boundary used before dropped ~60% in the cutscene, ~10% walking), Rafał's play: image OK.
+// execution-thread frame boundary used before dropped ~60% in the cutscene, ~10% walking), a long play test: image OK.
 // DropDeadRingBytes' verdict without its changes: the page is in the data ring and it has GPU bytes, all of them dead.
 bool BufferCache::RingBytesAllDead(uint64_t vaddr) {
 	const uint64_t write_frame = g_ring_game_write_frame.load(std::memory_order_acquire);

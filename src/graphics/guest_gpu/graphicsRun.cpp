@@ -2550,7 +2550,7 @@ void GuestGpu::Enqueue(Submission submission) {
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	// The game frame whose data-ring half each submission writes (DropDeadRingBytes). Frame F ends with its
-	// SuspendPoint, then the context kicks and the graphics submission of frame F (YOTEI-ENGINE 7.6 steps 4-7);
+	// SuspendPoint, then the context kicks and the graphics submission of frame F;
 	// everything after that graphics submission is frame F+1. Counted under the queue lock, so a kick another thread
 	// enqueues right after the SuspendPoint sees the new count. The execution thread runs the compute queues out of
 	// order with the graphics queue, so a frame boundary in its ticks would not separate the game's frames.
