@@ -2095,6 +2095,7 @@ void BufferCache::NoteDirectGpuWrite(uint64_t vaddr, uint64_t size, const void* 
 		master.Refresh(); // once, not per listed write
 		std::erase_if(m_direct_gpu_writes, [&](const DirectGpuWrite& w) { return master.IsFree(w.tick); }); RebuildDirectWriteSpans();
 	}
+	g_page_proof_epoch.fetch_add(1, std::memory_order_release); // (kernel/memory.cpp page cache)
 	auto& write = m_direct_gpu_writes.emplace_back(DirectGpuWrite {vaddr, vaddr + size, m_scheduler.CurrentTick()});
 	if (m_direct_write_spans.size() != m_direct_ranges.size()) RebuildDirectWriteSpans();
 	bool spanned = false;
@@ -4207,6 +4208,7 @@ void BufferCache::IssueEagerReadbacks() {
 		if (!any) continue;
 		auto done = std::make_shared<std::atomic_bool>(false);
 		m_scheduler.DeferPriorityOperation([done] { done->store(true, std::memory_order_release); });
+		g_page_proof_epoch.fetch_add(1, std::memory_order_release); // (kernel/memory.cpp page cache)
 		m_eager_readbacks.push_back({.start = hot.start, .end = hot.end, .generation = hot.generation,
 		                             .tick = m_scheduler.CurrentTick(), .done = std::move(done),
 		                             .bytes = std::move(bytes)});
