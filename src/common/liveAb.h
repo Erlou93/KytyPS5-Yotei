@@ -35,6 +35,7 @@ enum class Switch : uint32_t {
 	DiagCeilingFreePasses,     // KYTY_DIAG_CEILING_FREE_PASSES (measurement only, APPROXIMATION)
 	DiagCeilingSrtNoWait,      // KYTY_DIAG_CEILING_SRT_NO_WAIT (measurement only, APPROXIMATION)
 	DiagTablesAssume,          // KYTY_DIAG_TABLES_ASSUME_UNCHANGED (measurement only, APPROXIMATION)
+	DiagAdoptAssume,           // KYTY_DIAG_ADOPT_ASSUME_UNCHANGED (measurement only, APPROXIMATION)
 	Count
 };
 
@@ -44,6 +45,10 @@ static_assert(SwitchCount <= 192, "the listed-switch mask is 192 bits");
 // The live value of each switch plus one; 0 while it is not toggled live. Only the GPU thread writes them, at frame
 // boundaries; any thread reads them (relaxed: no other data is published with a value).
 inline constinit std::atomic<uint32_t> g_live_values[SwitchCount] {};
+// Draws and dispatches executed in the current phase (the execution thread counts them; EndPhase prints them per frame):
+// a ceiling is valid only while the game's work per frame stays the same in both phases.
+inline constinit std::atomic<uint64_t> g_phase_draws {0};
+inline constinit std::atomic<uint64_t> g_phase_dispatches {0};
 
 // A switch gate's value: the live value while KYTY_LIVE_AB toggles the switch, else `fixed` (the gate's once-read
 // environment value). Callers read it once per call (per request, per draw) and use that value for the whole call.

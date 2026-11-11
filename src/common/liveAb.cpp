@@ -51,6 +51,9 @@ constexpr SwitchInfo Switches[] = {
     // Measurement only (APPROXIMATION, walk ceilings 9.11): whether a bindless table use with an unchanged size and
     // fields skips its check, translation and slot refresh; a table skipped in one phase is checked at its next use.
     {Switch::DiagTablesAssume, "KYTY_DIAG_TABLES_ASSUME_UNCHANGED", 1},
+    // Measurement only (APPROXIMATION, 11.11 ceiling of the per-draw checks): whether the check of a helper's logged
+    // reads at adoption (kernel/memory.cpp FastVerifyLoggedReads) is skipped - the helper's result is taken as unchanged.
+    {Switch::DiagAdoptAssume, "KYTY_DIAG_ADOPT_ASSUME_UNCHANGED", 1},
     // Project 15 way B P1 (test switch): a read-only buffer binding with a ready plan entry whose proof holds takes the
     // binding the helper computed (handle, aligned offset, range, offset byte, record stride) instead of RebindBuffers'.
 };
@@ -314,11 +317,15 @@ void EndPhase(State& state, const Config& config, uint32_t frame) {
 	result.valid   = state.frame_ms.size() >= 2;
 	const auto   intervals = state.frame_ms.size();
 	const double ft_mean   = intervals != 0 ? result.ms / static_cast<double>(intervals) : 0.0;
+	const uint64_t draws      = g_phase_draws.exchange(0, std::memory_order_relaxed);
+	const uint64_t dispatches = g_phase_dispatches.exchange(0, std::memory_order_relaxed);
 	std::fprintf(stderr,
 	             "PERF live_ab phase=%s cycle=%u frames=%u ms=%.0f fps=%.3f gpu_thread_busy_ms=%.0f fence_wait_ms=%.0f "
-	             "ft_mean_ms=%.1f ft_median_ms=%.1f frame=%u\n",
+	             "ft_mean_ms=%.1f ft_median_ms=%.1f frame=%u draws_per_frame=%.0f dispatches_per_frame=%.0f\n",
 	             PhaseName(config, state.phase).c_str(), state.cycle, result.frames, result.ms, result.fps,
-	             result.busy_ms, result.wait_ms, ft_mean, Median(state.frame_ms), frame);
+	             result.busy_ms, result.wait_ms, ft_mean, Median(state.frame_ms), frame,
+	             result.frames != 0 ? static_cast<double>(draws) / result.frames : 0.0,
+	             result.frames != 0 ? static_cast<double>(dispatches) / result.frames : 0.0);
 	result.frame_ms = std::move(state.frame_ms);
 	state.frame_ms  = {};
 	state.cycle_results[state.phase] = std::move(result);

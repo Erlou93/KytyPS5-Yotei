@@ -1279,8 +1279,10 @@ void GuestGpu::ExecutionThread() {
 			if (kind == GpuOperationKind::DrawIndex || kind == GpuOperationKind::DrawAuto || kind == GpuOperationKind::DrawIndirect) {
 				draws_in_frame++;
 				Common::SlowFrame::CountOne(Common::SlowFrame::Draws); // KYTY_TRACE_SLOW_FRAMES
+				Common::LiveAb::g_phase_draws.fetch_add(1, std::memory_order_relaxed);
 			} else if (kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect) {
 				Common::SlowFrame::CountOne(Common::SlowFrame::Dispatches); // KYTY_TRACE_SLOW_FRAMES
+				Common::LiveAb::g_phase_dispatches.fetch_add(1, std::memory_order_relaxed);
 			}
 			// KYTY_TEST_GAMEPLAY_DRAWS (default 3000, 11.11): draws per frame that count as gameplay; the open world near
 			// the inn has ~2 200, so its anchor came only when the walk reached a busier view. Recording and replay must

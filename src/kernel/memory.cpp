@@ -1691,6 +1691,17 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 		stop = count;
 		return Result::Unchanged;
 	}
+	// KYTY_DIAG_ADOPT_ASSUME_UNCHANGED=1 (measurement only, APPROXIMATION, 11.11 ceiling of the per-draw checks): the
+	// logged reads are taken as unchanged without a compare (a helper result over changed memory is used as it is).
+	static const uint32_t assume_fixed = [] {
+		const char* value = std::getenv("KYTY_DIAG_ADOPT_ASSUME_UNCHANGED");
+		return value != nullptr && value[0] == '1' ? 1u : 0u;
+	}();
+	if (Common::LiveAb::Gate(Common::LiveAb::Switch::DiagAdoptAssume, assume_fixed) != 0u) {
+		stats.entries_fast += count - begin;
+		stop = count;
+		return Result::Unchanged;
+	}
 	// Off the GPU thread nothing can be proven here. Without an active session page cache a
 	// per-call cache is used: every page is still asked the
 	// ordinary hook's questions (pending readback waited for, GPU-modified) once, and no eager readback is issued
