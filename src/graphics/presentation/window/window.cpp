@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderPrecompile.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/renderDoc.h"
@@ -760,7 +761,7 @@ void WindowContext::Run() {
 		const auto elapsed = now - title_time;
 		if (elapsed >= title_interval_ms) {
 			const auto frames = loop.presented_frames.load(std::memory_order_relaxed);
-			if (frames != 0) {
+			if (frames != 0 || g_precompile_wait_percent.load(std::memory_order_relaxed) >= 0) {
 				UpdateTitle(frames, static_cast<double>(frames - title_frames) * 1000.0 /
 				                        static_cast<double>(elapsed));
 			}
@@ -986,6 +987,10 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
 	    (has_title ? title : ""), (has_title ? ", " : ""), (has_title_id ? title_id : ""),
 	    (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""), (has_app_ver ? " " : ""),
 	    device_name, processor_name, frame_num, current_fps);
+	// The game's start waits for the shader precompile (PipelineCache::StartBackgroundCompiles).
+	if (const int percent = g_precompile_wait_percent.load(std::memory_order_relaxed); percent >= 0) {
+		text += fmt::format(" - preparing shaders {}%", percent);
+	}
 
 	SDL_SetWindowTitle(window, text.c_str());
 }

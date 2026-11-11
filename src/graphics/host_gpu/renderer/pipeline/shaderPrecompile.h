@@ -247,6 +247,9 @@ struct PrecompileProgress {
 	uint32_t other_layout_journals = 0;
 };
 [[nodiscard]] PrecompileProgress GetPrecompileProgress();
+// While the game's start waits for the shader precompile (PipelineCache::StartBackgroundCompiles): its percent for the
+// window title; -1 when not waiting.
+inline std::atomic<int> g_precompile_wait_percent {-1};
 
 class ShaderPrecompiler {
 public:

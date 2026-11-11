@@ -1546,7 +1546,31 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 
 // The renderer is complete once the GPU thread asks for a pipeline (the bindless table is built after this cache).
 void PipelineCache::StartBackgroundCompiles() {
-	if (m_precompiler != nullptr) m_precompiler->Start();
+	if (m_precompiler == nullptr) return;
+	m_precompiler->Start();
+	// KYTY_SHADER_PRECOMPILE_WAIT (default 1, 11.11): the first time, the game waits here until the precompile of the
+	// recorded shaders is done (the window title shows its percent), so gameplay never starts while the workers still
+	// translate in the background (a cold start after a translator change took ~30 s of CPU and shader misses from the
+	// first minute of play; warm, the wait is a few seconds). At most 180 s.
+	static bool waited = false;
+	if (waited) return;
+	waited                  = true;
+	static const bool wait  = [] {
+		const char* value = std::getenv("KYTY_SHADER_PRECOMPILE_WAIT");
+		return value == nullptr || value[0] != '0';
+	}();
+	if (!wait) return;
+	const auto begin = std::chrono::steady_clock::now();
+	while (m_precompiler->Busy() && std::chrono::steady_clock::now() - begin < std::chrono::seconds(180)) {
+		const auto progress = GetPrecompileProgress();
+		const int  percent  = progress.queued != 0 ? static_cast<int>(std::min<uint64_t>(99u, uint64_t {progress.finished} * 100u / progress.queued)) : 0;
+		g_precompile_wait_percent.store(percent, std::memory_order_relaxed);
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	g_precompile_wait_percent.store(-1, std::memory_order_relaxed);
+	std::fprintf(stderr, "SHADER_PRECOMPILE_WAIT ms=%lld busy=%d\n",
+	             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count()),
+	             m_precompiler->Busy() ? 1 : 0);
 }
 
 void PipelineCache::StopBackgroundCompiles() {
