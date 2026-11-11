@@ -160,9 +160,6 @@ private:
 	uint64_t              m_wait_bound  = 0;
 };
 
-// KYTY_PERF_ASYNC_FREE: waits until the worker released every buffer handed to it (before the allocator goes).
-void FlushBufferFrees();
-
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_STREAMBUFFER_H_
