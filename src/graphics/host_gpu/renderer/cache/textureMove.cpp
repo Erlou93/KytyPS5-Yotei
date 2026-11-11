@@ -194,7 +194,7 @@ void FilterRebuild() { // under the unique lock
 	for (size_t w = 0; w < words.size(); w++) g_filter[w].store(words[w], std::memory_order_relaxed);
 }
 // The image entries of every descriptor update template (their data holds VkDescriptorImageInfo at offset + n * stride).
-std::mutex                                                                  g_template_mutex;
+std::shared_mutex                                                           g_template_mutex; // written at creation only
 std::unordered_map<uint64_t, std::vector<VkDescriptorUpdateTemplateEntry>> g_templates;
 
 bool ImageDescriptor(VkDescriptorType type) {
@@ -210,7 +210,7 @@ void CheckWrites(uint32_t count, const VkWriteDescriptorSet* writes, const char*
 }
 void CheckTemplate(VkDescriptorUpdateTemplate update, const void* data, const char* path) {
 	if (!g_texmove_watch.load(std::memory_order_relaxed) || data == nullptr) return;
-	std::lock_guard lock(g_template_mutex);
+	std::shared_lock lock(g_template_mutex);
 	const auto      found = g_templates.find(reinterpret_cast<uint64_t>(update));
 	if (found == g_templates.end()) return;
 	for (const auto& entry: found->second) {
@@ -270,7 +270,7 @@ VKAPI_ATTR VkResult VKAPI_CALL Wrap_vkCreateDescriptorUpdateTemplate(VkDevice de
 			if (ImageDescriptor(info->pDescriptorUpdateEntries[i].descriptorType))
 				images.push_back(info->pDescriptorUpdateEntries[i]);
 		}
-		std::lock_guard lock(g_template_mutex);
+		std::unique_lock lock(g_template_mutex);
 		g_templates[reinterpret_cast<uint64_t>(*update)] = std::move(images);
 	}
 	return result;
@@ -384,7 +384,7 @@ void ExpireRetired(GraphicContext& graphics, uint64_t now, bool all) {
 		GraphicContext::DeviceMemoryFrees(frees_after, bytes_after);
 		std::fprintf(stderr,
 		             "TEXMOVE_RETIRE frame=%llu time=%s batch_frame=%llu views=%zu images=%zu returned=%llu returned_MiB=%llu "
-		             "stale_uses_total=%llu checked_total=%llu\n",
+		             "stale_uses_total=%llu filter_hits_total=%llu\n",
 		             static_cast<unsigned long long>(g_guard_frame.load()), ClockText().c_str(),
 		             static_cast<unsigned long long>(batch.frame), batch.views.size(), batch.images.size(),
 		             static_cast<unsigned long long>(frees_after - frees_before),
