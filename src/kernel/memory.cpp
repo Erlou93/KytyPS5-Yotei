@@ -1753,13 +1753,22 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 			return Result::NeedsReader;
 		}
 		// The run: the following entries of the same kind that continue it in memory and in the byte store.
-		uint64_t run_size = head.size;
-		size_t   next     = index + 1;
+		// KYTY_PERF_VERIFY_GROUP=1 (test switch, 11.11, topic "reads from the card"): the run continues in memory even where the
+		// byte store does not (the address check, the image-watch check and the page proofs once for the group); the bytes are
+		// then compared piece by piece where the store is contiguous. The same comparisons, fewer proofs.
+		static const bool group = [] {
+			const char* value = std::getenv("KYTY_PERF_VERIFY_GROUP");
+			return value != nullptr && value[0] == '1';
+		}();
+		uint64_t run_size  = head.size;
+		size_t   next      = index + 1;
+		bool     scattered = false; // the byte store is not contiguous over the group
 		while (next < count) {
 			const auto& entry = log.entries[next];
-			if (entry.kind != head.kind || !plain(entry) || entry.address != head.address + run_size ||
-			    entry.first != head.first + run_size) {
-				break;
+			if (entry.kind != head.kind || !plain(entry) || entry.address != head.address + run_size) break;
+			if (entry.first != head.first + run_size) {
+				if (!group) break;
+				scattered = true;
 			}
 			run_size += entry.size;
 			++next;
@@ -1808,6 +1817,50 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 			return Result::NeedsReader;
 		}
 		const uint8_t* const expected = log.bytes.data() + head.first;
+		if (scattered) {
+			// KYTY_PERF_VERIFY_GROUP: the group's pieces (entries contiguous in the byte store), each compared as a run would be.
+			const bool     ordinary = head.kind == Ir::ReadLog::Kind::Ordinary;
+			const bool     armed    = ordinary && GuestImageReadArmed(head.address, run_size);
+			const uint8_t* guest    = reinterpret_cast<const uint8_t*>(head.address);
+			if (armed) {
+				thread_local std::vector<uint8_t> watched_group;
+				watched_group.resize(run_size);
+				ReadGuestPlain(watched_group.data(), head.address, run_size);
+				guest = watched_group.data();
+			}
+			size_t piece = index;
+			while (piece < next) {
+				const auto& first_entry = log.entries[piece];
+				uint64_t    piece_size  = first_entry.size;
+				size_t      piece_end   = piece + 1;
+				while (piece_end < next && log.entries[piece_end].first == first_entry.first + piece_size) {
+					piece_size += log.entries[piece_end].size;
+					++piece_end;
+				}
+				const uint8_t* const piece_expected = log.bytes.data() + first_entry.first;
+				if (ordinary) {
+					if (std::memcmp(guest + (first_entry.address - head.address), piece_expected, static_cast<size_t>(piece_size)) != 0) {
+						stop = piece;
+						return Result::Changed;
+					}
+					stats.entries_fast += piece_end - piece;
+					++stats.runs;
+				} else {
+					spans[pending]        = {first_entry.address, piece_expected, piece_size};
+					span_entry[pending]   = piece;
+					span_entries[pending] = piece_end - piece;
+					if (++pending == kMaxPending) {
+						const auto flushed = flush();
+						if (flushed != Result::Unchanged) {
+							return flushed;
+						}
+					}
+				}
+				piece = piece_end;
+			}
+			index = next;
+			continue;
+		}
 		if (head.kind == Ir::ReadLog::Kind::Ordinary) {
 			// The ordinary hook said "clean": the reader copies from the guest address itself (through ReadGuestPlain, so the
 			// compare must see the same bytes without a fault on a page under the image read watch).
