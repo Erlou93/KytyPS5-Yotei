@@ -4058,6 +4058,28 @@ static uint64_t TableSetSnapshotHash(const ShaderRecompiler::IR::CompiledShaderI
 static size_t TableSetFindHashed(const ShaderRecompiler::IR::CompiledShaderInfo& program,
                                  const ShaderRecompiler::IR::ResourceSnapshot& snapshot, bool soft, const TableSetList& list) {
 	if (list.empty()) return list.size();
+	// KYTY_PERF_BATCH3 (test switch, 11.11 night batch 3): the first set (the last one found) is tried before the hash; the
+	// first match in list order is index 0 when it matches, so the answer is the same. KYTY_CHECK_BATCH3=2: both, compared.
+	static const int batch3 = [] {
+		const char* check = std::getenv("KYTY_CHECK_BATCH3");
+		if (check != nullptr && check[0] == '2') return 2;
+		const char* value = std::getenv("KYTY_PERF_BATCH3");
+		return value != nullptr && value[0] == '1' ? 1 : 0;
+	}();
+	if (batch3 != 0 && TableSetMatches(program, snapshot, soft, list[0]->words)) {
+		if (batch3 == 1) return 0;
+		const uint64_t h = TableSetSnapshotHash(program, snapshot, soft);
+		size_t         k = 0;
+		while (k < list.size() && !(list[k]->key_hash == h && TableSetMatches(program, snapshot, soft, list[k]->words))) k++;
+		static uint64_t compared = 0, bad = 0;
+		compared++;
+		if (k != 0 && ++bad <= 8u) std::fprintf(stderr, "CHECK_BATCH3 table set bad (index %zu)\n", k);
+		if ((compared & 0xfffffu) == 0u) {
+			std::fprintf(stderr, "PERF batch3_table_check compared=%llu bad=%llu\n", static_cast<unsigned long long>(compared),
+			             static_cast<unsigned long long>(bad));
+		}
+		return 0;
+	}
 	const uint64_t hash = TableSetSnapshotHash(program, snapshot, soft);
 	for (size_t k = 0; k < list.size(); k++) {
 		if (list[k]->key_hash == hash && TableSetMatches(program, snapshot, soft, list[k]->words)) return k;

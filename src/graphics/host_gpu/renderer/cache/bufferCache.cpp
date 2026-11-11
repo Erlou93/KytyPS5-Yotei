@@ -3804,9 +3804,62 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRange(uint64_t vaddr, uint64_
 	return PeekChecked(peek, vaddr, size, is_written, true, [&] { return ObtainBdaRangePath(vaddr, size, is_written, id); });
 }
 
+namespace {
+// KYTY_PERF_BATCH3 (test switch, 11.11 night batch 3): read-only device-address ranges remembered like the
+// obtain memo (same proof - the buffer registry and the range's CPU-dirty tracker regions unchanged since a call left the
+// range CPU-clean; the BDA path has no image sync, so no image condition). A hit skips FindBuffer and SynchronizeBuffer,
+// which would claim nothing. KYTY_CHECK_BATCH3=2 runs the full path on a hit and compares the buffer and offset.
+bool BdaMemoCheck() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_CHECK_BATCH3");
+		return value != nullptr && value[0] == '2';
+	}();
+	return on;
+}
+bool BdaMemoOn() {
+	static const uint32_t fixed = [] {
+		const char* value = std::getenv("KYTY_PERF_BATCH3");
+		return value != nullptr && value[0] == '1' ? 1u : 0u;
+	}();
+	return BdaMemoCheck() || fixed != 0u;
+}
+constexpr size_t kBdaMemoSlots = 4096;
+ObtainMemoEntry  g_bda_memo[kBdaMemoSlots]; // GPU thread
+void BdaMemoNote(bool bad) {
+	static uint64_t compared = 0, wrong = 0;
+	compared++;
+	if (bad && ++wrong <= 8u) std::fprintf(stderr, "CHECK_BDA_MEMO bad (compare %llu)\n", static_cast<unsigned long long>(compared));
+	if ((compared & 0xfffffu) == 0u) {
+		std::fprintf(stderr, "PERF bda_memo_check compared=%llu bad=%llu\n", static_cast<unsigned long long>(compared),
+		             static_cast<unsigned long long>(wrong));
+	}
+}
+} // namespace
+
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRangePath(uint64_t vaddr, uint64_t size, bool is_written, BufferId id) {
 	if (m_scheduler.Current().IsInvalid() || !GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: BDA range request requires a recording command buffer\n");
+	}
+	const bool bda_memo = !is_written && BdaMemoOn() && GuestGpu::IsGpuThread();
+	ObtainMemoEntry* memo_slot = nullptr;
+	const ObtainMemoEntry* memo_hit = nullptr;
+	if (bda_memo) {
+		memo_slot = &g_bda_memo[ObtainMemoIndex(vaddr, size) & (kBdaMemoSlots - 1u)];
+		const auto& e = *memo_slot;
+		bool        ok = e.regions != 0 && e.vaddr == vaddr && e.size == size &&
+		          e.buffer_epoch == DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
+		if (ok) {
+			auto* table = g_cpu_dirty_region_epochs.load(std::memory_order_acquire);
+			for (uint32_t i = 0; i < e.regions && ok; i++) ok = table[e.region + i].load(std::memory_order_acquire) == e.epochs[i];
+		}
+		if (ok && m_slot_buffers[e.id].IsInBounds(vaddr, size)) {
+			memo_hit = memo_slot;
+			if (!BdaMemoCheck()) {
+				auto& buffer = m_slot_buffers[e.id];
+				TouchBuffer(buffer);
+				return {&buffer, buffer.Offset(vaddr)};
+			}
+		}
 	}
 	if (IsBufferInvalid(id) || !m_slot_buffers[id].IsInBounds(vaddr, size)) {
 		id = FindBuffer(vaddr, size);
@@ -3817,6 +3870,21 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBdaRangePath(uint64_t vaddr, uin
 	if (is_written) {
 		const RingCensus::BdaRangeScope census_kind; // KYTY_TRACE_RING_CENSUS: the writer is a device-address range
 		NoteObtainedWrite(vaddr, size);
+	}
+	if (memo_hit != nullptr) BdaMemoNote(memo_hit->id != id || memo_hit->vaddr != vaddr); // =2: the hit's buffer is today's
+	if (bda_memo) {
+		// Kept: the range left CPU-clean (epochs read after the sync, so a mark during it makes the entry stale at once).
+		ObtainMemoEntry fresh;
+		if (ObtainMemoRegions(vaddr, size, fresh.region, fresh.regions, fresh.epochs) &&
+		    !m_memory_tracker.IsRegionCpuModified(vaddr, size)) {
+			fresh.vaddr        = vaddr;
+			fresh.size         = size;
+			fresh.buffer_epoch = DrawRepeat::g_buffer_registry_epoch.load(std::memory_order_acquire);
+			fresh.id           = id;
+			*memo_slot         = fresh;
+		} else {
+			memo_slot->regions = 0;
+		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
