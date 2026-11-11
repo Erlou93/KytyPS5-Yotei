@@ -15,6 +15,7 @@
 // clang-format off
 #include <psapi.h>
 #include <pdh.h>
+#include <pdhmsg.h>
 // clang-format on
 #include <string>
 #include <vector>
