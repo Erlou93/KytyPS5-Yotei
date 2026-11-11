@@ -112,7 +112,7 @@ public:
 	// Controller preferences always come from the global configuration.
 	ControllerSettings controller;
 
-	Resolution             screen_resolution           = Resolution::R1280X720;
+	Resolution             screen_resolution           = Resolution::R1920X1080; // v0.1.6: 1080p by default (the game renders at 1080p; a 720p window only blurs it)
 	QString                user_name                   = "Kyty";
 	int                    user_id                     = Config::DEFAULT_USER_ID;
 	QString                audio_input_device;
