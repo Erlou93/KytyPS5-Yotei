@@ -4,6 +4,8 @@
 #include "graphics/host_gpu/renderer/drawCoverage.h"
 
 #include "common/assert.h"
+
+#include <chrono>
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -256,6 +258,23 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 
 void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
                     std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer) {
+	// KYTY_TRACE_TARGET_REPEAT (diagnostic): this call's time and barrier, by the draw phase it runs in
+	struct TraceScope {
+		bool                                  on = TargetTrace::On();
+		std::chrono::steady_clock::time_point start;
+		bool                                  barrier = false;
+		TraceScope() {
+			if (on) start = std::chrono::steady_clock::now();
+		}
+		~TraceScope() {
+			if (!on) return;
+			const int p = TargetTrace::t_phase;
+			TargetTrace::t_calls[p]++;
+			TargetTrace::t_ns[p] += static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+			if (barrier) TargetTrace::t_barriers[p]++;
+		}
+	} trace_scope;
 	const auto transfer_access =
 	    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite;
 	vk::PipelineStageFlags2 destination_stage {};
@@ -272,6 +291,7 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	if (barriers.empty()) {
 		return;
 	}
+	trace_scope.barrier = true;
 	DrawCoverage::t_barriers++; // KYTY_TRACE_PEEK_CENSUS (way B W0 Table B)
 	m_scheduler.EndRendering();
 	vk::DependencyInfo dependency {};

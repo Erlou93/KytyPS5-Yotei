@@ -872,6 +872,16 @@ static bool On() {
 	}();
 	return on;
 }
+// The target search before the draw (PrepareDrawRenderState): its time and whether the target memo answered.
+static uint64_t g_search_draws = 0, g_search_hits = 0, g_search_ns = 0, g_search_hit_ns = 0;
+static void NoteSearch(uint64_t ns, bool hit) {
+	g_search_draws++;
+	g_search_ns += ns;
+	if (hit) {
+		g_search_hits++;
+		g_search_hit_ns += ns;
+	}
+}
 static void Note(const RenderState& state, uint64_t ns, uint64_t barriers) {
 	static RenderState prev {};
 	static bool        have_prev = false;
@@ -901,6 +911,17 @@ static void Note(const RenderState& state, uint64_t ns, uint64_t barriers) {
 	             frames, draws / frames, draws != 0 ? 100.0 * repeats / draws : 0.0, ns_all / 1e6 / frames,
 	             ns_repeat / 1e6 / frames, repeats != 0 ? static_cast<double>(ns_repeat) / repeats : 0.0,
 	             draws > repeats ? static_cast<double>(ns_all - ns_repeat) / (draws - repeats) : 0.0, barrier_draws / frames);
+	std::fprintf(stderr,
+	             "PERF target_search frames=%.0f searches/frame=%.0f memo_hit=%.1f%% ms/frame all=%.2f in_hits=%.2f\n", frames,
+	             g_search_draws / frames, g_search_draws != 0 ? 100.0 * g_search_hits / g_search_draws : 0.0,
+	             g_search_ns / 1e6 / frames, g_search_hit_ns / 1e6 / frames);
+	static const char* const phase_names[3] = {"other", "targets", "commit"};
+	for (int p = 0; p < 3; p++) {
+		std::fprintf(stderr, "PERF target_transit phase=%s calls/frame=%.0f barriers/frame=%.0f ms/frame=%.2f\n", phase_names[p],
+		             TargetTrace::t_calls[p] / frames, TargetTrace::t_barriers[p] / frames, TargetTrace::t_ns[p] / 1e6 / frames);
+		TargetTrace::t_calls[p] = TargetTrace::t_barriers[p] = TargetTrace::t_ns[p] = 0;
+	}
+	g_search_draws = g_search_hits = g_search_ns = g_search_hit_ns = 0;
 	draws = repeats = ns_all = ns_repeat = barrier_draws = 0;
 	window_frame = frame;
 	window_start = now;
@@ -1947,6 +1968,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
 	std::optional<DispatchSubTimer> census_targets(std::in_place, DispatchSub::DrawTargets); // KYTY_TRACE_DRAW_CENSUS
+	const auto tr_search_start = TargetRepeat::On() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	const bool c0_targets       = CleanDraws::On(); // KYTY_TRACE_CLEAN_DRAWS: the target search's time (step K1)
 	const auto c0_targets_start = c0_targets ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	// The previous draw's targets when its search would find them again.
@@ -2089,6 +2111,12 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		C1::Report(memo);
 	}
 	census_targets.reset();
+	if (TargetRepeat::On()) {
+		TargetRepeat::NoteSearch(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                                   std::chrono::steady_clock::now() - tr_search_start)
+		                                                   .count()),
+		                         hit);
+	}
 	if (c0_targets) {
 		CleanDraws::t_front_parts.targets_ns += static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - c0_targets_start).count());
@@ -3214,7 +3242,9 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 	const bool     target_repeat = TargetRepeat::On(); // KYTY_TRACE_TARGET_REPEAT
 	const auto     tr_start      = target_repeat ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	const uint64_t tr_barriers   = DrawCoverage::t_barriers;
+	TargetTrace::t_phase  = 1;
 	RenderState rendering = AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info, feedback_aspects, stages);
+	TargetTrace::t_phase  = 0;
 	if (target_repeat) {
 		TargetRepeat::Note(rendering,
 		                   static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -3251,7 +3281,9 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 		const DispatchSubTimer bind_census(DispatchSub::CBind); // KYTY_TRACE_DRAW_CENSUS
 		const CommitTargets    commit_targets {state.color_info, state.color_count, &state.depth_info}; // K5
 		m_commit_targets = &commit_targets;
+		TargetTrace::t_phase = 2; // KYTY_TRACE_TARGET_REPEAT
 		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+		TargetTrace::t_phase = 0;
 		m_commit_targets    = nullptr;
 	}
 	// The ObjPrimID write: this draw's VGT_OBJECT_ID, after CommitBindings (which pushes the whole block). The
