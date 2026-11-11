@@ -32,6 +32,22 @@ inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 // KYTY_TRACE_PERF: the allocator's vkAllocateMemory / vkFreeMemory calls since the last call (counts, MiB, ms).
 [[nodiscard]] std::string TakeDeviceMemoryCallStats();
 
+// Texture relocation's stale-view guard (textureMove.cpp, 11.11, diagnostic for the square shadows of issue #11; on by
+// default, KYTY_TEXMOVE_GUARD=0 off): a moved texture's old views and image stay alive for 10 s after the swap, and every
+// point where a view or image enters GPU work (the dispatcher's descriptor writes, update templates, push descriptors,
+// barriers, rendering attachments, copies, clears, view creation, the bindless slot writer) looks them up there; a use
+// is a TEXMOVE_STALE_USE line (who used it, which texture, when it moved). Only a log line: the work goes on unchanged.
+// g_texmove_watch is true only while such handles exist (one relaxed load per call otherwise).
+inline std::atomic<bool> g_texmove_watch {false};
+void TexMoveStaleCheck(uint64_t handle, const char* path);
+template <typename Handle>
+inline void TexMoveCheck(Handle handle, const char* path) {
+	if (g_texmove_watch.load(std::memory_order_relaxed) && handle != VK_NULL_HANDLE)
+		TexMoveStaleCheck(reinterpret_cast<uint64_t>(handle), path);
+}
+// Wraps the dispatcher functions above; after CommandRecorder::Install, so the wrappers see the renderer's calls first.
+void TexMoveInstallGuard();
+
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;
 	vk::DebugUtilsMessengerEXT         debug_messenger                       = nullptr;

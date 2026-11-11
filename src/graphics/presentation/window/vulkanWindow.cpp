@@ -1378,6 +1378,7 @@ void WindowContext::CreateVulkan() {
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
 	// After the other dispatcher wrappers, so it calls them.
 	CommandRecorder::Install();
+	TexMoveInstallGuard(); // texture relocation's stale-view guard: wraps the recorder's hooks
 	graphic_ctx.device.getQueue(graphic_ctx.queue_family, 0, &graphic_ctx.queue);
 	EXIT_IF(graphic_ctx.queue == nullptr);
 
