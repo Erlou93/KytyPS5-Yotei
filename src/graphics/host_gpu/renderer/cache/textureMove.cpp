@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/pipeline/bindlessTable.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -170,7 +171,28 @@ std::shared_mutex                         g_retired_mutex;
 std::unordered_map<uint64_t, RetiredInfo> g_retired;         // old view and image handles
 std::vector<RetiredBatch>                 g_retired_batches; // GPU thread
 std::atomic<uint64_t>                     g_guard_frame {0};
-std::atomic<uint64_t>                     g_stale_uses {0}, g_stale_checked {0};
+std::atomic<uint64_t>                     g_stale_uses {0}, g_stale_checked {0}; // checked: filter hits looked up
+// A filter over the retired handles (one bit per hash, 64 Ki bits): the hot path reads one word and takes the lock only
+// on a hit (11.11: a lock and a shared counter per handle cost ~5% fps while batches moved every few seconds). Bits are
+// set under the unique lock; an expiry rebuilds the words from the handles that stay (a word never loses the bit of a
+// handle still retired, so a stale use is never missed).
+constexpr uint32_t                                    FilterBits = 1u << 16u;
+std::array<std::atomic<uint64_t>, FilterBits / 64u>   g_filter {};
+uint32_t FilterIndex(uint64_t handle) {
+	return static_cast<uint32_t>((handle * 0x9E3779B97F4A7C15ull) >> 48u);
+}
+void FilterSet(uint64_t handle) {
+	const uint32_t i = FilterIndex(handle);
+	g_filter[i >> 6u].fetch_or(uint64_t {1} << (i & 63u), std::memory_order_relaxed);
+}
+void FilterRebuild() { // under the unique lock
+	std::array<uint64_t, FilterBits / 64u> words {};
+	for (const auto& [handle, info]: g_retired) {
+		const uint32_t i = FilterIndex(handle);
+		words[i >> 6u] |= uint64_t {1} << (i & 63u);
+	}
+	for (size_t w = 0; w < words.size(); w++) g_filter[w].store(words[w], std::memory_order_relaxed);
+}
 // The image entries of every descriptor update template (their data holds VkDescriptorImageInfo at offset + n * stride).
 std::mutex                                                                  g_template_mutex;
 std::unordered_map<uint64_t, std::vector<VkDescriptorUpdateTemplateEntry>> g_templates;
@@ -350,6 +372,7 @@ void ExpireRetired(GraphicContext& graphics, uint64_t now, bool all) {
 			for (const auto view: batch.views) g_retired.erase(reinterpret_cast<uint64_t>(static_cast<VkImageView>(view)));
 			for (const auto& image: batch.images)
 				g_retired.erase(reinterpret_cast<uint64_t>(static_cast<VkImage>(image->image)));
+			FilterRebuild();
 			g_texmove_watch.store(!g_retired.empty(), std::memory_order_relaxed);
 		}
 		for (const auto view: batch.views) graphics.device.destroyImageView(view, nullptr);
@@ -375,6 +398,8 @@ void ExpireRetired(GraphicContext& graphics, uint64_t now, bool all) {
 } // namespace
 
 void TexMoveStaleCheck(uint64_t handle, const char* path) {
+	const uint32_t index = FilterIndex(handle);
+	if ((g_filter[index >> 6u].load(std::memory_order_relaxed) & (uint64_t {1} << (index & 63u))) == 0) return;
 	g_stale_checked.fetch_add(1, std::memory_order_relaxed);
 	RetiredInfo info;
 	{
@@ -823,7 +848,10 @@ void TextureCache::RunTextureMove(BindlessTable& table) {
 		RetiredBatch batch {now + RetireMs, frame, std::move(old_views), std::move(destroy)};
 		{
 			std::unique_lock lock(g_retired_mutex);
-			for (const auto& [handle, info]: retired) g_retired[handle] = info;
+			for (const auto& [handle, info]: retired) {
+				g_retired[handle] = info;
+				FilterSet(handle);
+			}
 			g_texmove_watch.store(!g_retired.empty(), std::memory_order_relaxed);
 		}
 		// KYTY_TEXMOVE_SELFTEST=1 (positive control of the guard): one legal use of a retired image (a barrier that
