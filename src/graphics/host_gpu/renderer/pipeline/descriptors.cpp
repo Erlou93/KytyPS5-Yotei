@@ -5125,31 +5125,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			}
 			stream.Commit();
 		}
-		if (!std::ranges::is_sorted(m_gpu_word_addresses)) {
-			// Batch 4 (11.11 night): words that all lie within 260 bytes inside one 64 KiB block form one run in any order
-			// (every sorted gap is at most 260): no sort - the same range, the same host address per word; only the order of
-			// the patches (each writes its own slot) changes. Not with a verified word or the GPU-word key (order-dependent).
-			uint64_t lo = UINT64_MAX, hi = 0;
-			bool     plain = !gw_key;
-			for (const auto& [address, index]: m_gpu_word_addresses) {
-				lo = std::min(lo, address);
-				hi = std::max(hi, address);
-				plain = plain && words[index].verify == UINT32_MAX;
-			}
-			if (!(plain && hi - lo <= 260u && (lo >> 16u) == (hi >> 16u))) {
-				std::ranges::sort(m_gpu_word_addresses); // usually in order
-			} else {
-				const auto [buffer, offset]     = cache.ObtainBdaRange(lo, hi + sizeof(uint32_t) - lo, false);
-				const vk::DeviceAddress device = buffer->BufferDeviceAddress() + offset;
-				for (const auto& [address, index]: m_gpu_word_addresses) {
-					const auto& word = words[index];
-					const auto  host = device + (address - lo);
-					m_gpu_word_patches.emplace_back(word.slot, static_cast<uint32_t>(host));
-					m_gpu_word_patches.emplace_back(word.hi, static_cast<uint32_t>(host >> 32u));
-				}
-				m_gpu_word_addresses.clear(); // done: the run loop below has nothing left
-			}
-		}
+		if (!std::ranges::is_sorted(m_gpu_word_addresses)) std::ranges::sort(m_gpu_word_addresses); // usually in order
 		for (size_t first = 0; first < m_gpu_word_addresses.size();) {
 			// One range per run of words no more than 256 bytes apart inside one 64 KiB block.
 			const uint64_t start = m_gpu_word_addresses[first].first;
@@ -5267,24 +5243,6 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		if (DescriptorTrace::SrtDumpOn()) DescriptorTrace::SrtDump(program.shader_hash, snapshot.flattened_srt);
 		if (prepared.bindless_patches.empty() && m_gpu_word_patches.empty()) {
 			upload_srt(snapshot.flattened_srt);
-		} else if (srt_uniform) {
-			// Batch 4 (11.11 night): a uniform SRT is padded and patched in one cached copy (m_uniform_words) and sent once,
-			// instead of a patched copy, a padded copy and the send. Same bytes (the padding is past every patch: a patch at
-			// offset + 1 < size, a GPU word inside the words), same views.
-			const auto& flat = snapshot.flattened_srt;
-			m_uniform_words.assign(flat.begin(), flat.end());
-			m_uniform_words.resize((flat.size() + 3u) & ~size_t {3}, 0u);
-			for (const auto& patch: prepared.bindless_patches) {
-				if (static_cast<size_t>(patch.offset) + 1u < flat.size()) {
-					m_uniform_words[patch.offset]      = patch.region;
-					m_uniform_words[patch.offset + 1u] = patch.entries;
-				}
-			}
-			for (const auto& [index, value]: m_gpu_word_patches) m_uniform_words[index] = value; // KYTY_PERF_SRT_GPU_WORDS
-			const auto view = NativeUpload(m_context, m_uniform_words);
-			prepared.flattened_srt         = {view.buffer, view.offset, flat.size() * sizeof(uint32_t)};
-			prepared.flattened_srt_uniform = {view.buffer, view.offset,
-			                                  std::min<vk::DeviceSize>(view.range, ShaderRecompiler::IR::UniformBufferMaxBytes)};
 		} else {
 			m_bindless_srt.assign(snapshot.flattened_srt.begin(), snapshot.flattened_srt.end());
 			for (const auto& patch: prepared.bindless_patches) {

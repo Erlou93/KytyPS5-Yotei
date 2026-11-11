@@ -3341,9 +3341,9 @@ PlanBuffer* PlanBufferFind(uint64_t vaddr, uint64_t size, bool texel, bool bda) 
 	if (g_plan_buffers == nullptr) return nullptr;
 	auto&        entries = *g_plan_buffers;
 	const size_t n       = entries.size();
-	size_t i = n != 0 ? g_plan_cursor % n : 0; // batch 4: the same order as (cursor + k) % n, one divide per search
-	for (size_t k = 0; k < n; k++, i = i + 1 == n ? 0 : i + 1) {
-		auto& entry = entries[i];
+	for (size_t k = 0; k < n; k++) {
+		const size_t i     = (g_plan_cursor + k) % n;
+		auto&        entry = entries[i];
 		if (!entry.used && entry.vaddr == vaddr && entry.size == size && entry.texel == texel && entry.bda == bda) {
 			g_plan_cursor = i + 1;
 			return &entry;
@@ -3378,9 +3378,9 @@ PlanBuffer* BufferCache::PlanStageEntry(const void* program, uint32_t resource) 
 	if (g_plan_buffers == nullptr) return nullptr;
 	auto&        entries = *g_plan_buffers;
 	const size_t n       = entries.size();
-	size_t i = n != 0 ? g_plan_cursor % n : 0; // batch 4: the same order as (cursor + k) % n, one divide per search
-	for (size_t k = 0; k < n; k++, i = i + 1 == n ? 0 : i + 1) {
-		auto& entry = entries[i];
+	for (size_t k = 0; k < n; k++) {
+		const size_t i     = (g_plan_cursor + k) % n;
+		auto&        entry = entries[i];
 		if (!entry.used && entry.kind == 0 && entry.program == program && entry.resource == resource) {
 			g_plan_cursor = i + 1;
 			return &entry;
