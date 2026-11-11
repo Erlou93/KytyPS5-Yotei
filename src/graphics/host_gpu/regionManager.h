@@ -53,12 +53,6 @@
 
 namespace Libs::Graphics {
 
-// Page-proof epoch (11.11, topic "reads from the card"): bumped whenever a page may stop being provably plain for the GPU
-// thread's readers - a page turns GPU-modified (ChangeState<Gpu, true>), a direct-range GPU write or an eager readback is
-// listed, guest memory is unmapped. kernel/memory.cpp keeps its page cache of proven pages across calls while it holds.
-inline std::atomic<uint64_t> g_page_proof_epoch {0};
-
-
 inline void SpinPause() noexcept {
 #if defined(_M_X64) || defined(__x86_64__)
 	_mm_pause();
@@ -481,7 +475,6 @@ public:
 			if (RegionBits(m_cpu_dirty, start, end).Any()) {
 				EXIT("GPU dirty state conflicts with CPU dirty state\n");
 			}
-			g_page_proof_epoch.fetch_add(1, std::memory_order_release); // a page may turn GPU-modified (kernel/memory.cpp)
 		}
 		auto& bits = GetBits<source>();
 		if constexpr (enable) {

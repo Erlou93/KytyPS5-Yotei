@@ -131,7 +131,6 @@ static uint64_t SteadyMicroseconds() {
 }
 
 static void NoteRecentUnmap(uint64_t vaddr, uint64_t size, UnmapCaller caller) {
-	Graphics::g_page_proof_epoch.fetch_add(1, std::memory_order_release); // the page cache of proven pages
 	std::scoped_lock lock(g_recent_unmaps_mutex);
 	g_recent_unmaps[g_recent_unmaps_count++ % g_recent_unmaps.size()] = {
 	    vaddr, size, SteadyMicroseconds(), Graphics::DebugPresentCount().load(), static_cast<uint32_t>(caller)};
@@ -1487,12 +1486,10 @@ bool GuestBackingOffset(uint64_t vaddr, uint64_t size, uint64_t* offset) {
 // one. A pending eager readback would change what WaitPendingReadbacks does for a clean page, but only
 // the GPU thread queues them, and not inside the call.
 struct OrdinaryReadPageCache {
-	static constexpr size_t kSlots = 64;
+	static constexpr size_t kSlots = 8;
 	uint32_t                depth  = 0;
 	bool                    active = false;
-	uint64_t                epoch  = ~0ull; // KYTY_PERF_PAGE_PROOF_KEEP: g_page_proof_epoch when the pages were proven
-	uint64_t                pages[kSlots];
-	OrdinaryReadPageCache() { std::fill(std::begin(pages), std::end(pages), ~0ull); }
+	uint64_t                pages[kSlots] = {~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull};
 };
 
 static thread_local OrdinaryReadPageCache t_ordinary_read_pages;
@@ -1516,17 +1513,7 @@ static void SrtReadSession(bool begin) {
 		return;
 	}
 	++cache.depth;
-	// KYTY_PERF_PAGE_PROOF_KEEP=1 (test switch, 11.11): the proven pages stay across calls while g_page_proof_epoch holds
-	// (every source that could make a proven page unplain bumps it; the walker and the verifier still compare the bytes).
-	static const bool keep = [] {
-		const char* value = std::getenv("KYTY_PERF_PAGE_PROOF_KEEP");
-		return value != nullptr && value[0] == '1';
-	}();
-	const uint64_t epoch = Graphics::g_page_proof_epoch.load(std::memory_order_acquire);
-	if (!keep || cache.depth != 1u || cache.epoch != epoch) {
-		std::fill(std::begin(cache.pages), std::end(cache.pages), ~0ull);
-		cache.epoch = epoch;
-	}
+	std::fill(std::begin(cache.pages), std::end(cache.pages), ~0ull);
 	cache.active = g_gpu_resources != nullptr && Graphics::GuestGpu::IsGpuThread();
 }
 
@@ -1711,8 +1698,7 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 	if (g_gpu_resources == nullptr || g_guest_address_space == nullptr || !Graphics::GuestGpu::IsGpuThread()) {
 		return Result::NeedsReader;
 	}
-	uint64_t  local_pages[OrdinaryReadPageCache::kSlots];
-	if (!cache.active) std::fill(std::begin(local_pages), std::end(local_pages), ~0ull);
+	uint64_t  local_pages[OrdinaryReadPageCache::kSlots] = {~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull};
 	uint64_t* pages = cache.active ? cache.pages : local_pages;
 	auto&          buffers    = GetGpuResources().GetBufferCache();
 	const uint64_t byte_count = log.bytes.size();
