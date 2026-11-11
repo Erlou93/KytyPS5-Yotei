@@ -81,15 +81,10 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	// Buffers with a device address keep dedicated allocations. Upstream lets VMA suballocate them (d58aefde4, with
 	// 4644c5292 zeroing the BDA tables that suballocated memory no longer guarantees); not taken without a measurement
 	// (allocation count, BAR placement and the VRAM budget logic all see the change).
-	// KYTY_PERF_SMALL_BDA_SUBALLOC=<bytes> (test switch, hitch study 10.11): a device-address buffer up to that size is
-	// suballocated from VMA blocks. Tiny dedicated allocations (< 0.1 MiB, BAR memory) took 60-77 ms each in vkAllocateMemory
-	// a few times per walk (SLOW_ALLOC), each one a hitch.
-	static const uint64_t small_bda_suballoc = [] {
-		const char* value = std::getenv("KYTY_PERF_SMALL_BDA_SUBALLOC");
-		const auto  bytes = value != nullptr ? std::strtoull(value, nullptr, 10) : 0ull;
-		if (bytes != 0) std::fprintf(stderr, "PERF_SMALL_BDA_SUBALLOC up to %llu bytes\n", bytes);
-		return bytes;
-	}();
+	// A device-address buffer up to 64 MiB is suballocated from VMA blocks (11.11, camera cuts in the 2.002 intro: ~2 100
+	// buffers made and ~1 900 freed in one frame by the cache's joins, each a dedicated vkAllocateMemory / vkFreeMemory -
+	// 3.06 s frames; suballocated, the same work costs ~0.1 s; walk ABBA unchanged, fewer > 100 ms frames).
+	constexpr uint64_t small_bda_suballoc = 64ull << 20u;
 	const VmaAllocationCreateFlags bda_flag =
 	    with_bda && size > small_bda_suballoc ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0;
 	VmaAllocationCreateInfo allocation_info {};

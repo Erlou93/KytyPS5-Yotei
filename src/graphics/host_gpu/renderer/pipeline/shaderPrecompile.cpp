@@ -927,12 +927,14 @@ double MillisecondsSince(std::chrono::steady_clock::time_point begin) {
 
 // ---- the shader reuse ----
 
-// KYTY_PERF_SHADER_REUSE_MB (default 2048, 64..16384): what the store may hold.
+// KYTY_PERF_SHADER_REUSE_MB (default 4096, 64..16384): what the store may hold.
 size_t ReuseBudgetBytes() {
 	static const size_t budget = [] {
 		// Measured: 1024 dropped 906 results (39 of 100 ms or more) on the user's pipeline cache at the gate start;
 		// 2048: none dropped, peak 1282 MiB, saved 32.2 -> 33.6 s.
-		size_t      megabytes = 2048;
+		// 11.11: at 2048 the store was full (762 results not kept, 139 of them >= 100 ms) and the intro's camera cuts
+		// translated them on the GPU thread; 4096: none dropped, 2239 MiB held.
+		size_t      megabytes = 4096;
 		const char* value     = std::getenv("KYTY_PERF_SHADER_REUSE_MB");
 		if (value != nullptr && value[0] != '\0') {
 			megabytes = std::clamp<size_t>(std::strtoull(value, nullptr, 10), 64u, 16384u);
