@@ -662,6 +662,15 @@ void BufferCache::DeleteBuffer(BufferId id) {
 		return;
 	}
 	CommitUploadBatch(BatchCommit::DeleteBuffer); // claimed uploads may target this buffer
+	static const bool trace_delete = [] { // KYTY_TRACE_BUFFER_CREATE=1 (diagnostic): every deletion
+		const char* value = std::getenv("KYTY_TRACE_BUFFER_CREATE");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (trace_delete) {
+		const auto& gone = m_slot_buffers[id];
+		std::fprintf(stderr, "BUF_DELETE frame=%u addr=0x%llx size=0x%llx\n", DebugPresentCount().load(std::memory_order_relaxed),
+		             static_cast<unsigned long long>(gone.CpuAddress()), static_cast<unsigned long long>(gone.Size()));
+	}
 	Unregister(id);
 	if (m_scheduler.Active()) {
 		m_scheduler.DeferOperation([this, id] {
@@ -2393,6 +2402,24 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 	SetVulkanObjectNameF(m_graphics.device, buffer.Handle(),
 	                     "Kyty.GameBuffer[guest=0x{:016x} size=0x{:x}]", overlap.begin,
 	                     overlap.end - overlap.begin);
+	// KYTY_TRACE_BUFFER_CREATE=1 (diagnostic, 11.11: ~2 500 buffers made and ~2 100 freed in one frame at the intro's
+	// camera cut): every creation with the request, the joined span and what it joins.
+	static const bool trace_create = [] {
+		const char* value = std::getenv("KYTY_TRACE_BUFFER_CREATE");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (trace_create) {
+		uint64_t joined = 0, joined_bytes = 0;
+		for (auto it = overlap.first; it != overlap.last; ++it) {
+			joined++;
+			joined_bytes += m_slot_buffers[it->second].Size();
+		}
+		std::fprintf(stderr, "BUF_CREATE frame=%u req=0x%llx+0x%llx span=0x%llx+0x%llx joined=%llu joined_KiB=%llu leap=%d\n",
+		             DebugPresentCount().load(std::memory_order_relaxed), static_cast<unsigned long long>(vaddr),
+		             static_cast<unsigned long long>(size), static_cast<unsigned long long>(overlap.begin),
+		             static_cast<unsigned long long>(overlap.end - overlap.begin), static_cast<unsigned long long>(joined),
+		             static_cast<unsigned long long>(joined_bytes >> 10u), overlap.has_stream_leap ? 1 : 0);
+	}
 	for (auto it = overlap.first; it != overlap.last;) {
 		const auto old_id = (it++)->second;
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
