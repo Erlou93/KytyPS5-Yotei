@@ -1282,9 +1282,16 @@ void GuestGpu::ExecutionThread() {
 			} else if (kind == GpuOperationKind::DispatchDirect || kind == GpuOperationKind::DispatchIndirect) {
 				Common::SlowFrame::CountOne(Common::SlowFrame::Dispatches); // KYTY_TRACE_SLOW_FRAMES
 			}
+			// KYTY_TEST_GAMEPLAY_DRAWS (default 3000, 11.11): draws per frame that count as gameplay; the open world near
+			// the inn has ~2 200, so its anchor came only when the walk reached a busier view. Recording and replay must
+			// use the same value.
+			static const uint32_t gameplay_draws = [] {
+				const char* value = std::getenv("KYTY_TEST_GAMEPLAY_DRAWS");
+				return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 3000u;
+			}();
 			const uint32_t present = DebugPresentCount().load(std::memory_order_relaxed);
 			if (present != last_present) {
-				frames_in_row  = draws_in_frame > 3000u ? frames_in_row + 1u : 0u;
+				frames_in_row  = draws_in_frame > gameplay_draws ? frames_in_row + 1u : 0u;
 				draws_in_frame = 0;
 				last_present   = present;
 				if (frames_in_row == 8u && GameplayStartNs().load(std::memory_order_relaxed) == 0) {
